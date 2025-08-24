@@ -19,7 +19,7 @@ public:
 
 	static const std::string& Message(int index);
 
-	static void SetEnabled(bool enabled);
+	static void SetEnabled(bool isEnabled);
 };
 
-}; // namespace adp.
+}

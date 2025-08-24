@@ -1,6 +1,9 @@
 node_modules
 *.user
 .vscode
+.idea/
+adp-tool/lib/IXWebSocket/
+adp-tool/lib/mbedtls/
 
 adp-tool/imgui.ini
 adp-tool/build*

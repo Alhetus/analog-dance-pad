@@ -25,4 +25,4 @@ std::wstring widen(const char* str, size_t len);
 // Converts a string (UTF-8) to a wide string (UTF-16/UTF-32).
 std::wstring widen(const std::string str);
 
-}; // namespace adp.
+}

@@ -6,9 +6,6 @@
 
 #include <Model/Reporter.h>
 #include <Model/Log.h>
-#include <Model/Utils.h>
-#include <Model/DeviceServer.h>
-#include <Model/DeviceClient.h>
 
 using namespace std;
 
@@ -156,48 +153,20 @@ protected:
 // ====================================================================================================================
 
 Reporter::Reporter(hid_device* device)
-	// : backend(new BackendHid(device)), deviceServer(DeviceServerCreate(device))
 	: backend(new BackendHid(device))
 {
-	
 }
-
-#ifdef DEVICE_CLIENT_ENABLED
-Reporter::Reporter(std::string url)
-	:backend(ReporterBackendWsCreate(url))
-{
-
-}
-#endif
 
 Reporter::Reporter()
 {
-	emulator = false;
 }
 
 Reporter::~Reporter()
 {
-	
 }
-
-#ifdef DEVICE_SERVER_ENABLED
-bool Reporter::ServerStart()
-{
-	if (deviceServer)
-		return false;
-
-	deviceServer.reset(DeviceServerCreate(*backend));
-
-	return true;
-}
-#endif
 
 ReadDataResult Reporter::Get(SensorValuesReport& report, int numSensors)
 {
-	if(emulator) {
-		return ReadDataResult::NO_DATA;
-	}
-
 	int expectedSize = sizeof(uint8_t) + sizeof(uint16_le) + (sizeof(uint16_le) * numSensors);
 	
 	return ReadData(report, "GetSensorValuesReport", expectedSize);
@@ -205,94 +174,46 @@ ReadDataResult Reporter::Get(SensorValuesReport& report, int numSensors)
 
 bool Reporter::Get(PadConfigurationReport& report)
 {
-	if(emulator) {
-		return true;
-	}
-
 	return GetFeatureReport(report, "GetPadConfigurationReport");
 }
 
 bool Reporter::Get(NameReport& report)
 {
-	if(emulator) {
-		const char* name = "ADP Emulator";
-		memcpy(&report.name, name, sizeof(name));
-		report.size = sizeof(name);
-		
-		return true;
-	}
-
 	return GetFeatureReport(report, "GetNameReport");
 }
 
 bool Reporter::Get(IdentificationReport& report)
 {
-	if(emulator) {
-		report.buttonCount = 12;
-		report.sensorCount = 12;
-		report.ledCount = 0;
-		
-		return true;
-	}
-
 	return GetFeatureReport(report, "GetIdentificationReport");
 }
 
 bool Reporter::Get(IdentificationV2Report& report)
 {
-	if (emulator) {
-		report.buttonCount = 12;
-		report.sensorCount = 12;
-		report.ledCount = 0;
-
-		return true;
-	}
-
 	return GetFeatureReport(report, "GetIdentificationV2Report");
 }
 
 bool Reporter::Get(LightRuleReport& report)
 {
-	if(emulator) {
-		return true;
-	}
-
 	return GetFeatureReport(report, "GetLightRuleReport");
 }
 
 bool Reporter::Get(LedMappingReport& report)
 {
-	if(emulator) {
-		return true;
-	}
-
 	return GetFeatureReport(report, "GetLedMappingReport");
 }
 
 bool Reporter::Get(SensorReport& report)
 {
-	if (emulator) {
-		return true;
-	}
-
 	return GetFeatureReport(report, "GetSensorReport");
 }
 
 bool Reporter::Get(DebugReport& report)
 {
-	if (emulator) {
-		return true;
-	}
-
 	return GetFeatureReport(report, "GetDebugReport");
 }
 
 bool Reporter::Get(SetPropertyReport& report)
 {
-	if (emulator) {
-		return true;
-	}
-
 	return GetFeatureReport(report, "SetPropertyReport");
 }
 
@@ -308,46 +229,26 @@ void Reporter::SendFactoryReset()
 
 bool Reporter::SendSaveConfiguration()
 {
-	if(emulator) {
-		return true;
-	}
-
 	return WriteData(REPORT_SAVE_CONFIGURATION, "SendSaveConfigurationReport", true);
 }
 
 bool Reporter::Send(const PadConfigurationReport& report)
 {
-	if(emulator) {
-		return true;
-	}
-
 	return SendFeatureReport(report, "SendPadConfigurationReport");
 }
 
 bool Reporter::Send(const NameReport& report)
 {
-	if(emulator) {
-		return true;
-	}
-
 	return SendFeatureReport(report, "SendNameReport");
 }
 
 bool Reporter::Send(const LightRuleReport& report)
 {
-	if(emulator) {
-		return true;
-	}
-
 	return SendFeatureReport(report, "SendLightRuleReport");
 }
 
 bool Reporter::Send(const LedMappingReport& report)
 {
-	if(emulator) {
-		return true;
-	}
-	
 	return SendFeatureReport(report, "SendLedMappingReport");
 }
 
@@ -358,10 +259,6 @@ bool Reporter::Send(const SensorReport& report)
 
 bool Reporter::Send(const SetPropertyReport& report)
 {
-	if(emulator) {
-		return true;
-	}
-	
 	return SendFeatureReport(report, "SendSetPropertyReport");
 }
 
@@ -408,4 +305,4 @@ bool Reporter::SendAndGet(SetPropertyReport& report)
 	return true;
 }
 
-}; // namespace adp.
+}

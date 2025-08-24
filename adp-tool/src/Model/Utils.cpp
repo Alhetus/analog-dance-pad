@@ -152,4 +152,4 @@ std::wstring widen(const std::string str)
 	return widen(str.data(), str.length());
 }
 
-}; // namespace adp.
+}

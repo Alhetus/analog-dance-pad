@@ -21,9 +21,9 @@ void Log::Init()
 	messages = new vector<string>();
 }
 
-void Log::SetEnabled(bool enabled)
+void Log::SetEnabled(bool isEnabled)
 {
-	enabled = enabled;
+	enabled = isEnabled;
 }
 
 void Log::Shutdown()
@@ -78,4 +78,4 @@ const string& Log::Message(int index)
 	return messages->at(index);
 }
 
-}; // namespace adp.
+}

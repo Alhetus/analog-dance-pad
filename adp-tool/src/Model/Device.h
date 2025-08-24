@@ -9,7 +9,6 @@ using json = nlohmann::json;
 
 #include <Model/Firmware.h>
 #include <Model/Reporter.h>
-#include <Model/Updater.h>
 
 namespace adp {
 
@@ -60,6 +59,27 @@ struct SensorState
 	SensorReport ToReport(int index);
 };
 
+struct VersionType
+{
+	uint16_t major;
+	uint16_t minor;
+
+	bool IsNewer(VersionType then)
+	{
+		if (major > then.major) {
+			return true;
+		}
+
+		if (major == then.major && minor > then.minor) {
+			return true;
+		}
+
+		return false;
+	}
+};
+
+static const VersionType versionTypeUnknown = { 0, 0 };
+
 struct PadState
 {
 	std::string name;
@@ -102,10 +122,6 @@ struct LightsState
 class Device
 {
 public:
-	#ifdef DEVICE_CLIENT_ENABLED
-	static bool Connect(std::string url);
-	#endif
-	
 	static void Init();
 
 	static void Shutdown();
@@ -164,11 +180,7 @@ public:
 
 	static void SaveProfile(json& j, DeviceProfileGroups groups);
 
-#ifdef DEVICE_SERVER_ENABLED
-	static void ServerStart();
-#endif
-
 	static void SetSearching(bool s);
 };
 
-}; // namespace adp.
+}

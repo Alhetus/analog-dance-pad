@@ -3,7 +3,6 @@
 #include "stdint.h"
 #include "hidapi.h"
 #include <memory>
-#include <string>
 
 // Potentially defined by WinSock2.h
 #ifdef NO_DATA
@@ -177,8 +176,6 @@ struct DebugReport
 
 #pragma pack()
 
-class DeviceServer;
-
 class ReporterBackend
 {
 public:
@@ -193,15 +190,8 @@ class Reporter
 {
 public:
 	Reporter(hid_device* device);
-	#ifdef DEVICE_CLIENT_ENABLED
-	Reporter(std::string url);
-	#endif
 	Reporter();
 	~Reporter();
-
-#ifdef DEVICE_SERVER_ENABLED
-	bool ServerStart();
-#endif
 
 	ReadDataResult Get(SensorValuesReport& report, int numSensors);
 	bool Get(PadConfigurationReport& report);
@@ -230,11 +220,7 @@ public:
 	bool SendAndGet(SetPropertyReport& report);
 
 private:
-	// hid_device* myHid;
-	bool emulator = false;
 	std::unique_ptr<ReporterBackend> backend;
-	std::unique_ptr<DeviceServer> deviceServer;
-
 
 	template <typename T>
 	bool GetFeatureReport(T& report, const char* name);
@@ -246,8 +232,6 @@ private:
 	ReadDataResult ReadData(T& report, const char* name, int expectedSize);
 
 	bool WriteData(uint8_t reportId, const char* name, bool performErrorCheck);
-
-
 };
 
-}; // namespace adp.
+}

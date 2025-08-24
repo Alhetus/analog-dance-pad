@@ -14,7 +14,6 @@
 #include <Model/Log.h>
 #include <Model/Utils.h>
 #include <Model/Firmware.h>
-#include <Model/Updater.h>
 
 using namespace std;
 using namespace chrono;
@@ -731,13 +730,6 @@ public:
         myChanges |= type;
 	}
 
-#ifdef DEVICE_SERVER_ENABLED
-	void ServerStart()
-	{
-		myReporter->ServerStart();
-	}
-#endif
-
 private:
 	bool running = false;
 	std::thread sensorThread;
@@ -796,28 +788,22 @@ public:
 
 		std::this_thread::sleep_for(std::chrono::milliseconds(5));
 
-		if (!IsWs())
+		hidHandle = hid_open_path(path.c_str());
+		if (!hidHandle)
 		{
-			hidHandle = hid_open_path(path.c_str());
-			if (!hidHandle)
-			{
-				Log::Writef("DeviceConnection :: hid_open failed (%ls) :: %s", hid_error(nullptr), path.c_str());
-				state = CS_FAILED;
-				return false;
-			}
-
-			if (hid_set_nonblocking(hidHandle, 1) < 0)
-			{
-				Log::Write("ConnectionManager :: hid_set_nonblocking failed");
-				state = CS_FAILED;
-				return false;
-			}
-
-			reporter = make_unique<Reporter>(hidHandle);
+			Log::Writef("DeviceConnection :: hid_open failed (%ls) :: %s", hid_error(nullptr), path.c_str());
+			state = CS_FAILED;
+			return false;
 		}
-		else {
-			reporter = make_unique<Reporter>(path);
+
+		if (hid_set_nonblocking(hidHandle, 1) < 0)
+		{
+			Log::Write("ConnectionManager :: hid_set_nonblocking failed");
+			state = CS_FAILED;
+			return false;
 		}
+
+		reporter = make_unique<Reporter>(hidHandle);
 
 		if(!reporter->Get(nameReport))
 		{
@@ -865,11 +851,6 @@ public:
 		reporter.reset();
 	}
 
-	bool IsWs()
-	{
-		return path.substr(0, 2).compare("ws") == 0;
-	}
-
 	bool ConnectStage2();
 
 protected:
@@ -901,9 +882,6 @@ public:
 			for (auto dev = foundDevices; dev; dev = dev->next)
 			{
 				devicePaths.push_back(dev->path);
-				// if(!newDevice->Probe())
-				// 	continue;
-				// out.push_back(newDevice);
 			}
 		}
 	}
@@ -920,9 +898,6 @@ public:
 			{
 				if(myConnectedDevice && myConnectedDevice->Path() == it->first)
 					myConnectedDevice.reset();
-
-				if (it->second.IsWs() && it->second.GetState() != CS_FAILED)
-					continue;
 
 				Log::Writef("ConnectionManager :: device removed (%hs)", it->second.GetName().c_str());
 				it = devices.erase(it);
@@ -1014,6 +989,7 @@ public:
 
 			LightRuleReport lightReport;
 			selectReport.propertyId = WriteU32LE(SetPropertyReport::SELECTED_LIGHT_RULE_INDEX);
+
 			for (int i = 0; i < MAX_LIGHT_RULES; ++i)
 			{
 				selectReport.propertyValue = WriteU32LE(i);
@@ -1032,6 +1008,7 @@ public:
 
 			LedMappingReport ledReport;
 			selectReport.propertyId = WriteU32LE(SetPropertyReport::SELECTED_LED_MAPPING_INDEX);
+
 			for (int i = 0; i < MAX_LED_MAPPINGS; ++i)
 			{
 				selectReport.propertyValue = WriteU32LE(i);
@@ -1050,6 +1027,7 @@ public:
 		}
 
 		SensorReport sensorReport;
+
 		if (padVersion.IsNewer({ 1, 2 })) {
 			SetPropertyReport selectReport;
 			selectReport.propertyId = WriteU32LE(SetPropertyReport::SELECTED_SENSOR_INDEX);
@@ -1102,23 +1080,8 @@ public:
 		Log::Writef("  Name: %s", device->State().name.c_str());
 		Log::Writef("  Board: %s: %s", padIdentificationV2.boardType, boardType.c_str());
 		Log::Writef("  Firmware version: v%u.%u", ReadU16LE(padIdentificationV2.firmwareMajor), ReadU16LE(padIdentificationV2.firmwareMinor));
-		Log::Writef("  Feautre flags: %s", fmt::format("{:b}", ReadU16LE(padIdentificationV2.features)).c_str());
+		Log::Writef("  Feature flags: %s", fmt::format("{:b}", ReadU16LE(padIdentificationV2.features)).c_str());
 		Log::Writef("  Path: %s", devicePath.c_str());
-		
-		/*
-		if(deviceInfo != NULL) {
-			Log::Writef("  Product: %ls", deviceInfo->product_string);
-			#ifndef __EMSCRIPTEN__
-			Log::Writef("  Manufacturer: %ls", deviceInfo->manufacturer_string);
-
-			Log::Writef("  Path: %s", deviceInfo->path);
-			#endif
-
-		}
-		else {
-			Log::Writef("  Product: Dummy");
-		}
-		*/
 
 		Log::Write("]");
 
@@ -1266,25 +1229,9 @@ bool DeviceConnection::ConnectStage2()
 void Device::Init()
 {
 	hid_init();
-	/*
-	hid_read_register([](uint8_t reportId, std::vector<uint8_t> data)
-	{
-		adp::Log::Write("Data gott");
-	});
-	*/
 
 	connectionManager = new ConnectionManager();
-
-	// searching = true;
 }
-
-#ifdef DEVICE_SERVER_ENABLED
-void Device::ServerStart()
-{
-	auto device = connectionManager->ConnectedDevice();
-	if (device) device->ServerStart();
-}
-#endif
 
 void Device::Shutdown()
 {
@@ -1480,13 +1427,6 @@ int Device::DeviceSelected()
 	return connectionManager->DeviceSelected();
 }
 
-#ifdef DEVICE_CLIENT_ENABLED
-bool Device::Connect(std::string url)
-{
-	return connectionManager->ConnectToUrl(url);
-}
-#endif
-
 
 void Device::LoadProfile(json& j, DeviceProfileGroups groups)
 {
@@ -1628,4 +1568,4 @@ void Device::SaveProfile(json& j, DeviceProfileGroups groups)
 	}
 }
 
-}; // namespace adp.
+}

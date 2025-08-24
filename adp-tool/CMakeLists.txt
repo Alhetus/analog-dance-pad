@@ -11,24 +11,13 @@ endif()
 
 include("${CMAKE_CURRENT_SOURCE_DIR}/vcpkg/scripts/buildsystems/vcpkg.cmake")
 
-if(EMSCRIPTEN)
-	set(CMAKE_EXECUTABLE_SUFFIX ".html")
-
-	set(EM_FLAGS " -lwebsocket.js -O3 -lhtml5.js -lhtml5 -sAUTO_NATIVE_LIBRARIES -pthread -sSHARED_MEMORY=1 -s USE_PTHREADS=1 -s PTHREAD_POOL_SIZE=2 -s ALLOW_MEMORY_GROWTH -s ASYNCIFY=1 -s FULL_ES3=1 -s USE_WEBGL2=1 -s USE_GLFW=3 -s NO_DISABLE_EXCEPTION_CATCHING=1 -s DYNAMIC_EXECUTION=0 -s AUTO_JS_LIBRARIES=0 -s AUTO_NATIVE_LIBRARIES=0 --bind -s WASM=1 -s EXPORTED_RUNTIME_METHODS=['callMain']")
-	 #set(EM_FLAGS "-lwebsocket.js -g -s ALLOW_MEMORY_GROWTH -s DEMANGLE_SUPPORT=1 -s ASYNCIFY=1 -s FULL_ES3=1 -s USE_WEBGL2=1 -s USE_GLFW=3 -s NO_DISABLE_EXCEPTION_CATCHING=1 -s DYNAMIC_EXECUTION=0 -s AUTO_JS_LIBRARIES=0 -s AUTO_NATIVE_LIBRARIES=0 --bind -s WASM=1 -s EXPORTED_RUNTIME_METHODS=['callMain']")
-	# set(EM_FLAGS "-g -s ALLOW_MEMORY_GROWTH -s DEMANGLE_SUPPORT=1 -s ASYNCIFY=1 -s FULL_ES3=1 -s USE_WEBGL2=1 -s USE_GLFW=3 -s NO_DISABLE_EXCEPTION_CATCHING=1 -s DYNAMIC_EXECUTION=0 -s AUTO_JS_LIBRARIES=0 --bind -s WASM=1 -s EXPORTED_RUNTIME_METHODS=['callMain']")
-
-	add_compile_options(-g -pthread)
-else()
-	find_package(unofficial-nativefiledialog REQUIRED)
-	find_package(libzippp REQUIRED)
-endif()
+find_package(unofficial-nativefiledialog REQUIRED)
+find_package(libzippp REQUIRED)
 
 
 add_subdirectory(lib)
 
 find_package(fmt REQUIRED)
-find_package(imgui REQUIRED)
 find_package(nlohmann_json REQUIRED)
 find_package(Stb REQUIRED)
 find_package(argparse REQUIRED)
@@ -59,13 +48,9 @@ set(GLOBAL_LIBS
 	esp_serial
 )
 
-if(NOT EMSCRIPTEN)
-	list(APPEND GLOBAL_LIBS avrdude serial libzippp::libzippp)
-endif()
+list(APPEND GLOBAL_LIBS avrdude serial libzippp::libzippp)
 
-if(EMSCRIPTEN)
-
-elseif(WIN32 OR MINGW)
+if(WIN32 OR MINGW)
 	list(APPEND GLOBAL_LIBS setupapi ws2_32)
 elseif(UNIX)
 	list(APPEND GLOBAL_LIBS udev X11)
@@ -80,27 +65,11 @@ set(SHARED_SOURCES
 	"src/Model/Utils.cpp"
 )
 
-if(EMSCRIPTEN)
-	list(APPEND SHARED_SOURCES "src/Model/DeviceClientEm.cpp")
-else()
-	list(APPEND SHARED_SOURCES "src/Model/FirmwareBack.cpp")
-	list(APPEND SHARED_SOURCES "src/Model/DeviceServerWs.cpp")
-	list(APPEND SHARED_SOURCES "src/Model/DeviceClientWspp.cpp")
-endif()
-
 # GUI application start
 
 set(GUI_SOURCES
 	${SHARED_SOURCES}
-
-	"src/View/Application.cpp"
-	"src/View/Colors.cpp"
-	"src/View/DeviceTab.cpp"
-	"src/View/Image.cpp"
-	"src/View/LightsTab.cpp"
-	"src/View/MappingTab.cpp"
-	"src/View/SensitivityTab.cpp"
-
+	"src/Application.cpp"
 	"src/Main.cpp"
 )
 
@@ -109,16 +78,7 @@ set(GUI_SOURCES
 
 set(GUI_LIBS
 	${GLOBAL_LIBS}
-	imgui::imgui
 )
-
-if(NOT EMSCRIPTEN)
-	list(APPEND GUI_LIBS unofficial::nativefiledialog::nfd opengl32)
-endif()
-
-if(WIN32)
-	list(APPEND GUI_SOURCES "src/Assets/Resource.rc")
-endif()
 
 add_executable (${PROJECT_NAME} ${GUI_SOURCES})
 if(MINGW)
@@ -133,41 +93,26 @@ if(WIN32)
 	target_link_options(${PROJECT_NAME} PRIVATE /SUBSYSTEM:WINDOWS /ENTRY:mainCRTStartup)
 endif()
 
-if(EMSCRIPTEN)
-	set_target_properties(${PROJECT_NAME} PROPERTIES LINK_FLAGS ${EM_FLAGS})
-else()
-	target_compile_definitions(${PROJECT_NAME} PRIVATE DEVICE_SERVER_ENABLED)
-endif()
 # GUI application end
 
-if(NOT EMSCRIPTEN)
-	# CLI application start
-	file(GLOB_RECURSE CLI_SOURCES
-		${SHARED_SOURCES}
-		"src/Cli.cpp")
+# CLI application start
+file(GLOB_RECURSE CLI_SOURCES
+	${SHARED_SOURCES}
+	"src/Cli.cpp")
 
-	#source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR}/src FILES ${CLI_SOURCES})
+#source_group(TREE ${CMAKE_CURRENT_SOURCE_DIR}/src FILES ${CLI_SOURCES})
 
-	add_executable ("adp-cli" ${CLI_SOURCES})
-	target_link_options("adp-cli" PRIVATE -static-libgcc -static-libstdc++)
-	set_target_properties("adp-cli" PROPERTIES
-		CXX_STANDARD 20
-		CXX_EXTENSIONS OFF)
-	target_link_libraries("adp-cli" ${GLOBAL_LIBS} argparse::argparse)
-	if(EMSCRIPTEN)
-		set_target_properties("adp-cli" PROPERTIES LINK_FLAGS ${EM_FLAGS})
-	else()
-		target_compile_definitions("adp-cli" PRIVATE DEVICE_SERVER_ENABLED)
-		target_compile_definitions("adp-cli" PRIVATE DEVICE_CLIENT_ENABLED)
-	endif()
-	# CLI application end
-endif()
-
-
+add_executable ("adp-cli" ${CLI_SOURCES})
+target_link_options("adp-cli" PRIVATE -static-libgcc -static-libstdc++)
+set_target_properties("adp-cli" PROPERTIES
+	CXX_STANDARD 20
+	CXX_EXTENSIONS OFF)
+target_link_libraries("adp-cli" ${GLOBAL_LIBS} argparse::argparse)
+# CLI application end
 
 
 # Debian installation start
-if(UNIX)	
+if(UNIX)
 	install(
 	    TARGETS ${PROJECT_NAME}
 	    DESTINATION "/usr/bin/"
