@@ -181,6 +181,8 @@ public:
 	static void SaveProfile(json& j, DeviceProfileGroups groups);
 
 	static void SetSearching(bool s);
+
+	static void DiscoverNewDevices();
 };
 
 }

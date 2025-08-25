@@ -11,7 +11,6 @@
 
 #include <Model/Device.h>
 #include <Model/Reporter.h>
-#include <Model/Log.h>
 #include <Model/Utils.h>
 #include <Model/Firmware.h>
 
@@ -161,52 +160,52 @@ SensorReport SensorState::ToReport(int index)
 
 static void PrintPadConfigurationReport(const PadConfigurationReport& padConfiguration)
 {
-	Log::Write("pad configuration [");
-	Log::Writef("  releaseThreshold: %.2f", ReadF32LE(padConfiguration.releaseThreshold));
-	Log::Write("  sensors: [");
+	std::printf("pad configuration [\n");
+	std::printf("  releaseThreshold: %.2f\n", ReadF32LE(padConfiguration.releaseThreshold));
+	std::printf("  sensors: [\n");
 	for (int i = 0; i < SENSOR_COUNT_V1; ++i)
 	{
-		Log::Writef("    sensorToButtonMapping: %i", padConfiguration.sensorToButtonMapping[i]);
-		Log::Writef("    sensorThresholds: %i", ReadU16LE(padConfiguration.sensorThresholds[i]));
+		std::printf("    sensorToButtonMapping: %i\n", padConfiguration.sensorToButtonMapping[i]);
+		std::printf("    sensorThresholds: %i\n", ReadU16LE(padConfiguration.sensorThresholds[i]));
 	}
-	Log::Write("  ]");
-	Log::Write("]");
+	std::printf("  ]\n");
+	std::printf("]\n");
 }
 
 static void PrintLightRuleReport(const LightRuleReport& r)
 {
-	Log::Write("light rule [");
-	Log::Writef("  lightRuleIndex: %i", r.lightRuleIndex);
-	Log::Writef("  flags: %s", fmt::format("{:b}", r.flags).c_str());
-	Log::Writef("  onColor: [R%i G%i B%i]", r.onColor.red, r.onColor.green, r.onColor.blue);
-	Log::Writef("  offColor: [R%i G%i B%i]", r.offColor.red, r.offColor.green, r.offColor.blue);
-	Log::Writef("  onFadeColor: [R%i G%i B%i]", r.onFadeColor.red, r.onFadeColor.green, r.onFadeColor.blue);
-	Log::Writef("  offFadeColor: [R%i G%i B%i]", r.offFadeColor.red, r.offFadeColor.green, r.offFadeColor.blue);
-	Log::Write("]");
+	std::printf("light rule [\n");
+	std::printf("  lightRuleIndex: %i\n", r.lightRuleIndex);
+	std::printf("  flags: %s\n", fmt::format("{:b}", r.flags).c_str());
+	std::printf("  onColor: [R%i G%i B%i]\n", r.onColor.red, r.onColor.green, r.onColor.blue);
+	std::printf("  offColor: [R%i G%i B%i]\n", r.offColor.red, r.offColor.green, r.offColor.blue);
+	std::printf("  onFadeColor: [R%i G%i B%i]\n", r.onFadeColor.red, r.onFadeColor.green, r.onFadeColor.blue);
+	std::printf("  offFadeColor: [R%i G%i B%i]\n", r.offFadeColor.red, r.offFadeColor.green, r.offFadeColor.blue);
+	std::printf("]\n");
 }
 
 static void PrintLedMappingReport(const LedMappingReport& r)
 {
-	Log::Write("led mapping [");
-	Log::Writef("  ledMappingIndex: %i", r.ledMappingIndex);
-	Log::Writef("  flags: %s", fmt::format("{:b}", r.flags).c_str());
-	Log::Writef("  lightRuleIndex: %i", r.lightRuleIndex);
-	Log::Writef("  sensorIndex: %i", r.sensorIndex);
-	Log::Writef("  ledIndexBegin: %i", r.ledIndexBegin);
-	Log::Writef("  ledIndexEnd: %i", r.ledIndexEnd);
-	Log::Write("]");
+	std::printf("led mapping [\n");
+	std::printf("  ledMappingIndex: %i\n", r.ledMappingIndex);
+	std::printf("  flags: %s\n", fmt::format("{:b}", r.flags).c_str());
+	std::printf("  lightRuleIndex: %i\n", r.lightRuleIndex);
+	std::printf("  sensorIndex: %i\n", r.sensorIndex);
+	std::printf("  ledIndexBegin: %i\n", r.ledIndexBegin);
+	std::printf("  ledIndexEnd: %i\n", r.ledIndexEnd);
+	std::printf("]\n");
 }
 
 static void PrintSensorReport(const SensorReport& r)
 {
-	Log::Write("sensor config[");
-	Log::Writef("  mappingIndex: %i", r.index);
-	Log::Writef("  threshold: %i", ReadU16LE(r.threshold));
-	Log::Writef("  releaseThreshold: %i", ReadU16LE(r.releaseThreshold));
-	Log::Writef("  buttonMapping: %i", r.buttonMapping);
-	Log::Writef("  resistorValue: %i", r.resistorValue);
-	Log::Writef("  flags: %s", fmt::format("{:b}", ReadU16LE(r.flags)).c_str());
-	Log::Write("]");
+	std::printf("sensor config[\n");
+	std::printf("  mappingIndex: %i\n", r.index);
+	std::printf("  threshold: %i\n", ReadU16LE(r.threshold));
+	std::printf("  releaseThreshold: %i\n", ReadU16LE(r.releaseThreshold));
+	std::printf("  buttonMapping: %i\n", r.buttonMapping);
+	std::printf("  resistorValue: %i\n", r.resistorValue);
+	std::printf("  flags: %s\n", fmt::format("{:b}", ReadU16LE(r.flags)).c_str());
+	std::printf("]\n");
 }
 
 // ====================================================================================================================
@@ -281,13 +280,13 @@ public:
 			if (myReporter->SendAndGet(report)) {
 				int resultId = ReadU32LE(report.propertyId);
 				if (resultId != SetPropertyReport::SPID_RELEASE_MODE) {
-					Log::Write("Fetching release mode bugged (1)");		
+					std::printf("Fetching release mode bugged (1)\n");
 				} else {
 					myPad.releaseMode = (ReleaseMode)ReadU32LE(report.propertyValue);
 				}
 			}
 		} catch(...) {
-			Log::Write("Fetching release mode failed");
+			std::printf("Fetching release mode failed\n");
 		}
 
 		UpdateLightsConfiguration(lightRules, ledMappings);
@@ -541,7 +540,7 @@ public:
 
 		if (length > sizeof(report.name))
 		{
-			Log::Writef("SetName :: name '%hs' exceeds %i chars and was not set", name, sizeof(report.name));
+			std::printf("SetName :: name '%hs' exceeds %zi chars and was not set\n", name, sizeof(report.name));
 			return false;
 		}
 
@@ -791,14 +790,14 @@ public:
 		hidHandle = hid_open_path(path.c_str());
 		if (!hidHandle)
 		{
-			Log::Writef("DeviceConnection :: hid_open failed (%ls) :: %s", hid_error(nullptr), path.c_str());
+			std::printf("DeviceConnection :: hid_open failed (%ls) :: %s\n", hid_error(nullptr), path.c_str());
 			state = CS_FAILED;
 			return false;
 		}
 
 		if (hid_set_nonblocking(hidHandle, 1) < 0)
 		{
-			Log::Write("ConnectionManager :: hid_set_nonblocking failed");
+			std::printf("ConnectionManager :: hid_set_nonblocking failed\n");
 			state = CS_FAILED;
 			return false;
 		}
@@ -899,7 +898,7 @@ public:
 				if(myConnectedDevice && myConnectedDevice->Path() == it->first)
 					myConnectedDevice.reset();
 
-				Log::Writef("ConnectionManager :: device removed (%hs)", it->second.GetName().c_str());
+				std::printf("ConnectionManager :: device removed (%hs)\n", it->second.GetName().c_str());
 				it = devices.erase(it);
 			}
 			else ++it;
@@ -1076,14 +1075,14 @@ public:
 
 		std::string boardType = device->State().boardType.ToString();
 
-		Log::Write("ConnectionManager :: new device connected [");
-		Log::Writef("  Name: %s", device->State().name.c_str());
-		Log::Writef("  Board: %s: %s", padIdentificationV2.boardType, boardType.c_str());
-		Log::Writef("  Firmware version: v%u.%u", ReadU16LE(padIdentificationV2.firmwareMajor), ReadU16LE(padIdentificationV2.firmwareMinor));
-		Log::Writef("  Feature flags: %s", fmt::format("{:b}", ReadU16LE(padIdentificationV2.features)).c_str());
-		Log::Writef("  Path: %s", devicePath.c_str());
+		std::printf("ConnectionManager :: new device connected [\n");
+		std::printf("  Name: %s\n", device->State().name.c_str());
+		std::printf("  Board: %s: %s\n", padIdentificationV2.boardType, boardType.c_str());
+		std::printf("  Firmware version: v%u.%u\n", ReadU16LE(padIdentificationV2.firmwareMajor), ReadU16LE(padIdentificationV2.firmwareMinor));
+		std::printf("  Feature flags: %s\n", fmt::format("{:b}", ReadU16LE(padIdentificationV2.features)).c_str());
+		std::printf("  Path: %s\n", devicePath.c_str());
 
-		Log::Write("]");
+		std::printf("]\n");
 
 		myConnectedDevice.reset(device);
 		return true;
@@ -1217,7 +1216,7 @@ bool DeviceConnection::ConnectStage2()
 		if(connectionManager->ConnectToDeviceStage2(*this))
 			return true;
 
-		Log::Writef("DeviceConnection :: ConnectStage2 failed (%d)", tries);
+		std::printf("DeviceConnection :: ConnectStage2 failed (%d)\n", tries);
 		std::this_thread::sleep_for(std::chrono::milliseconds(100));
 	}
 
@@ -1375,9 +1374,12 @@ void Device::CalibrateSensor(int sensorIndex)
 bool Device::SetReleaseMode(ReleaseMode mode)
 {
 	auto device = connectionManager->ConnectedDevice();
-	if(device) {
+
+	if (device) {
 		return device->SetReleaseMode(mode);
 	}
+
+	return false;
 }
 
 void Device::SendDeviceReset()
@@ -1401,6 +1403,11 @@ void Device::SaveChanges()
 void Device::SetSearching(bool s)
 {
 	searching = s;
+}
+
+void Device::DiscoverNewDevices()
+{
+	connectionManager->DiscoverDevice();
 }
 
 int Device::DeviceNumber()

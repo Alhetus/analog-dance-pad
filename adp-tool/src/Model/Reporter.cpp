@@ -5,7 +5,6 @@
 #include <thread>
 
 #include <Model/Reporter.h>
-#include <Model/Log.h>
 
 using namespace std;
 
@@ -33,14 +32,14 @@ bool Reporter::GetFeatureReport(T& report, const char* name)
 	if (bytesRead == expectedSize)
 	{
 		memcpy(&report, buffer, size);
-		Log::Writef("%s :: done", name);
+		std::printf("%s :: done\n", name);
 		return true;
 	}
 
 	if (bytesRead < 0)
-		Log::Writef("%s :: hid_get_feature_report failed (%ls)", name, backend->error());
+		std::printf("%s :: hid_get_feature_report failed (%ls)\n", name, backend->error());
 	else
-		Log::Writef("%s :: unexpected number of bytes read (%i) expected (%i)", name, bytesRead, expectedSize);
+		std::printf("%s :: unexpected number of bytes read (%i) expected (%zi)\n", name, bytesRead, expectedSize);
 	return false;
 }
 
@@ -55,14 +54,14 @@ bool Reporter::SendFeatureReport(const T& report, const char* name)
 	int bytesWritten = backend->send_feature_report((const unsigned char*)&report, sizeof(T));
 	if (bytesWritten == sizeof(T))
 	{
-		Log::Writef("%s :: done", name);
+		std::printf("%s :: done\n", name);
 		return true;
 	}
 
 	if (bytesWritten < 0)
-		Log::Writef("%s :: hid_send_feature_report failed (%ls)", name, backend->error());
+		std::printf("%s :: hid_send_feature_report failed (%ls)\n", name, backend->error());
 	else
-		Log::Writef("%s :: unexpected number of bytes written (%i) expected (%i)", name, bytesWritten, sizeof(T));
+		std::printf("%s :: unexpected number of bytes written (%i) expected (%zi)\n", name, bytesWritten, sizeof(T));
 	return false;
 }
 
@@ -84,9 +83,9 @@ ReadDataResult Reporter::ReadData(T& report, const char* name, int expectedSize)
 		return ReadDataResult::NO_DATA;
 
 	if (bytesRead < 0)
-		Log::Writef("%s :: hid_read failed (%ls)", name, backend->error());
+		std::printf("%s :: hid_read failed (%ls)\n", name, backend->error());
 	else
-		Log::Writef("%s :: unexpected number of bytes read (%i) expected (%i)", name, bytesRead, expectedSize);
+		std::printf("%s :: unexpected number of bytes read (%i) expected (%i)\n", name, bytesRead, expectedSize);
 
 	return ReadDataResult::FAILURE;
 }
@@ -99,10 +98,10 @@ bool Reporter::WriteData(uint8_t reportId, const char* name, bool performErrorCh
 	int bytesWritten = backend->write(buf, sizeof(buf));
 	if (bytesWritten > 0 || !performErrorCheck)
 	{
-		Log::Writef("%s :: done", name);
+		std::printf("%s :: done\n", name);
 		return true;
 	}
-	Log::Writef("%s :: hid_write failed (%ls)", name, backend->error());
+	std::printf("%s :: hid_write failed (%ls)\n", name, backend->error());
 	return false;
 }
 
