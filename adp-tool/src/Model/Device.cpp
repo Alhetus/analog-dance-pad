@@ -1304,6 +1304,8 @@ void Device::GetAllSensorStatesAsJson(json &j)
 	j["name"] = Pad()->name;
 	j["pollingRate"] = Device::PollingRate();
 	j["sensors"] = json::array();
+	j["releaseThreshold"] = Device::Pad()->releaseThreshold;
+	j["releaseMode"] = Pad()->releaseMode;
 
 	for (int i = 0; i < Device::Pad()->numSensors; ++i)
 	{
@@ -1314,9 +1316,6 @@ void Device::GetAllSensorStatesAsJson(json &j)
 		j["sensors"][i]["button"] = Device::Sensor(i)->button;
 		j["sensors"][i]["pressed"] = Device::Sensor(i)->pressed;
 	}
-
-	j["releaseThreshold"] = Device::Pad()->releaseThreshold;
-	j["releaseMode"] = Pad()->releaseMode;
 }
 
 std::string Device::ReadDebug()
