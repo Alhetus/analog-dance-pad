@@ -1,4 +1,6 @@
 #pragma once
+#include "MSGQ.hpp"
+#include "WebsocketServer.h"
 
 namespace adp {
     class Application {
@@ -6,7 +8,7 @@ namespace adp {
         Application();
         ~Application();
 
-        [[noreturn]] void UpdateLoop();
+        [[noreturn]] void UpdateLoop(MSGQ<QueueMessage*> &queue, const WebsocketServer &websocketServer);
     private:
         static void OnInit();
         static void OnExit();

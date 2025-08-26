@@ -1297,6 +1297,28 @@ const SensorState* Device::Sensor(int sensorIndex)
 	return device ? device->Sensor(sensorIndex) : nullptr;
 }
 
+void Device::GetAllSensorStatesAsJson(json &j)
+{
+	j["msgType"] = 1;
+	j["deviceIndex"] = Device::DeviceNumber();
+	j["name"] = Pad()->name;
+	j["pollingRate"] = Device::PollingRate();
+	j["sensors"] = json::array();
+
+	for (int i = 0; i < Device::Pad()->numSensors; ++i)
+	{
+		j["sensors"][i]["threshold"] = Device::Sensor(i)->threshold;
+		j["sensors"][i]["releaseThreshold"] = Device::Sensor(i)->releaseThreshold;
+		j["sensors"][i]["value"] = Device::Sensor(i)->value;
+		j["sensors"][i]["resistorValue"] = Device::Sensor(i)->resistorValue;
+		j["sensors"][i]["button"] = Device::Sensor(i)->button;
+		j["sensors"][i]["pressed"] = Device::Sensor(i)->pressed;
+	}
+
+	j["releaseThreshold"] = Device::Pad()->releaseThreshold;
+	j["releaseMode"] = Pad()->releaseMode;
+}
+
 std::string Device::ReadDebug()
 {
 	auto device = connectionManager->ConnectedDevice();

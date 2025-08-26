@@ -1,9 +1,9 @@
 #include <thread>
+#include <iostream>
 #include "Adp.h"
 #include "Application.h"
-
-#include <iostream>
-
+#include "MSGQ.hpp"
+#include "WebsocketServer.h"
 #include "Model/Device.h"
 
 namespace adp {
@@ -15,14 +15,31 @@ namespace adp {
         OnExit();
     }
 
-    void Application::UpdateLoop() {
-        // 100Hz update loop, should be enough for the websocket UI
-        constexpr auto sleep_time = std::chrono::milliseconds(10);
+    void Application::UpdateLoop(MSGQ<QueueMessage*> &queue, const WebsocketServer &websocketServer) {
+        // ~60Hz update loop, should be enough for the websocket UI
+        constexpr auto sleep_time = std::chrono::milliseconds(16);
 
         while (true)
         {
             std::this_thread::sleep_for(sleep_time);
-            Tick();
+            Tick(); // Update data first before handling messages
+
+            // Send sensor data to clients if device is connected
+            if (Device::Pad() != nullptr) {
+                json sensorJson;
+
+                Device::GetAllSensorStatesAsJson(sensorJson);
+                std::string sensorJsonString = sensorJson.dump();
+                websocketServer.SendMessageToClients(sensorJsonString);
+            }
+
+            QueueMessage *item = nullptr;
+
+            // Try to get new messages from the queue on each iteration
+            while ((item = queue.popElem()) != nullptr) {
+                std::cout << "Got message with data : " << item->data << std::endl;
+                delete item;
+            }
         }
     }
 

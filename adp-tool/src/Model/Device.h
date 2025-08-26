@@ -136,6 +136,8 @@ public:
 
 	static const SensorState* Sensor(int sensorIndex);
 
+	static void GetAllSensorStatesAsJson(json& j);
+
 	static std::string ReadDebug();
 
 	static const bool HasUnsavedChanges();

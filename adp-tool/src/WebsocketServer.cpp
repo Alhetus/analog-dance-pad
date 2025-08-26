@@ -2,19 +2,22 @@
 #include <string>
 #include <ixwebsocket/IXWebSocketServer.h>
 #include "WebsocketServer.h"
+#include "MSGQ.hpp"
 
 namespace adp {
     WebsocketServer::WebsocketServer() = default;
     WebsocketServer::~WebsocketServer() = default;
 
-    void WebsocketServer::Init() {
+    void WebsocketServer::Init(MSGQ<QueueMessage*> &queue) {
         // Run a server on localhost at a given port.
         // Bound host name, max connections and listen backlog can also be passed in as parameters.
         constexpr int port = 8008;
         const std::string host("127.0.0.1"); // If you need this server to be accessible on a different machine, use "0.0.0.0"
         ix::WebSocketServer server(port, host);
 
-        server.setOnClientMessageCallback([](const std::shared_ptr<ix::ConnectionState>& connectionState, ix::WebSocket & webSocket, const ix::WebSocketMessagePtr & msg) {
+        wsServer = &server;
+
+        server.setOnClientMessageCallback([&queue](const std::shared_ptr<ix::ConnectionState>& connectionState, ix::WebSocket & webSocket, const ix::WebSocketMessagePtr & msg) {
             // The ConnectionState object contains information about the connection,
             // at this point only the client ip address and the port.
             std::printf("Remote ip: %s\n", connectionState->getRemoteIp().c_str());
@@ -38,15 +41,18 @@ namespace adp {
                     std::printf("\t%s: %s\n", it.first.c_str(), it.second.c_str());
                 }
             }
+            else if (msg->type == ix::WebSocketMessageType::Close)
+            {
+                std::printf("Client %s WebSocket disconnected, reason: %s\n", connectionState->getId().c_str(), msg->closeInfo.reason.c_str());
+            }
             else if (msg->type == ix::WebSocketMessageType::Message)
             {
-                // For an echo server, we just send back to the client whatever was received by the server
-                // All connected clients are available in a std::set. See the broadcast cpp example.
-                // Second parameter tells whether we are sending the message in binary or text mode.
-                // Here we send it in the same mode as it was received.
                 std::printf("Received: %s\n", msg->str.c_str());
 
-                webSocket.send(msg->str, msg->binary);
+                // Add the message to the queue
+                auto *const item = new QueueMessage();
+                item->data = msg->str;
+                queue.addElem(item);
             }
         });
 
@@ -67,5 +73,15 @@ namespace adp {
 
         // Block until server.stop() is called.
         server.wait();
+    }
+
+    void WebsocketServer::SendMessageToClients(const std::string &message) const {
+        if (wsServer == nullptr) {
+            return;
+        }
+
+        for (const auto& socket : wsServer->getClients()) {
+            socket->send(message);
+        }
     }
 }
