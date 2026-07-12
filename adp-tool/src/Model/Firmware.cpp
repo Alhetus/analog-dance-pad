@@ -1,7 +1,6 @@
 #include <chrono>
 #include <algorithm>
 
-#include "libzippp.h"
 #include <serial/serial.h>
 using namespace serial;
 

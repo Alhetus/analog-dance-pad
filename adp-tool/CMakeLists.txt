@@ -20,8 +20,6 @@ endif()
 
 include("${CMAKE_CURRENT_SOURCE_DIR}/vcpkg/scripts/buildsystems/vcpkg.cmake")
 
-find_package(libzippp REQUIRED)
-
 add_subdirectory(lib)
 
 find_package(fmt REQUIRED)
@@ -46,7 +44,7 @@ set(GLOBAL_LIBS
 	ixwebsocket
 )
 
-list(APPEND GLOBAL_LIBS avrdude serial libzippp::libzippp)
+list(APPEND GLOBAL_LIBS avrdude serial)
 
 if(WIN32 OR MINGW)
 	list(APPEND GLOBAL_LIBS setupapi ws2_32)

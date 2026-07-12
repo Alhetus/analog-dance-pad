@@ -1,7 +1,6 @@
 {
   "dependencies": [
     "fmt",
-    "libzippp",
     "nlohmann-json",
     "argparse"
   ],
