@@ -510,6 +510,16 @@ class ConnectionManager
 		return it->second.GetName(update);
 	}
 
+	string GetDevicePath(int index)
+	{
+		if (index < 0 || (size_t)index >= devices.size())
+			return "";
+
+		auto it = devices.begin();
+		std::advance(it, index);
+		return it->first;
+	}
+
 	bool DeviceSelect(int index)
 	{
 		if (index < 0 || (size_t)index >= devices.size())
@@ -706,6 +716,7 @@ void Device::PublishSnapshot()
 
 	auto device = connectionManager ? connectionManager->ConnectedDevice() : nullptr;
 	snapshot->deviceCount = connectionManager ? connectionManager->DeviceNumber() : 0;
+	snapshot->selectedIndex = connectionManager ? connectionManager->DeviceSelected() : -1;
 
 	if (device)
 	{
@@ -739,6 +750,7 @@ void Device::SnapshotToJson(const SensorSnapshot& snapshot, json& j)
 {
 	j["msgType"] = 1;
 	j["deviceIndex"] = snapshot.deviceCount;
+	j["selectedIndex"] = snapshot.selectedIndex;
 	j["name"] = snapshot.name;
 	j["pollingRate"] = snapshot.pollingRate;
 	j["releaseThreshold"] = snapshot.releaseThreshold;
@@ -777,6 +789,15 @@ void Device::HandleClientMessage(const std::string& message)
 	if (!j.is_object())
 	{
 		std::printf("HandleClientMessage :: non-object message ignored\n");
+		return;
+	}
+
+	// Device selection works even with no device currently connected (it is how
+	// a client connects to one), so handle it before the connected-device guard.
+	if (j.contains("selectDevice") && j["selectDevice"].is_number_integer())
+	{
+		if (connectionManager)
+			connectionManager->DeviceSelect(j["selectDevice"].get<int>());
 		return;
 	}
 
@@ -935,6 +956,30 @@ string Device::GetDeviceName(int index)
 	if (!connectionManager)
 		return "";
 	return connectionManager->GetDeviceName(index);
+}
+
+string Device::GetDevicePath(int index)
+{
+	if (!connectionManager)
+		return "";
+	return connectionManager->GetDevicePath(index);
+}
+
+void Device::DeviceListToJson(json& j)
+{
+	j["msgType"] = 2;
+	j["selectedIndex"] = connectionManager ? connectionManager->DeviceSelected() : -1;
+	j["devices"] = json::array();
+
+	int count = connectionManager ? connectionManager->DeviceNumber() : 0;
+	for (int i = 0; i < count; ++i)
+	{
+		json device;
+		device["index"] = i;
+		device["id"] = connectionManager->GetDevicePath(i);
+		device["name"] = connectionManager->GetDeviceName(i);
+		j["devices"].push_back(std::move(device));
+	}
 }
 
 bool Device::DeviceSelect(int index)

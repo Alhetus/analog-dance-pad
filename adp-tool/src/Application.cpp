@@ -26,6 +26,12 @@ void Application::UpdateLoop(MSGQ<QueueMessage>& queue, WebsocketServer& websock
 	// ~60Hz update loop, should be enough for the websocket UI.
 	constexpr auto sleep_time = std::chrono::milliseconds(16);
 
+	// The device list changes rarely, so rebroadcast it ~1Hz rather than every
+	// tick. ponytail: periodic rebroadcast; move to on-change + request if it
+	// shows up in traffic.
+	constexpr int deviceListInterval = 60;
+	int tickCount = 0;
+
 	while (running.load())
 	{
 		// Update device data first (discovery + poll + publish snapshot).
@@ -37,6 +43,16 @@ void Application::UpdateLoop(MSGQ<QueueMessage>& queue, WebsocketServer& websock
 			json sensorJson;
 			Device::SnapshotToJson(*snapshot, sensorJson);
 			websocketServer.SendMessageToClients(sensorJson.dump());
+		}
+
+		// Rebroadcast the device list so clients can enumerate/switch pads. Runs
+		// regardless of connection state so a client sees pads even when none is
+		// selected yet.
+		if (tickCount++ % deviceListInterval == 0)
+		{
+			json deviceListJson;
+			Device::DeviceListToJson(deviceListJson);
+			websocketServer.SendMessageToClients(deviceListJson.dump());
 		}
 
 		// Drain and apply any inbound client messages. This runs on the
@@ -69,11 +85,13 @@ void Application::Tick()
 {
 	Device::Update();
 
-	// Try to connect to new devices if the expected count is not connected
-	constexpr int expectedDeviceCount = 1; // TODO: This should be a configurable value
-	auto numberOfConnectedDevices = Device::DeviceNumber();
-
-	if (numberOfConnectedDevices < expectedDeviceCount)
+	// Re-run discovery ~1Hz (not every 60Hz tick — hid_enumerate is not free) so
+	// the device map keeps up with all attached pads and hot-plug. Discovery only
+	// probes newly-seen paths and only auto-selects when nothing is connected, so
+	// it does not disturb the streamed device.
+	constexpr int discoverInterval = 60;
+	static int discoverTick = 0;
+	if (discoverTick++ % discoverInterval == 0)
 	{
 		Device::DiscoverNewDevices();
 	}

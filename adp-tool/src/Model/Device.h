@@ -70,6 +70,7 @@ struct SensorSnapshot
 {
 	bool connected = false;
 	int deviceCount = 0;
+	int selectedIndex = -1; // index of the streamed device in the discovered-device list, or -1.
 	std::string name;
 	int pollingRate = 0;
 	double releaseThreshold = 1.0;
@@ -167,6 +168,10 @@ class Device
 	// Serializes a snapshot to the client-facing JSON wire format.
 	static void SnapshotToJson(const SensorSnapshot& snapshot, json& j);
 
+	// Serializes the list of discovered devices (msgType 2) so clients can
+	// enumerate pads and pick which one to stream/control.
+	static void DeviceListToJson(json& j);
+
 	// Parses and dispatches one inbound client message. Must be called on the
 	// device-I/O thread so device access stays single-threaded.
 	static void HandleClientMessage(const std::string& message);
@@ -206,6 +211,8 @@ class Device
 	static int DeviceNumber();
 
 	static std::string GetDeviceName(int index);
+
+	static std::string GetDevicePath(int index);
 
 	static bool DeviceSelect(int index);
 
