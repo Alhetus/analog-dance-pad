@@ -28,9 +28,10 @@ typedef int32_t DeviceChanges;
 enum DeviceProfileGroupFlags
 {
 	DPG_SENSITIVITY = 1 << 0,
-	DPG_MAPPING = 1 << 1,
+	DPG_MAPPING = 1 << 1, // button mappings only
 	DPG_DEVICE = 1 << 2,
 	DPG_LIGHTS = 1 << 3,
+	DPG_GAIN = 1 << 4, // per-sensor digipot gain (resistorValue), split out of DPG_MAPPING
 
 	DGP_ALL = 0b1111111111111111
 };
@@ -62,6 +63,30 @@ struct SensorState
 	SensorReport ToReport(int index);
 };
 
+struct LedMapping
+{
+	int lightRuleIndex;
+	int sensorIndex;
+	int ledIndexBegin;
+	int ledIndexEnd;
+};
+
+struct LightRule
+{
+	bool fadeOn;
+	bool fadeOff;
+	RgbColor onColor;
+	RgbColor offColor;
+	RgbColor onFadeColor;
+	RgbColor offFadeColor;
+};
+
+struct LightsState
+{
+	std::map<int, LightRule> lightRules;
+	std::map<int, LedMapping> ledMappings;
+};
+
 // An immutable, self-contained copy of everything the WebSocket clients need to
 // see about the currently connected pad. Built on the device-I/O thread each
 // tick and published via an atomic shared_ptr, so readers never touch live
@@ -76,6 +101,7 @@ struct SensorSnapshot
 	double releaseThreshold = 1.0;
 	int releaseMode = 0;
 	std::vector<SensorState> sensors;
+	LightsState lights; // for client-side profile drift detection
 };
 
 struct VersionType
@@ -116,30 +142,6 @@ struct PadState
 	ReleaseMode releaseMode = ReleaseMode::RELEASE_GLOBAL;
 };
 
-struct LedMapping
-{
-	int lightRuleIndex;
-	int sensorIndex;
-	int ledIndexBegin;
-	int ledIndexEnd;
-};
-
-struct LightRule
-{
-	bool fadeOn;
-	bool fadeOff;
-	RgbColor onColor;
-	RgbColor offColor;
-	RgbColor onFadeColor;
-	RgbColor offFadeColor;
-};
-
-struct LightsState
-{
-	std::map<int, LightRule> lightRules;
-	std::map<int, LedMapping> ledMappings;
-};
-
 class Device
 {
   public:
@@ -171,6 +173,14 @@ class Device
 	// Serializes the list of discovered devices (msgType 2) so clients can
 	// enumerate pads and pick which one to stream/control.
 	static void DeviceListToJson(json& j);
+
+	// Serializes the connected pad's lights (msgType 4). Broadcast only on
+	// change / periodically (see TakeLightsDirty), not with every snapshot.
+	static void LightsToJson(const SensorSnapshot& snapshot, json& j);
+
+	// Returns true and clears the flag if the pad's lights changed (or a device
+	// was (re)selected) since the last call, so the caller can rebroadcast them.
+	static bool TakeLightsDirty();
 
 	// Parses and dispatches one inbound client message. Must be called on the
 	// device-I/O thread so device access stays single-threaded.
@@ -221,6 +231,17 @@ class Device
 	static void LoadProfile(json& j, DeviceProfileGroups groups);
 
 	static void SaveProfile(json& j, DeviceProfileGroups groups);
+
+	// Directory where named profiles are stored (typically a shared network
+	// folder so every venue machine sees the same set). Set once at startup.
+	static void SetProfilesDir(const std::string& dir);
+
+	// Serializes the stored-profile list (msgType 3) for broadcast to clients.
+	static void ProfileListToJson(json& j);
+
+	// Returns true and clears the flag if the profile set changed since the last
+	// call, so the caller can broadcast a fresh list immediately.
+	static bool TakeProfilesDirty();
 
 	static void SetSearching(bool s);
 

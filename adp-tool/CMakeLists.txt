@@ -75,6 +75,7 @@ endif()
 set(CORE_SOURCES
 	"src/Model/Device.cpp"
 	"src/Model/Firmware.cpp"
+	"src/Model/Profiles.cpp"
 	"src/Model/Reporter.cpp"
 	"src/Model/Utils.cpp"
 	"src/Application.cpp"

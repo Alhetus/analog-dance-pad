@@ -7,6 +7,9 @@
 #include <map>
 #include <chrono>
 #include <thread>
+#include <ctime>
+#include <cstdint>
+#include <filesystem>
 
 #include "hidapi.h"
 #include <fmt/format.h>
@@ -17,6 +20,7 @@
 #include <Model/Utils.h>
 #include <Model/Firmware.h>
 #include <Model/Wire.h>
+#include <Model/Profiles.h>
 
 using namespace std;
 using namespace chrono;
@@ -600,6 +604,21 @@ class ConnectionManager
 static std::unique_ptr<ConnectionManager> connectionManager;
 static std::atomic<bool> searching = true;
 
+// Profile storage. gProfilesDir is set once at startup (before threads), then
+// only read. gProfilesDirty starts true so the first tick broadcasts the list.
+static std::string gProfilesDir = "profiles";
+static std::atomic<bool> gProfilesDirty{true};
+
+// Set when the connected pad's lights change (or a device is (re)selected), so
+// the WebSocket loop can broadcast the lights message only when it matters
+// instead of on every ~60Hz snapshot.
+static std::atomic<bool> gLightsDirty{false};
+
+// Profiles capture thresholds+release, per-sensor gain, and lights — but NOT
+// button mappings or the device name (those are pad-specific, not preferences).
+static constexpr DeviceProfileGroups PROFILE_GROUPS =
+    (DeviceProfileGroups)(DPG_SENSITIVITY | DPG_GAIN | DPG_LIGHTS);
+
 // The latest immutable sensor snapshot. Written only on the device-I/O thread
 // (PublishSnapshot); read from any thread (GetSnapshot). Guarded by a mutex
 // rather than std::atomic<shared_ptr> because Apple's libc++ doesn't implement
@@ -680,6 +699,10 @@ DeviceChanges Device::Update()
 		}
 	}
 
+	// A lights change (or a fresh device) means the gated lights message is stale.
+	if (changes & (DCF_LIGHTS | DCF_DEVICE))
+		gLightsDirty = true;
+
 	// Publish the latest immutable snapshot for the WebSocket side to read.
 	PublishSnapshot();
 
@@ -733,6 +756,9 @@ void Device::PublishSnapshot()
 			if (const SensorState* s = device->Sensor(i))
 				snapshot->sensors.push_back(*s);
 		}
+
+		if (pad.featureLights)
+			snapshot->lights = device->Lights();
 	}
 
 	// Publish as immutable; readers get a stable, consistent view.
@@ -744,6 +770,32 @@ std::shared_ptr<const SensorSnapshot> Device::GetSnapshot()
 {
 	std::lock_guard<std::mutex> lock(gSnapshotMutex);
 	return gSnapshot;
+}
+
+// Serializes lights (rules + LED mappings) to the wire shape shared by the
+// profile format (SaveProfile) and the lights message, so a stored profile and a
+// live pad can be compared field-for-field on the client for drift detection.
+static void AppendLightsToJson(const LightsState& lights, json& j)
+{
+	j["ledMappings"] = json::array();
+	for (const auto& [index, lm] : lights.ledMappings)
+	{
+		j["ledMappings"][index]["lightRuleIndex"] = lm.lightRuleIndex;
+		j["ledMappings"][index]["sensorIndex"] = lm.sensorIndex;
+		j["ledMappings"][index]["ledIndexBegin"] = lm.ledIndexBegin;
+		j["ledMappings"][index]["ledIndexEnd"] = lm.ledIndexEnd;
+	}
+
+	j["lightRules"] = json::array();
+	for (const auto& [index, lr] : lights.lightRules)
+	{
+		j["lightRules"][index]["fadeOn"] = lr.fadeOn;
+		j["lightRules"][index]["fadeOff"] = lr.fadeOff;
+		j["lightRules"][index]["onColor"] = lr.onColor.ToString();
+		j["lightRules"][index]["offColor"] = lr.offColor.ToString();
+		j["lightRules"][index]["onFadeColor"] = lr.onFadeColor.ToString();
+		j["lightRules"][index]["offFadeColor"] = lr.offFadeColor.ToString();
+	}
 }
 
 void Device::SnapshotToJson(const SensorSnapshot& snapshot, json& j)
@@ -768,6 +820,21 @@ void Device::SnapshotToJson(const SensorSnapshot& snapshot, json& j)
 		sensor["pressed"] = s.pressed;
 		j["sensors"].push_back(std::move(sensor));
 	}
+}
+
+// Lights change rarely and are ~1KB, so they travel as their own message
+// (msgType 4) that the WebSocket loop broadcasts only on change / periodically —
+// not with every 60Hz snapshot. Same shape a saved profile uses, so the client
+// can drift-check a loaded profile's lights field-for-field.
+void Device::LightsToJson(const SensorSnapshot& snapshot, json& j)
+{
+	j["msgType"] = 4;
+	AppendLightsToJson(snapshot.lights, j);
+}
+
+bool Device::TakeLightsDirty()
+{
+	return gLightsDirty.exchange(false);
 }
 
 void Device::HandleClientMessage(const std::string& message)
@@ -798,6 +865,39 @@ void Device::HandleClientMessage(const std::string& message)
 	{
 		if (connectionManager)
 			connectionManager->DeviceSelect(j["selectDevice"].get<int>());
+		gLightsDirty = true; // resend lights promptly for the newly selected pad
+		return;
+	}
+
+	// Profile browsing/editing/deleting is filesystem-only (no device needed), so
+	// handle it before the connected-device guard. Profiles::* validate the id.
+	if (j.contains("listProfiles"))
+	{
+		gProfilesDirty = true; // triggers a fresh broadcast on the next tick
+		return;
+	}
+
+	if (j.contains("deleteProfile") && j["deleteProfile"].is_string())
+	{
+		if (Profiles::Delete(gProfilesDir, j["deleteProfile"].get<std::string>()))
+			gProfilesDirty = true;
+		return;
+	}
+
+	// Edit metadata (name/description) only — never re-captures the pad.
+	if (j.contains("updateProfile") && j["updateProfile"].is_object())
+	{
+		const auto& u = j["updateProfile"];
+		json blob;
+		if (u.contains("id") && u["id"].is_string() && Profiles::Read(gProfilesDir, u["id"].get<std::string>(), blob))
+		{
+			if (u.contains("name") && u["name"].is_string())
+				blob["name"] = u["name"].get<std::string>();
+			if (u.contains("description") && u["description"].is_string())
+				blob["description"] = u["description"].get<std::string>();
+			if (Profiles::Write(gProfilesDir, blob.value("id", std::string()), blob))
+				gProfilesDirty = true;
+		}
 		return;
 	}
 
@@ -805,6 +905,80 @@ void Device::HandleClientMessage(const std::string& message)
 	if (!connectionManager || !connectionManager->ConnectedDevice())
 	{
 		std::printf("HandleClientMessage :: no device connected, message ignored\n");
+		return;
+	}
+
+	// Save the connected pad's current settings as a named profile. Two forms:
+	//   {saveProfile:{name}}      -> create a new profile (slug id, de-collided)
+	//   {saveProfile:{id}}        -> overwrite an existing one, keeping its name
+	if (j.contains("saveProfile") && j["saveProfile"].is_object())
+	{
+		const auto& sp = j["saveProfile"];
+		std::string id, name, description;
+
+		if (sp.contains("id") && sp["id"].is_string())
+		{
+			json existing;
+			if (!Profiles::Read(gProfilesDir, sp["id"].get<std::string>(), existing))
+			{
+				std::printf("saveProfile :: unknown id, ignored\n");
+				return;
+			}
+			id = existing.value("id", std::string());
+			name = existing.value("name", std::string());
+			description = existing.value("description", std::string());
+		}
+		else if (sp.contains("name") && sp["name"].is_string())
+		{
+			name = sp["name"].get<std::string>();
+			description = sp.value("description", std::string());
+			id = Profiles::SlugifyId(name);
+			std::string base = id;
+			for (int n = 2; Profiles::Exists(gProfilesDir, id); ++n)
+				id = base + "-" + std::to_string(n);
+		}
+		else
+		{
+			std::printf("saveProfile :: needs a name or id, ignored\n");
+			return;
+		}
+
+		json blob;
+		SaveProfile(blob, PROFILE_GROUPS); // capture the connected device
+		blob["id"] = id;
+		blob["name"] = name;
+		blob["description"] = description;
+		blob["sensorCount"] = Pad() ? Pad()->numSensors : 0;
+		blob["savedAt"] = (int64_t)std::time(nullptr);
+		if (Profiles::Write(gProfilesDir, id, blob))
+			gProfilesDirty = true;
+		return;
+	}
+
+	// Apply a stored profile to the connected pad. Refuse a sensor-count mismatch
+	// so a 4-panel profile is never squeezed onto a differently-shaped pad.
+	if (j.contains("loadProfile") && j["loadProfile"].is_string())
+	{
+		json blob;
+		if (!Profiles::Read(gProfilesDir, j["loadProfile"].get<std::string>(), blob))
+		{
+			std::printf("loadProfile :: unknown id, ignored\n");
+			return;
+		}
+		const int numSensors = Pad() ? Pad()->numSensors : 0;
+		if (blob.value("sensorCount", -1) != numSensors)
+		{
+			std::printf("loadProfile :: sensor-count mismatch, ignored\n");
+			return;
+		}
+		try
+		{
+			LoadProfile(blob, PROFILE_GROUPS);
+		}
+		catch (const std::exception& e)
+		{
+			std::printf("loadProfile :: failed (%s)\n", e.what());
+		}
 		return;
 	}
 
@@ -982,6 +1156,29 @@ void Device::DeviceListToJson(json& j)
 	}
 }
 
+void Device::SetProfilesDir(const std::string& dir)
+{
+	gProfilesDir = dir.empty() ? "profiles" : dir;
+	std::error_code ec;
+	std::filesystem::create_directories(gProfilesDir, ec);
+	if (ec)
+		std::printf("SetProfilesDir :: could not create '%s' (%s)\n", gProfilesDir.c_str(), ec.message().c_str());
+	else
+		std::printf("Profiles directory: %s\n", gProfilesDir.c_str());
+	gProfilesDirty = true;
+}
+
+void Device::ProfileListToJson(json& j)
+{
+	j["msgType"] = 3;
+	j["profiles"] = Profiles::List(gProfilesDir);
+}
+
+bool Device::TakeProfilesDirty()
+{
+	return gProfilesDirty.exchange(false);
+}
+
 bool Device::DeviceSelect(int index)
 {
 	if (!connectionManager)
@@ -1061,7 +1258,12 @@ void PadDevice::LoadProfile(json& j, DeviceProfileGroups groups)
 			if ((groups & DPG_SENSITIVITY) && sensor.contains("threshold") && sensor["threshold"].is_number())
 			{
 				double th = sensor["threshold"].get<double>();
-				SetThreshold(idx, th, th);
+				// Restore the stored per-sensor release faithfully; fall back to
+				// the threshold only when a profile predates the release field.
+				double rel = (sensor.contains("releaseThreshold") && sensor["releaseThreshold"].is_number())
+				                 ? sensor["releaseThreshold"].get<double>()
+				                 : th;
+				SetThreshold(idx, th, rel);
 			}
 
 			if ((groups & DPG_MAPPING) && sensor.contains("button") && sensor["button"].is_number_integer())
@@ -1069,7 +1271,7 @@ void PadDevice::LoadProfile(json& j, DeviceProfileGroups groups)
 				SetButtonMapping(idx, sensor["button"].get<int>());
 			}
 
-			if ((groups & DPG_MAPPING) && sensor.contains("resistorValue") &&
+			if ((groups & DPG_GAIN) && sensor.contains("resistorValue") &&
 			    sensor["resistorValue"].is_number_integer() && pad->featureDigipot)
 			{
 				SetAdcConfig(idx, sensor["resistorValue"].get<int>());
@@ -1102,31 +1304,10 @@ void PadDevice::SaveProfile(json& j, DeviceProfileGroups groups)
 
 	if ((groups & DPG_LIGHTS) && pad->featureLights)
 	{
-		{
-			const LightsState* lights = &Lights();
-			j["ledMappings"] = json::array();
-			for (const auto& [index, lm] : lights->ledMappings)
-			{
-				j["ledMappings"][index]["lightRuleIndex"] = lm.lightRuleIndex;
-				j["ledMappings"][index]["sensorIndex"] = lm.sensorIndex;
-				j["ledMappings"][index]["ledIndexBegin"] = lm.ledIndexBegin;
-				j["ledMappings"][index]["ledIndexEnd"] = lm.ledIndexEnd;
-			}
-
-			j["lightRules"] = json::array();
-			for (const auto& [index, lr] : lights->lightRules)
-			{
-				j["lightRules"][index]["fadeOn"] = lr.fadeOn;
-				j["lightRules"][index]["fadeOff"] = lr.fadeOff;
-				j["lightRules"][index]["onColor"] = lr.onColor.ToString();
-				j["lightRules"][index]["offColor"] = lr.offColor.ToString();
-				j["lightRules"][index]["onFadeColor"] = lr.onFadeColor.ToString();
-				j["lightRules"][index]["offFadeColor"] = lr.offFadeColor.ToString();
-			}
-		}
+		AppendLightsToJson(Lights(), j);
 	}
 
-	if (groups & (DPG_SENSITIVITY | DPG_MAPPING))
+	if (groups & (DPG_SENSITIVITY | DPG_MAPPING | DPG_GAIN))
 	{
 		j["sensors"] = json::array();
 		for (int i = 0; i < pad->numSensors; ++i)
@@ -1144,6 +1325,10 @@ void PadDevice::SaveProfile(json& j, DeviceProfileGroups groups)
 			if (groups & DPG_MAPPING)
 			{
 				j["sensors"][i]["button"] = s->button;
+			}
+
+			if (groups & DPG_GAIN)
+			{
 				j["sensors"][i]["resistorValue"] = s->resistorValue;
 			}
 		}

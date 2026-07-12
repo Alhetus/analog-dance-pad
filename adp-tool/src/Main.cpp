@@ -1,6 +1,7 @@
 #include <atomic>
 #include <csignal>
 #include <iostream>
+#include <string>
 #include <thread>
 
 #include <ixwebsocket/IXNetSystem.h>
@@ -9,6 +10,7 @@
 #include "Application.h"
 #include "MSGQ.hpp"
 #include "WebsocketServer.h"
+#include <Model/Device.h>
 
 using json = nlohmann::json;
 
@@ -23,8 +25,19 @@ static void HandleSignal(int)
 	g_running.store(false);
 }
 
-int main()
+int main(int argc, char** argv)
 {
+	// Optional --profiles-dir <path>: where named profiles are stored, typically
+	// a shared network folder so every venue machine sees the same set. Must be
+	// set before Application (which constructs Device) is created below.
+	std::string profilesDir = "profiles";
+	for (int i = 1; i + 1 < argc; ++i)
+	{
+		if (std::string(argv[i]) == "--profiles-dir")
+			profilesDir = argv[i + 1];
+	}
+	adp::Device::SetProfilesDir(profilesDir);
+
 	// Required on Windows
 	ix::initNetSystem();
 

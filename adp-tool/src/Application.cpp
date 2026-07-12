@@ -38,7 +38,8 @@ void Application::UpdateLoop(MSGQ<QueueMessage>& queue, WebsocketServer& websock
 		Tick();
 
 		// Broadcast the freshly published, immutable snapshot to clients.
-		if (auto snapshot = Device::GetSnapshot(); snapshot && snapshot->connected)
+		auto snapshot = Device::GetSnapshot();
+		if (snapshot && snapshot->connected)
 		{
 			json sensorJson;
 			Device::SnapshotToJson(*snapshot, sensorJson);
@@ -53,6 +54,30 @@ void Application::UpdateLoop(MSGQ<QueueMessage>& queue, WebsocketServer& websock
 			json deviceListJson;
 			Device::DeviceListToJson(deviceListJson);
 			websocketServer.SendMessageToClients(deviceListJson.dump());
+		}
+
+		// Rebroadcast the stored-profile list so clients (across all venue
+		// machines sharing the folder) can browse/load profiles. Sent on change
+		// (a save/edit/delete flips a dirty flag) or ~2s as a fallback.
+		// ponytail: polls the shared dir every ~2s; move to on-change/watch if the share is slow
+		constexpr int profileListInterval = 120; // ~2s at ~60Hz
+		if (Device::TakeProfilesDirty() || tickCount % profileListInterval == 0)
+		{
+			json profileListJson;
+			Device::ProfileListToJson(profileListJson);
+			websocketServer.SendMessageToClients(profileListJson.dump());
+		}
+
+		// Lights (msgType 4) are ~1KB and change rarely, so broadcast them only
+		// when the pad signals a change/switch, or ~2s as a fallback so a client
+		// that connected after the last change still gets the current lights.
+		constexpr int lightsInterval = 120; // ~2s at ~60Hz
+		if (snapshot && snapshot->connected &&
+		    (Device::TakeLightsDirty() || tickCount % lightsInterval == 0))
+		{
+			json lightsJson;
+			Device::LightsToJson(*snapshot, lightsJson);
+			websocketServer.SendMessageToClients(lightsJson.dump());
 		}
 
 		// Drain and apply any inbound client messages. This runs on the

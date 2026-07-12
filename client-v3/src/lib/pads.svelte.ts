@@ -14,12 +14,35 @@ export interface Sensor {
 /** Fields a client may write back per sensor (positional in the `sensors` message). */
 export type SensorPatch = Partial<Pick<Sensor, 'threshold' | 'releaseThreshold' | 'resistorValue'>>;
 
+/** LED lighting config, in the same shape a saved profile uses. */
+export interface LightRule {
+	fadeOn: boolean;
+	fadeOff: boolean;
+	onColor: string;
+	offColor: string;
+	onFadeColor: string;
+	offFadeColor: string;
+}
+
+export interface LedMapping {
+	lightRuleIndex: number;
+	sensorIndex: number;
+	ledIndexBegin: number;
+	ledIndexEnd: number;
+}
+
 export interface Snapshot {
 	msgType: 1;
 	name: string;
 	pollingRate: number;
 	selectedIndex: number;
 	sensors: Sensor[];
+}
+
+/** Lights message (msgType 4) — sent on change / periodically, not per snapshot. */
+export interface Lights {
+	lightRules: LightRule[];
+	ledMappings: LedMapping[];
 }
 
 export interface DeviceInfo {
@@ -43,6 +66,19 @@ export interface DeviceOption {
 	label: string;
 }
 
+/** A stored profile (msgType 3). Captures thresholds+release, gain and lights. */
+export interface Profile {
+	id: string; // immutable filename stem
+	name: string;
+	description?: string;
+	sensorCount: number; // only loadable onto a pad with this many sensors
+	savedAt?: number; // unix seconds
+	sensors: Array<Pick<Sensor, 'threshold' | 'releaseThreshold' | 'resistorValue'>>;
+	releaseThreshold?: number;
+	lightRules?: LightRule[];
+	ledMappings?: LedMapping[];
+}
+
 const EPS = 0.01; // device quantizes thresholds to /850 (~0.0012), so echoes differ slightly
 const SEND_THROTTLE_MS = 40;
 const STALE_MS = 1000; // no snapshot for this long while open => pad considered gone
@@ -59,6 +95,8 @@ class Conn {
 	deviceList: DeviceInfo[] = $state([]);
 	selectedIndex = $state(-1);
 	snapshot: Snapshot | null = $state(null);
+	profiles: Profile[] = $state([]);
+	lights: Lights | null = $state(null); // null until the first lights message arrives
 	lastMessageAt = $state(0);
 
 	#ws: WebSocket | null = null;
@@ -84,6 +122,7 @@ class Conn {
 		ws.addEventListener('open', () => {
 			this.status = 'open';
 			this.#backoff = 500;
+			this.send({ listProfiles: true }); // get the profile list right away
 		});
 		ws.addEventListener('message', (ev) => this.#onMessage(ev.data));
 		ws.addEventListener('close', () => this.#onDown());
@@ -107,6 +146,10 @@ class Conn {
 			this.snapshot = m as Snapshot;
 			this.selectedIndex = (m as Snapshot).selectedIndex;
 			this.lastMessageAt = Date.now();
+		} else if (msg.msgType === 3) {
+			this.profiles = (m as { profiles: Profile[] }).profiles;
+		} else if (msg.msgType === 4) {
+			this.lights = m as Lights;
 		}
 	}
 
@@ -115,6 +158,8 @@ class Conn {
 		this.status = 'offline';
 		this.snapshot = null;
 		this.deviceList = [];
+		this.profiles = [];
+		this.lights = null;
 		this.#scheduleReconnect();
 	}
 
@@ -145,7 +190,26 @@ interface ActiveRef {
 
 const ENDPOINTS_KEY = 'adp-endpoints';
 const ACTIVE_KEY = 'adp-active';
+const LOADED_KEY = 'adp-loaded'; // { [padKey]: profileId } — last profile loaded onto each pad
 const DEFAULT_ENDPOINTS = ['ws://127.0.0.1:8008'];
+
+/** Order-independent deep equality via key-sorted JSON (both sides come from the
+ * server's nlohmann serialization, so this is exact for lights comparison). */
+const canon = (v: unknown): string =>
+	JSON.stringify(v, (_, val) =>
+		val && typeof val === 'object' && !Array.isArray(val)
+			? Object.fromEntries(Object.keys(val as object).sort().map((k) => [k, (val as Record<string, unknown>)[k]]))
+			: val
+	);
+
+/** Same slug rule as the server (Profiles::SlugifyId), to predict a new id. */
+const slugify = (name: string) => {
+	const s = name
+		.toLowerCase()
+		.replace(/[^a-z0-9]+/g, '-')
+		.replace(/^-+|-+$/g, '');
+	return s || 'profile';
+};
 
 class PadsStore {
 	endpoints: string[] = $state([...DEFAULT_ENDPOINTS]);
@@ -153,6 +217,8 @@ class PadsStore {
 	active: ActiveRef | null = $state(null);
 	/** Optimistic per-sensor edits for the active device, keyed by sensor index. */
 	pending: Record<number, SensorPatch> = $state({});
+	/** Last profile loaded onto each pad, keyed by `${endpoint}#${index}`. */
+	loaded: Record<string, string> = $state({});
 	now = $state(0); // ticking clock so staleness stays reactive
 
 	#clock: ReturnType<typeof setInterval> | null = null;
@@ -166,6 +232,8 @@ class PadsStore {
 			if (e) this.endpoints = JSON.parse(e);
 			const a = localStorage.getItem(ACTIVE_KEY);
 			if (a) this.active = JSON.parse(a);
+			const l = localStorage.getItem(LOADED_KEY);
+			if (l) this.loaded = JSON.parse(l);
 		} catch {
 			/* ignore malformed storage */
 		}
@@ -263,12 +331,122 @@ class PadsStore {
 		return out;
 	}
 
+	// ---- Profiles ----------------------------------------------------------
+
+	/** All stored profiles, deduped by id (every server shares the same folder). */
+	get profiles(): Profile[] {
+		const byId = new Map<string, Profile>();
+		for (const c of this.conns) for (const p of c.profiles) if (!byId.has(p.id)) byId.set(p.id, p);
+		return [...byId.values()].sort((a, b) => a.name.localeCompare(b.name));
+	}
+
+	/** Sensor count of the active pad (profiles must match this to be loadable). */
+	get activeSensorCount(): number | null {
+		return this.activeSnapshot?.sensors.length ?? null;
+	}
+
+	/** Profiles that can be loaded onto the active pad (matching sensor count). */
+	get compatibleProfiles(): Profile[] {
+		const n = this.activeSensorCount;
+		return n === null ? [] : this.profiles.filter((p) => p.sensorCount === n);
+	}
+
+	/** The profile last loaded onto the active pad, if it still exists. */
+	get loadedProfile(): Profile | null {
+		const id = this.active ? this.loaded[this.activeKey] : undefined;
+		return id ? (this.profiles.find((p) => p.id === id) ?? null) : null;
+	}
+
+	/** True if the active pad's live settings have drifted from the loaded profile. */
+	get isModified(): boolean {
+		const p = this.loadedProfile;
+		const snap = this.activeSnapshot;
+		if (!p || !snap) return false;
+		const n = Math.min(p.sensors.length, snap.sensors.length);
+		for (let i = 0; i < n; i++) {
+			const a = p.sensors[i];
+			const b = snap.sensors[i];
+			if (Math.abs((a.threshold ?? 0) - b.threshold) > EPS) return true;
+			if (Math.abs((a.releaseThreshold ?? 0) - b.releaseThreshold) > EPS) return true;
+			if (a.resistorValue !== undefined && a.resistorValue !== b.resistorValue) return true;
+		}
+		// Lights arrive in their own (gated) message; only compare once we've got
+		// them, so we don't flag drift before the first lights message lands.
+		const lights = this.activeConn?.lights;
+		if (lights) {
+			if (canon(p.lightRules ?? []) !== canon(lights.lightRules)) return true;
+			if (canon(p.ledMappings ?? []) !== canon(lights.ledMappings)) return true;
+		}
+		return false;
+	}
+
+	/** The active server if any, else any open connection (for file-only ops). */
+	#anyConn(): Conn | undefined {
+		return this.activeConn ?? this.conns.find((c) => c.status === 'open');
+	}
+
+	#persistLoaded() {
+		if (browser) localStorage.setItem(LOADED_KEY, JSON.stringify(this.loaded));
+	}
+
+	#markLoaded(id: string | null) {
+		if (!this.active) return;
+		const next = { ...this.loaded };
+		if (id === null) delete next[this.activeKey];
+		else next[this.activeKey] = id;
+		this.loaded = next;
+		this.#persistLoaded();
+	}
+
+	/** Apply a stored profile to the active pad (server validates sensor count). */
+	loadProfile(id: string) {
+		this.activeConn?.send({ loadProfile: id });
+		this.#markLoaded(id);
+	}
+
+	/** Capture the active pad's live settings as a new named profile. */
+	saveProfileAs(name: string) {
+		this.activeConn?.send({ saveProfile: { name } });
+		// ponytail: optimistically assume the predicted slug id. A duplicate name
+		// gets a suffixed id server-side and would mislabel until the list arrives.
+		this.#markLoaded(slugify(name));
+	}
+
+	/** Re-capture the active pad's live settings into an existing profile. */
+	overwriteProfile(id: string) {
+		this.activeConn?.send({ saveProfile: { id } });
+		this.#markLoaded(id);
+	}
+
+	/** Edit a profile's name/description (no re-capture). */
+	updateProfile(id: string, name: string, description: string) {
+		this.#anyConn()?.send({ updateProfile: { id, name, description } });
+	}
+
+	deleteProfile(id: string) {
+		this.#anyConn()?.send({ deleteProfile: id });
+		// Drop it from any pad's last-loaded pointer.
+		const next = { ...this.loaded };
+		let changed = false;
+		for (const k of Object.keys(next))
+			if (next[k] === id) {
+				delete next[k];
+				changed = true;
+			}
+		if (changed) {
+			this.loaded = next;
+			this.#persistLoaded();
+		}
+	}
+
 	/** Select which device to view/control; tells that server to stream it. */
 	selectDevice(endpoint: string, index: number) {
 		this.active = { endpoint, index };
 		this.pending = {};
 		if (browser) localStorage.setItem(ACTIVE_KEY, JSON.stringify(this.active));
-		this.conns.find((c) => c.endpoint === endpoint)?.send({ selectDevice: index });
+		const conn = this.conns.find((c) => c.endpoint === endpoint);
+		if (conn) conn.lights = null; // stale for the new pad until its lights message arrives
+		conn?.send({ selectDevice: index });
 	}
 
 	/** Merge an optimistic patch for a sensor and (throttled) push it to the pad. */

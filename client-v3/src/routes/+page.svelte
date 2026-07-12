@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import { goto } from '$app/navigation';
 	import { pads } from '$lib/pads.svelte';
 	import SensorBar from '$lib/components/SensorBar.svelte';
 	import SensorEditor from '$lib/components/SensorEditor.svelte';
@@ -12,9 +13,7 @@
 	let editingIndex = $state<number | null>(null);
 
 	onMount(() => {
-		pads.start();
 		endpointsText = pads.endpoints.join('\n');
-		return () => pads.stop();
 	});
 
 	// Auto-pick the first device once one shows up and nothing is chosen yet.
@@ -40,10 +39,28 @@
 	const editing = $derived(sensors.find((m) => m.index === editingIndex));
 	const anyOpen = $derived(pads.conns.some((c) => c.status === 'open'));
 
+	const profiles = $derived(pads.compatibleProfiles);
+	const loadedProfile = $derived(pads.loadedProfile);
+	const modified = $derived(pads.isModified);
+
 	function onSelect(key: string | undefined) {
 		if (!key) return;
 		const at = key.lastIndexOf('#');
 		pads.selectDevice(key.slice(0, at), Number(key.slice(at + 1)));
+	}
+
+	function onSelectProfile(id: string | undefined) {
+		if (id) pads.loadProfile(id);
+	}
+
+	function newProfile() {
+		const name = window.prompt('New profile name');
+		if (name && name.trim()) pads.saveProfileAs(name.trim());
+	}
+
+	function saveProfile() {
+		if (loadedProfile) pads.overwriteProfile(loadedProfile.id);
+		else newProfile();
 	}
 
 	function applyServers() {
@@ -71,6 +88,34 @@
 		<Button variant="outline" size="sm" onclick={() => (showServers = !showServers)}>Servers</Button
 		>
 	</header>
+
+	{#if snap}
+		<div class="flex flex-wrap items-center gap-2">
+			<Select.Root type="single" value={loadedProfile?.id ?? ''} onValueChange={onSelectProfile}>
+				<Select.Trigger class="w-56">
+					{loadedProfile?.name ?? 'No profile'}
+				</Select.Trigger>
+				<Select.Content>
+					{#each profiles as p (p.id)}
+						<Select.Item value={p.id} label={p.name}>{p.name}</Select.Item>
+					{/each}
+					{#if profiles.length === 0}
+						<div class="text-muted-foreground px-2 py-1.5 text-sm">
+							No profiles for {snap.sensors.length} sensors
+						</div>
+					{/if}
+				</Select.Content>
+			</Select.Root>
+
+			{#if loadedProfile && modified}
+				<Badge variant="secondary">modified</Badge>
+			{/if}
+
+			<Button size="sm" onclick={saveProfile}>Save</Button>
+			<Button variant="outline" size="sm" onclick={newProfile}>New</Button>
+			<Button variant="outline" size="sm" onclick={() => goto('/profiles')}>Manage</Button>
+		</div>
+	{/if}
 
 	<!-- per-endpoint connection status -->
 	<div class="flex flex-wrap gap-2">

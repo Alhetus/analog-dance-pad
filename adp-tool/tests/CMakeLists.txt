@@ -11,6 +11,7 @@ add_executable(adp-tool-tests
 	ReporterTests.cpp
 	PadDeviceTests.cpp
 	ProfileTests.cpp
+	ProfilesStoreTests.cpp
 	HandleMessageTests.cpp
 )
 

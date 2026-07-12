@@ -105,3 +105,68 @@ TEST_CASE("SaveProfile honors group flags", "[profile]")
 	CHECK_FALSE(j.contains("sensors"));
 	CHECK_FALSE(j.contains("releaseThreshold"));
 }
+
+TEST_CASE("Gain and button map to separate profile groups", "[profile]")
+{
+	RecordingBackend* raw = nullptr;
+	auto rep = makeReporter(raw);
+	PadDevice pad(rep, "t", makeName("MyPad"), makeIdent(1, 3, 8, 1), {}, {}, {makeSensor(0, 425, 0)});
+
+	// DPG_GAIN emits gain (resistorValue) but never the button mapping.
+	json g;
+	pad.SaveProfile(g, DPG_GAIN);
+	REQUIRE(g["sensors"].is_array());
+	CHECK(g["sensors"][0].contains("resistorValue"));
+	CHECK_FALSE(g["sensors"][0].contains("button"));
+
+	// DPG_MAPPING emits the button mapping but never the gain.
+	json m;
+	pad.SaveProfile(m, DPG_MAPPING);
+	CHECK(m["sensors"][0].contains("button"));
+	CHECK_FALSE(m["sensors"][0].contains("resistorValue"));
+}
+
+TEST_CASE("LoadProfile applies gain only under DPG_GAIN", "[profile]")
+{
+	RecordingBackend* raw = nullptr;
+	auto rep = makeReporter(raw);
+	// features = FEATURE_DIGIPOT (1 << 1) so gain writes are honored.
+	PadDevice pad(rep, "t", makeName("x"), makeIdent(1, 3, 8, 1, 1 << 1), {}, {}, {makeSensor(0, 425, 0)});
+
+	json j;
+	j["sensors"] = json::array();
+	json s0;
+	s0["resistorValue"] = 42;
+	s0["button"] = 5;
+	j["sensors"].push_back(s0);
+
+	// DPG_MAPPING must NOT touch gain (that is DPG_GAIN's job now).
+	pad.LoadProfile(j, DPG_MAPPING);
+	CHECK(pad.Sensor(0)->resistorValue == 0); // unchanged
+	CHECK(pad.Sensor(0)->button == 5);        // applied
+
+	// DPG_GAIN applies gain and leaves the button alone.
+	pad.LoadProfile(j, DPG_GAIN);
+	CHECK(pad.Sensor(0)->resistorValue == 42);
+}
+
+TEST_CASE("LoadProfile restores per-sensor release threshold", "[profile]")
+{
+	RecordingBackend* raw = nullptr;
+	auto rep = makeReporter(raw);
+	PadDevice pad(rep, "t", makeName("x"), makeIdent(1, 3, 8, 1), {}, {}, {makeSensor(0, 425, 0)});
+
+	// 0.5*850=425, 0.2*850=170 — both survive device quantization exactly, so a
+	// distinct release proves it is no longer clobbered to equal the threshold.
+	json j;
+	j["sensors"] = json::array();
+	json s0;
+	s0["threshold"] = 0.5;
+	s0["releaseThreshold"] = 0.2;
+	j["sensors"].push_back(s0);
+
+	pad.LoadProfile(j, DPG_SENSITIVITY);
+
+	CHECK(pad.Sensor(0)->threshold == Approx(0.5));
+	CHECK(pad.Sensor(0)->releaseThreshold == Approx(0.2));
+}
