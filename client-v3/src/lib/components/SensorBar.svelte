@@ -14,9 +14,8 @@
 
 	const pct = (v: number) => Math.round(v * 100);
 
-	// Client-side activation (instant); may briefly disagree with the pad's own
-	// `pressed` while a threshold change is in flight or release-mode differs.
-	const active = $derived(sensor.value > sensor.threshold);
+	// Pad-authoritative activation (honors release threshold / release mode).
+	const active = $derived(sensor.pressed);
 	const showRelease = $derived(sensor.releaseThreshold !== sensor.threshold);
 
 	function valueFromPointer(clientY: number) {

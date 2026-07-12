@@ -466,7 +466,14 @@ class PadsStore {
 
 	/** Optimistically set a sensor threshold and (throttled) push it to the pad. */
 	setThreshold(sensorIndex: number, value: number) {
-		this.#patch(sensorIndex, { threshold: clamp01(value) });
+		const v = clamp01(value);
+		const patch: SensorPatch = { threshold: v };
+		// The device keeps release at a fixed ratio of threshold (global mode);
+		// overlay it in lockstep so the release marker tracks the drag instead of
+		// lagging until the pad echoes the recomputed value back.
+		const s = this.#activeConn()?.snapshot?.sensors[sensorIndex];
+		if (s && s.threshold > 0) patch.releaseThreshold = clamp01(v * (s.releaseThreshold / s.threshold));
+		this.#patch(sensorIndex, patch);
 	}
 
 	setReleaseThreshold(sensorIndex: number, value: number) {
