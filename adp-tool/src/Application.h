@@ -1,4 +1,5 @@
 #pragma once
+#include <atomic>
 #include "MSGQ.hpp"
 #include "WebsocketServer.h"
 
@@ -8,7 +9,10 @@ namespace adp {
         Application();
         ~Application();
 
-        [[noreturn]] void UpdateLoop(MSGQ<QueueMessage*> &queue, const WebsocketServer &websocketServer);
+        // The single device-I/O loop: discovers devices, polls sensors, publishes
+        // the snapshot, broadcasts it, and applies inbound client commands. Runs
+        // until `running` is cleared (graceful shutdown).
+        void UpdateLoop(MSGQ<QueueMessage>& queue, WebsocketServer& websocketServer, std::atomic<bool>& running);
     private:
         static void OnInit();
         static void OnExit();

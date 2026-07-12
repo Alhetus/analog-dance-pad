@@ -1,5 +1,6 @@
 #include <Adp.h>
 
+#include <atomic>
 #include <memory>
 #include <algorithm>
 #include <map>
@@ -7,12 +8,13 @@
 #include <thread>
 
 #include "hidapi.h"
-#include <fmt/core.h>
+#include <fmt/format.h>
 
 #include <Model/Device.h>
 #include <Model/Reporter.h>
 #include <Model/Utils.h>
 #include <Model/Firmware.h>
+#include <Model/Wire.h>
 
 using namespace std;
 using namespace chrono;
@@ -58,9 +60,17 @@ RgbColor::RgbColor(uint8_t r, uint8_t g, uint8_t b)
 RgbColor::RgbColor(const std::string& input)
 	: RgbColor()
 {
-	const char* p = input.data();
+	const char* p = input.c_str();
 	if (*p == '#') ++p;
-	sscanf(p, "%02hhx%02hhx%02hhx", &red, &green, &blue);
+
+	unsigned int r = 0, g = 0, b = 0;
+	if (sscanf(p, "%02x%02x%02x", &r, &g, &b) == 3)
+	{
+		red = (uint8_t)r;
+		green = (uint8_t)g;
+		blue = (uint8_t)b;
+	}
+	// On a malformed string the channels stay 0 (from the delegated ctor).
 }
 
 RgbColor::RgbColor()
@@ -82,58 +92,8 @@ static bool IsBitSet(int bits, int index)
 	return (bits & (1 << index)) != 0;
 }
 
-static int ReadU16LE(uint16_le u16)
-{
-	return u16.bytes[0] | u16.bytes[1] << 8;
-}
-
-static uint32_t ReadU32LE(uint32_le u32)
-{
-	return u32.bytes[0] | (u32.bytes[1] << 8) | (u32.bytes[2] << 16) | (u32.bytes[3] << 24);
-}
-
-static float ReadF32LE(float32_le f32)
-{
-	uint32_t u32 = ReadU32LE(f32.bits);
-	return *reinterpret_cast<float*>(&u32);
-}
-
-static uint16_le WriteU16LE(int value)
-{
-	uint16_le u16;
-	u16.bytes[0] = value & 0xFF;
-	u16.bytes[1] = (value >> 8) & 0xFF;
-	return u16;
-}
-
-static uint32_le WriteU32LE(uint32_t value)
-{
-	uint32_le u32;
-	u32.bytes[0] = value & 0xFF;
-	u32.bytes[1] = (value >> 8) & 0xFF;
-	u32.bytes[2] = (value >> 16) & 0xFF;
-	u32.bytes[3] = (value >> 24) & 0xFF;
-	return u32;
-}
-
-static float32_le WriteF32LE(float value)
-{
-	uint32_t u32 = *reinterpret_cast<uint32_t*>(&value);
-	return { WriteU32LE(u32) };
-}
-
-template <typename T>
-static double ToNormalizedSensorValue(T deviceValue)
-{
-	constexpr double scalar = 1.0 / (double)MAX_SENSOR_VALUE;
-	return max(0.0, min(1.0, deviceValue * scalar));
-}
-
-static int ToDeviceSensorValue(double normalizedValue)
-{
-	int mapped = (int)lround(normalizedValue * MAX_SENSOR_VALUE);
-	return max(0, min(MAX_SENSOR_VALUE, mapped));
-}
+// Wire-format conversion helpers (ReadU16LE/WriteU16LE/... and the sensor-value
+// mapping) now live in Model/Wire.h so they can be unit-tested and reused.
 
 static RgbColor ToRgbColor(color24 color)
 {
@@ -158,7 +118,7 @@ SensorReport SensorState::ToReport(int index)
 	return report;
 }
 
-static void PrintPadConfigurationReport(const PadConfigurationReport& padConfiguration)
+[[maybe_unused]] static void PrintPadConfigurationReport(const PadConfigurationReport& padConfiguration)
 {
 	std::printf("pad configuration [\n");
 	std::printf("  releaseThreshold: %.2f\n", ReadF32LE(padConfiguration.releaseThreshold));
@@ -226,30 +186,33 @@ class PadDevice
 {
 public:
 	PadDevice(
-		unique_ptr<Reporter>& reporter,
+		shared_ptr<Reporter> reporter,
 		const char* path,
 		const NameReport& name,
 		const IdentificationV2Report& identification,
 		const vector<LightRuleReport>& lightRules,
 		const vector<LedMappingReport>& ledMappings,
 		const vector<SensorReport>& sensors)
-		: myReporter(reporter)
+		: myReporter(std::move(reporter))
 		, myPath(path)
 	{
-		mySensors = vector<SensorState>(identification.sensorCount);
+		// Clamp the device-reported sensor count so a malformed/hostile device
+		// can't drive out-of-bounds access downstream.
+		int sensorCount = std::clamp<int>(identification.sensorCount, 0, SENSOR_COUNT_MAX);
+
+		mySensors = vector<SensorState>(sensorCount);
 
 		UpdateName(name);
 		myPad.maxNameLength = MAX_NAME_LENGTH;
 
 		myPad.numButtons = identification.buttonCount;
-		myPad.numSensors = identification.sensorCount;
+		myPad.numSensors = sensorCount;
 
-		auto buffer = (char*)calloc(BOARD_TYPE_LENGTH + 1, sizeof(char));
-		if (buffer)
+		// Board type is a fixed-width, not-necessarily-NUL-terminated field.
 		{
-			memcpy(buffer, identification.boardType, BOARD_TYPE_LENGTH);
-			myPad.boardType = BoardTypeStruct(buffer);
-			free(buffer);
+			char boardType[BOARD_TYPE_LENGTH + 1] = {};
+			memcpy(boardType, identification.boardType, BOARD_TYPE_LENGTH);
+			myPad.boardType = BoardTypeStruct(boardType);
 		}
 
 		myPad.firmwareVersion.major = ReadU16LE(identification.firmwareMajor);
@@ -291,16 +254,15 @@ public:
 
 		UpdateLightsConfiguration(lightRules, ledMappings);
 		myPollingData.lastUpdate = system_clock::now();
-
-		running = true;
-		sensorThread = std::thread(&PadDevice::UpdateSensorThread, this);
 	}
 
-	~PadDevice()
+	~PadDevice() = default;
+
+	// True if the index is a valid position in mySensors. Used to reject
+	// out-of-range indices coming from the device or from client profiles.
+	bool ValidSensorIndex(int index) const
 	{
-		running = false;
-		if (sensorThread.joinable())
-			sensorThread.join();
+		return index >= 0 && index < (int)mySensors.size();
 	}
 
 	void UpdateName(const NameReport& report)
@@ -361,29 +323,11 @@ public:
 			UpdateLedMapping(report);
 	}
 
-	bool UpdateSensorValues()
-	{
-		return running;
-	}
-
-	void UpdateSensorThread()
-	{
-		std::this_thread::sleep_for(std::chrono::milliseconds(1000));
-
-		myPollingData.lastUpdate = system_clock::now();
-		while(running)
-		{
-			if(!UpdateSensorFunc())
-			{
-				running = false;
-				break;
-			}
-
-			this_thread::sleep_for(chrono::milliseconds(16));
-		}
-	}
-
-	bool UpdateSensorFunc()
+	// Reads pending sensor samples from the device. Called once per tick on the
+	// single device-I/O thread (there is no separate sensor thread anymore, so
+	// mySensors/myPollingData have exactly one writer). Returns false on a HID
+	// read failure, which the caller treats as a disconnect.
+	bool PollSensors()
 	{
 		SensorValuesReport report;
 		std::vector<int> aggregateValues = std::vector<int>(myPad.numSensors, 0);
@@ -453,6 +397,9 @@ public:
 
 	bool SetThreshold(int sensorIndex, double threshold, double releaseThreshold)
 	{
+		if (!ValidSensorIndex(sensorIndex))
+			return false;
+
 		mySensors[sensorIndex].threshold = threshold;
 		mySensors[sensorIndex].releaseThreshold = releaseThreshold;
 
@@ -487,6 +434,9 @@ public:
 
 	bool SetAdcConfig(int sensorIndex, int resistorValue)
 	{
+		if (!ValidSensorIndex(sensorIndex))
+			return false;
+
 		mySensors[sensorIndex].resistorValue = resistorValue;
 
 		return SendSensor(sensorIndex);
@@ -494,7 +444,7 @@ public:
 
 	void UpdateSensor(SensorReport sensor)
 	{
-		if (sensor.index < 0 || sensor.index > myPad.numSensors) {
+		if (!ValidSensorIndex(sensor.index)) {
 			return;
 		}
 
@@ -506,6 +456,9 @@ public:
 
 	bool SendSensor(int sensorIndex)
 	{
+		if (!ValidSensorIndex(sensorIndex))
+			return false;
+
 		SensorReport report = mySensors[sensorIndex].ToReport(sensorIndex);
 
 		bool success = myReporter->Send(report);
@@ -520,6 +473,9 @@ public:
 
 	bool SetButtonMapping(int sensorIndex, int button)
 	{
+		if (!ValidSensorIndex(sensorIndex))
+			return false;
+
 		mySensors[sensorIndex].button = button;
 		myChanges |= DCF_BUTTON_MAPPING;
 
@@ -540,15 +496,17 @@ public:
 
 		if (length > sizeof(report.name))
 		{
-			std::printf("SetName :: name '%hs' exceeds %zi chars and was not set\n", name, sizeof(report.name));
+			std::printf("SetName :: name '%s' exceeds %zi chars and was not set\n", name, sizeof(report.name));
 			return false;
 		}
 
 		report.size = (uint8_t)length;
 		memcpy(report.name, name, length);
 		bool result = myReporter->SendAndGet(report);
-		NotifyUnsavedChanges();
-		UpdateName(report);
+		if (result) {
+			NotifyUnsavedChanges();
+			UpdateName(report);
+		}
 		return result;
 	}
 
@@ -630,10 +588,14 @@ public:
 
 	void CalibrateSensor(int sensorIndex)
 	{
+		if (!ValidSensorIndex(sensorIndex))
+			return;
+
 		SetPropertyReport report;
 		report.propertyId = WriteU32LE(SetPropertyReport::CALIBRATE_SENSOR);
 		report.propertyValue = WriteU32LE(sensorIndex);
-		bool result = myReporter->Send(report);
+		if (!myReporter->Send(report))
+			std::printf("CalibrateSensor :: failed to send calibrate command\n");
 	}
 
 	void Reset() { myReporter->SendReset(); }
@@ -647,7 +609,10 @@ public:
 	bool SendPadConfiguration()
 	{
 		PadConfigurationReport report;
-		for (int i = 0; i < myPad.numSensors; ++i)
+		// The legacy PadConfiguration report has fixed-size arrays; never write
+		// past them even if the device claims more sensors.
+		int count = std::min(myPad.numSensors, SENSOR_COUNT_V1);
+		for (int i = 0; i < count; ++i)
 		{
 			report.sensorThresholds[i] = WriteU16LE(ToDeviceSensorValue(mySensors[i].threshold));
 			report.sensorToButtonMapping[i] = (mySensors[i].button == 0) ? 0xFF : (mySensors[i].button - 1);
@@ -710,11 +675,14 @@ public:
 
 		int messageSize = ReadU16LE(report.messageSize);
 
+		// Bound the length by the actual packet buffer; messagePacket is not
+		// guaranteed to be NUL-terminated, so never construct from a bare char*.
+		messageSize = std::clamp<int>(messageSize, 0, (int)sizeof(report.messagePacket));
 		if (messageSize == 0) {
 			return "";
 		}
 
-		return report.messagePacket;
+		return std::string(report.messagePacket, (size_t)messageSize);
 	}
 
 	DeviceChanges PopChanges()
@@ -730,10 +698,9 @@ public:
 	}
 
 private:
-	bool running = false;
-	std::thread sensorThread;
-
-	unique_ptr<Reporter>& myReporter;
+	// Shared ownership: the DeviceConnection also holds this reporter (for name
+	// refreshes), so refcounting keeps it alive for whichever outlives the other.
+	shared_ptr<Reporter> myReporter;
 	DevicePath myPath;
 	PadState myPad;
 	LightsState myLights;
@@ -748,7 +715,7 @@ private:
 // Connection manager.
 // ====================================================================================================================
 
-static bool ContainsDevice(hid_device_info* devices, DevicePath path)
+[[maybe_unused]] static bool ContainsDevice(hid_device_info* devices, DevicePath path)
 {
 	for (auto device = devices; device; device = device->next)
 		if (path == device->path)
@@ -774,11 +741,9 @@ public:
 
 	}
 
-	~DeviceConnection()
-	{
-		if (hidHandle)
-			hid_close(hidHandle);
-	}
+	// The hid_device* is owned solely by the Reporter's BackendHid (which closes
+	// it in its destructor), so there is no handle to close here.
+	~DeviceConnection() = default;
 
 	bool Probe()
 	{
@@ -787,22 +752,24 @@ public:
 
 		std::this_thread::sleep_for(std::chrono::milliseconds(5));
 
-		hidHandle = hid_open_path(path.c_str());
-		if (!hidHandle)
+		hid_device* handle = hid_open_path(path.c_str());
+		if (!handle)
 		{
 			std::printf("DeviceConnection :: hid_open failed (%ls) :: %s\n", hid_error(nullptr), path.c_str());
 			state = CS_FAILED;
 			return false;
 		}
 
-		if (hid_set_nonblocking(hidHandle, 1) < 0)
+		if (hid_set_nonblocking(handle, 1) < 0)
 		{
 			std::printf("ConnectionManager :: hid_set_nonblocking failed\n");
+			hid_close(handle);
 			state = CS_FAILED;
 			return false;
 		}
 
-		reporter = make_unique<Reporter>(hidHandle);
+		// Reporter/BackendHid takes ownership of the handle from here on.
+		reporter = make_shared<Reporter>(handle);
 
 		if(!reporter->Get(nameReport))
 		{
@@ -822,7 +789,7 @@ public:
 
 	string GetName(bool update = false)
 	{
-		if(update) {
+		if(update && reporter) {
 			reporter->Get(nameReport);
 		}
 
@@ -834,7 +801,7 @@ public:
 		return path;
 	}
 
-	unique_ptr<Reporter>& GetReporter()
+	shared_ptr<Reporter> GetReporter()
 	{
 		return reporter;
 	}
@@ -855,9 +822,9 @@ public:
 protected:
 	ConnectionState state = CS_UNKNOWN;
 	std::string path;
-	hid_device* hidHandle = nullptr;
 
-	unique_ptr<Reporter> reporter;
+	// Shared with the PadDevice created from this connection.
+	shared_ptr<Reporter> reporter;
 	NameReport nameReport;
 	IdentificationV2Report identificationReport;
 };
@@ -882,6 +849,8 @@ public:
 			{
 				devicePaths.push_back(dev->path);
 			}
+			// hid_enumerate allocates a linked list that the caller must free.
+			hid_free_enumeration(foundDevices);
 		}
 	}
 
@@ -933,7 +902,7 @@ public:
 
 	bool ConnectToDeviceStage2(DeviceConnection& deviceCon)
 	{
-		unique_ptr<Reporter>& reporter = deviceCon.GetReporter();
+		shared_ptr<Reporter> reporter = deviceCon.GetReporter();
 		string devicePath = deviceCon.GetPath();
 
 		NameReport name;
@@ -1064,7 +1033,7 @@ public:
 			}
 		}
 
-		auto device = new PadDevice(
+		auto device = make_unique<PadDevice>(
 			reporter,
 			devicePath.c_str(),
 			name,
@@ -1084,7 +1053,7 @@ public:
 
 		std::printf("]\n");
 
-		myConnectedDevice.reset(device);
+		myConnectedDevice = std::move(device);
 		return true;
 	}
 
@@ -1158,14 +1127,13 @@ public:
 	bool ConnectToUrl(string url)
 	{
 		if (devices.contains(url)) {
+			// Already known: find its index and select it.
 			int c = 0;
-
 			for (auto& it : devices)
 			{
 				if (it.second.GetPath() == url)
-					return c;
-				
-				return DeviceSelect(c);
+					return DeviceSelect(c);
+				++c;
 			}
 
 			return false;
@@ -1199,8 +1167,12 @@ private:
 // Device API.
 // ====================================================================================================================
 
-static ConnectionManager* connectionManager = nullptr;
-static bool searching = true;
+static std::unique_ptr<ConnectionManager> connectionManager;
+static std::atomic<bool> searching = true;
+
+// The latest immutable sensor snapshot. Written only on the device-I/O thread
+// (PublishSnapshot); read lock-free from any thread (GetSnapshot).
+static std::atomic<std::shared_ptr<const SensorSnapshot>> gSnapshot;
 
 
 bool DeviceConnection::ConnectStage2()
@@ -1229,13 +1201,14 @@ void Device::Init()
 {
 	hid_init();
 
-	connectionManager = new ConnectionManager();
+	connectionManager = std::make_unique<ConnectionManager>();
 }
 
 void Device::Shutdown()
 {
-	delete connectionManager;
-	connectionManager = nullptr;
+	connectionManager.reset();
+
+	gSnapshot.store(nullptr);
 
 	hid_exit();
 }
@@ -1254,12 +1227,13 @@ DeviceChanges Device::Update()
 		device = connectionManager->ConnectedDevice();
 	}
 
-	// If there is a device, update it.
+	// If there is a device, update it. All hidapi access happens here on the
+	// single device-I/O thread.
 	if (device)
 	{
 		changes |= device->PopChanges();
-		
-		if (!device->UpdateSensorValues())
+
+		if (!device->PollSensors())
 		{
 			connectionManager->DisconnectFailedDevice();
 			changes |= DCF_DEVICE;
@@ -1269,6 +1243,9 @@ DeviceChanges Device::Update()
 			connectionManager->GetDeviceName(connectionManager->DeviceSelected(), true);
 		}
 	}
+
+	// Publish the latest immutable snapshot for the WebSocket side to read.
+	PublishSnapshot();
 
 	return changes;
 }
@@ -1297,25 +1274,107 @@ const SensorState* Device::Sensor(int sensorIndex)
 	return device ? device->Sensor(sensorIndex) : nullptr;
 }
 
-void Device::GetAllSensorStatesAsJson(json &j)
+void Device::PublishSnapshot()
+{
+	auto snapshot = std::make_shared<SensorSnapshot>();
+
+	auto device = connectionManager ? connectionManager->ConnectedDevice() : nullptr;
+	snapshot->deviceCount = connectionManager ? connectionManager->DeviceNumber() : 0;
+
+	if (device)
+	{
+		const PadState& pad = device->State();
+		snapshot->connected = true;
+		snapshot->name = pad.name;
+		snapshot->pollingRate = device->PollingRate();
+		snapshot->releaseThreshold = pad.releaseThreshold;
+		snapshot->releaseMode = (int)pad.releaseMode;
+
+		snapshot->sensors.reserve(pad.numSensors);
+		for (int i = 0; i < pad.numSensors; ++i)
+		{
+			if (const SensorState* s = device->Sensor(i))
+				snapshot->sensors.push_back(*s);
+		}
+	}
+
+	// Publish as immutable; readers get a stable, consistent view.
+	gSnapshot.store(std::shared_ptr<const SensorSnapshot>(std::move(snapshot)));
+}
+
+std::shared_ptr<const SensorSnapshot> Device::GetSnapshot()
+{
+	return gSnapshot.load();
+}
+
+void Device::SnapshotToJson(const SensorSnapshot& snapshot, json& j)
 {
 	j["msgType"] = 1;
-	j["deviceIndex"] = Device::DeviceNumber();
-	j["name"] = Pad()->name;
-	j["pollingRate"] = Device::PollingRate();
+	j["deviceIndex"] = snapshot.deviceCount;
+	j["name"] = snapshot.name;
+	j["pollingRate"] = snapshot.pollingRate;
+	j["releaseThreshold"] = snapshot.releaseThreshold;
+	j["releaseMode"] = snapshot.releaseMode;
 	j["sensors"] = json::array();
-	j["releaseThreshold"] = Device::Pad()->releaseThreshold;
-	j["releaseMode"] = Pad()->releaseMode;
 
-	for (int i = 0; i < Device::Pad()->numSensors; ++i)
+	for (const SensorState& s : snapshot.sensors)
 	{
-		j["sensors"][i]["threshold"] = Device::Sensor(i)->threshold;
-		j["sensors"][i]["releaseThreshold"] = Device::Sensor(i)->releaseThreshold;
-		j["sensors"][i]["value"] = Device::Sensor(i)->value;
-		j["sensors"][i]["resistorValue"] = Device::Sensor(i)->resistorValue;
-		j["sensors"][i]["button"] = Device::Sensor(i)->button;
-		j["sensors"][i]["pressed"] = Device::Sensor(i)->pressed;
+		json sensor;
+		sensor["threshold"] = s.threshold;
+		sensor["releaseThreshold"] = s.releaseThreshold;
+		sensor["value"] = s.value;
+		sensor["resistorValue"] = s.resistorValue;
+		sensor["button"] = s.button;
+		sensor["pressed"] = s.pressed;
+		j["sensors"].push_back(std::move(sensor));
 	}
+}
+
+void Device::HandleClientMessage(const std::string& message)
+{
+	// Runs on the device-I/O thread, so any device mutation triggered here is
+	// single-threaded and safe. Parsing is fully defensive: a malformed or
+	// unrecognized message is logged and ignored, never fatal.
+	json j;
+	try
+	{
+		j = json::parse(message);
+	}
+	catch (const std::exception& e)
+	{
+		std::printf("HandleClientMessage :: invalid JSON ignored (%s)\n", e.what());
+		return;
+	}
+
+	if (!j.is_object())
+	{
+		std::printf("HandleClientMessage :: non-object message ignored\n");
+		return;
+	}
+
+	// Only act when a device is connected; otherwise there is nothing to apply.
+	if (!connectionManager || !connectionManager->ConnectedDevice())
+	{
+		std::printf("HandleClientMessage :: no device connected, message ignored\n");
+		return;
+	}
+
+	// A configuration update reuses the hardened LoadProfile path, which
+	// validates every index and group before touching device state.
+	if (j.contains("sensors") || j.contains("releaseThreshold") || j.contains("name") || j.contains("lightRules"))
+	{
+		try
+		{
+			LoadProfile(j, DGP_ALL);
+		}
+		catch (const std::exception& e)
+		{
+			std::printf("HandleClientMessage :: failed to apply config (%s)\n", e.what());
+		}
+		return;
+	}
+
+	std::printf("HandleClientMessage :: unhandled message: %s\n", message.c_str());
 }
 
 std::string Device::ReadDebug()
@@ -1458,141 +1517,157 @@ int Device::DeviceSelected()
 
 void Device::LoadProfile(json& j, DeviceProfileGroups groups)
 {
-	if((groups & DPG_LIGHTS) > 0 && Pad()->featureLights) {
-		if(j["ledMappings"].is_array()) {
-			for(int key = 0; key < j["ledMappings"].size(); key++) {
-				auto value = j["ledMappings"][key];
+	const PadState* pad = Pad();
+	if (!pad) {
+		std::printf("LoadProfile :: no device connected\n");
+		return;
+	}
+
+	if ((groups & DPG_LIGHTS) && pad->featureLights) {
+		if (j.contains("ledMappings") && j["ledMappings"].is_array()) {
+			const auto& ledMappings = j["ledMappings"];
+			for (size_t key = 0; key < ledMappings.size() && key < (size_t)MAX_LED_MAPPINGS; ++key) {
+				const auto& value = ledMappings[key];
 
 				LedMapping lm = {
-					value["lightRuleIndex"],
-					value["sensorIndex"],
-					value["ledIndexBegin"],
-					value["ledIndexEnd"]
+					value.value("lightRuleIndex", 0),
+					value.value("sensorIndex", 0),
+					value.value("ledIndexBegin", 0),
+					value.value("ledIndexEnd", 0)
 				};
 
-				SendLedMapping(key, lm);
+				SendLedMapping((int)key, lm);
 			}
 
-			int lastRule = (int)j["ledMappings"].size();
-			if(lastRule < MAX_LED_MAPPINGS)
-			{
-				for(int i = lastRule; i < MAX_LIGHT_RULES; i++) {
-					DisableLedMapping(i);
-				}
+			// Disable any slots not present in the profile.
+			for (int i = (int)std::min<size_t>(ledMappings.size(), MAX_LED_MAPPINGS); i < MAX_LED_MAPPINGS; ++i) {
+				DisableLedMapping(i);
 			}
 		}
 
-		if(j["lightRules"].is_array()) {
-			for(int key = 0; key < j["lightRules"].size(); key++) {
-				auto value = j["lightRules"][key];
+		if (j.contains("lightRules") && j["lightRules"].is_array()) {
+			const auto& lightRules = j["lightRules"];
+			for (size_t key = 0; key < lightRules.size() && key < (size_t)MAX_LIGHT_RULES; ++key) {
+				const auto& value = lightRules[key];
+
+				auto color = [&value](const char* name) {
+					return (value.contains(name) && value[name].is_string())
+						? RgbColor((string)value[name]) : RgbColor(0, 0, 0);
+				};
 
 				LightRule lr = {
-					value["fadeOn"],
-					value["fadeOff"],
-					value["onColor"].is_string() ? RgbColor((string)value["onColor"]) : RgbColor(0,0,0),
-					value["offColor"].is_string() ? RgbColor((string)value["offColor"]) : RgbColor(0,0,0),
-					value["onFadeColor"].is_string() ? RgbColor((string)value["onFadeColor"]) : RgbColor(0,0,0),
-					value["offFadeColor"].is_string() ? RgbColor((string)value["offFadeColor"]) : RgbColor(0,0,0)
+					value.value("fadeOn", false),
+					value.value("fadeOff", false),
+					color("onColor"),
+					color("offColor"),
+					color("onFadeColor"),
+					color("offFadeColor")
 				};
 
-				SendLightRule(key, lr);
+				SendLightRule((int)key, lr);
 			}
 
-			int lastRule = (int)j["lightRules"].size();
-			if(lastRule < MAX_LIGHT_RULES)
-			{
-				for(int i = lastRule; i < MAX_LIGHT_RULES; i++) {
-					DisableLightRule(i);
-				}
+			for (int i = (int)std::min<size_t>(lightRules.size(), MAX_LIGHT_RULES); i < MAX_LIGHT_RULES; ++i) {
+				DisableLightRule(i);
 			}
 		}
 
-		auto device = connectionManager->ConnectedDevice();
-		if(device) {
-            device->TriggerChange(DCF_LIGHTS);
+		auto device = connectionManager ? connectionManager->ConnectedDevice() : nullptr;
+		if (device) {
+			device->TriggerChange(DCF_LIGHTS);
 		}
 	}
 
-	if (j["sensors"].is_array()) {
-		for (int key = 0; key < j["sensors"].size(); key++) {
-			auto sensor = j["sensors"][key];
+	if (j.contains("sensors") && j["sensors"].is_array()) {
+		const auto& sensors = j["sensors"];
+		for (size_t key = 0; key < sensors.size(); ++key) {
+			const auto& sensor = sensors[key];
+			const int idx = (int)key;
 
-			if (groups & DPG_SENSITIVITY && sensor.contains("threshold")) {
-				SetThreshold(key, sensor["threshold"], sensor["threshold"]);
+			if ((groups & DPG_SENSITIVITY) && sensor.contains("threshold") && sensor["threshold"].is_number()) {
+				double th = sensor["threshold"].get<double>();
+				SetThreshold(idx, th, th);
 			}
 
-			if (groups & DPG_MAPPING && sensor.contains("button")) {
-				SetButtonMapping(key, sensor["button"]);
+			if ((groups & DPG_MAPPING) && sensor.contains("button") && sensor["button"].is_number_integer()) {
+				SetButtonMapping(idx, sensor["button"].get<int>());
 			}
 
-			if (groups & DPG_MAPPING && sensor.contains("resistorValue") && Pad()->featureDigipot) {
-				SetAdcConfig(key, sensor["resistorValue"]);
+			if ((groups & DPG_MAPPING) && sensor.contains("resistorValue") && sensor["resistorValue"].is_number_integer() && pad->featureDigipot) {
+				SetAdcConfig(idx, sensor["resistorValue"].get<int>());
 			}
 		}
 	}
 
-	if(groups & DPG_SENSITIVITY) {
-		if(j["releaseThreshold"].is_number()) {
-			SetReleaseThreshold(j["releaseThreshold"]);
+	if (groups & DPG_SENSITIVITY) {
+		if (j.contains("releaseThreshold") && j["releaseThreshold"].is_number()) {
+			SetReleaseThreshold(j["releaseThreshold"].get<double>());
 		}
 	}
 
-	if(groups & DPG_DEVICE) {
-		if(j.contains("name")) {
-			string name = j["name"];
-			SetDeviceName( ((std::string)j["name"]).c_str() );
+	if (groups & DPG_DEVICE) {
+		if (j.contains("name") && j["name"].is_string()) {
+			SetDeviceName(j["name"].get<string>().c_str());
 		}
 	}
 }
 
 void Device::SaveProfile(json& j, DeviceProfileGroups groups)
 {
-	j["adpToolVersion"] = fmt::format("v{}.{}", ADP_VERSION_MAJOR, ADP_VERSION_MINOR);
-
-	if((groups & DPG_LIGHTS) && Pad()->featureLights && Lights()) {
-		auto lights = Lights();
-
-		j["ledMappings"] = json::array();
-		for(const auto& [index, lm] : lights->ledMappings) {
-			j["ledMappings"][index]["lightRuleIndex"] = lm.lightRuleIndex;
-			j["ledMappings"][index]["sensorIndex"] = lm.sensorIndex;
-			j["ledMappings"][index]["ledIndexBegin"] = lm.ledIndexBegin;
-			j["ledMappings"][index]["ledIndexEnd"] = lm.ledIndexEnd;
-		}
-
-      
-		j["lightRules"] = json::array();
-		for(const auto& [index, lr] : lights->lightRules) {
-			j["lightRules"][index]["fadeOn"] = lr.fadeOn;
-			j["lightRules"][index]["fadeOff"] = lr.fadeOff;
-			j["lightRules"][index]["onColor"] = lr.onColor.ToString();
-			j["lightRules"][index]["offColor"] = lr.offColor.ToString();
-			j["lightRules"][index]["onFadeColor"] = lr.onFadeColor.ToString();
-			j["lightRules"][index]["offFadeColor"] = lr.offFadeColor.ToString();
-		}
-
+	const PadState* pad = Pad();
+	if (!pad) {
+		std::printf("SaveProfile :: no device connected\n");
+		return;
 	}
 
-	if(groups & (DPG_SENSITIVITY | DPG_MAPPING)) {
+	j["adpToolVersion"] = fmt::format("v{}.{}", ADP_VERSION_MAJOR, ADP_VERSION_MINOR);
+
+	if ((groups & DPG_LIGHTS) && pad->featureLights) {
+		if (const LightsState* lights = Lights()) {
+			j["ledMappings"] = json::array();
+			for (const auto& [index, lm] : lights->ledMappings) {
+				j["ledMappings"][index]["lightRuleIndex"] = lm.lightRuleIndex;
+				j["ledMappings"][index]["sensorIndex"] = lm.sensorIndex;
+				j["ledMappings"][index]["ledIndexBegin"] = lm.ledIndexBegin;
+				j["ledMappings"][index]["ledIndexEnd"] = lm.ledIndexEnd;
+			}
+
+			j["lightRules"] = json::array();
+			for (const auto& [index, lr] : lights->lightRules) {
+				j["lightRules"][index]["fadeOn"] = lr.fadeOn;
+				j["lightRules"][index]["fadeOff"] = lr.fadeOff;
+				j["lightRules"][index]["onColor"] = lr.onColor.ToString();
+				j["lightRules"][index]["offColor"] = lr.offColor.ToString();
+				j["lightRules"][index]["onFadeColor"] = lr.onFadeColor.ToString();
+				j["lightRules"][index]["offFadeColor"] = lr.offFadeColor.ToString();
+			}
+		}
+	}
+
+	if (groups & (DPG_SENSITIVITY | DPG_MAPPING)) {
 		j["sensors"] = json::array();
-		for (int i = 0; i < Device::Pad()->numSensors; ++i)
+		for (int i = 0; i < pad->numSensors; ++i)
 		{
+			const SensorState* s = Sensor(i);
+			if (!s)
+				continue;
+
 			if (groups & DPG_SENSITIVITY) {
-				j["sensors"][i]["threshold"] = Device::Sensor(i)->threshold;
-				j["sensors"][i]["releaseThreshold"] = Device::Sensor(i)->releaseThreshold;
+				j["sensors"][i]["threshold"] = s->threshold;
+				j["sensors"][i]["releaseThreshold"] = s->releaseThreshold;
 			}
 
 			if (groups & DPG_MAPPING) {
-				j["sensors"][i]["button"] = Device::Sensor(i)->button;
-				j["sensors"][i]["resistorValue"] = Device::Sensor(i)->resistorValue;
+				j["sensors"][i]["button"] = s->button;
+				j["sensors"][i]["resistorValue"] = s->resistorValue;
 			}
 		}
 
-		j["releaseThreshold"] = Device::Pad()->releaseThreshold;
+		j["releaseThreshold"] = pad->releaseThreshold;
 	}
 
-	if(groups & DPG_DEVICE) {
-		j["name"] = Pad()->name;
+	if (groups & DPG_DEVICE) {
+		j["name"] = pad->name;
 	}
 }
 

@@ -1,0 +1,14 @@
+# First-party formatting for adp-tool. Vendored code under lib/ and vcpkg/ is
+# excluded via .clang-format-ignore / directory-level configs where present.
+BasedOnStyle: Microsoft
+Language: Cpp
+Standard: c++20
+UseTab: ForIndentation
+IndentWidth: 4
+TabWidth: 4
+ColumnLimit: 120
+PointerAlignment: Left
+AllowShortFunctionsOnASingleLine: InlineOnly
+AllowShortIfStatementsOnASingleLine: false
+FixNamespaceComments: true
+SortIncludes: false

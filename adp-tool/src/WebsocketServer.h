@@ -1,6 +1,10 @@
 #ifndef WEBSOCKETSERVER_H
 #define WEBSOCKETSERVER_H
 
+#include <memory>
+#include <mutex>
+#include <string>
+
 #include "MSGQ.hpp"
 #include "ixwebsocket/IXWebSocketServer.h"
 
@@ -10,10 +14,20 @@ namespace adp {
         WebsocketServer();
         ~WebsocketServer();
 
-        void Init(MSGQ<QueueMessage*> &queue);
-        void SendMessageToClients(const std::string& message) const;
+        // Runs the server; blocks until Stop() is called.
+        void Init(MSGQ<QueueMessage>& queue);
+
+        // Broadcasts a message to all connected clients. Thread-safe.
+        void SendMessageToClients(const std::string& message);
+
+        // Stops the server, unblocking Init(). Thread-safe and idempotent.
+        void Stop();
     private:
-        ix::WebSocketServer* wsServer = nullptr;
+        // Owns the ix server for its whole lifetime (no dangling stack pointer).
+        // Guarded because it is published on the server thread and read/stopped
+        // from the device thread and the signal path.
+        std::mutex serverMutex;
+        std::unique_ptr<ix::WebSocketServer> server;
     };
 }
 

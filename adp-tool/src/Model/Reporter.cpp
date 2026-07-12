@@ -152,11 +152,7 @@ protected:
 // ====================================================================================================================
 
 Reporter::Reporter(hid_device* device)
-	: backend(new BackendHid(device))
-{
-}
-
-Reporter::Reporter()
+	: backend(std::make_unique<BackendHid>(device))
 {
 }
 

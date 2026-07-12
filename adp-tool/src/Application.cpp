@@ -1,5 +1,8 @@
-#include <thread>
+#include <atomic>
+#include <chrono>
+#include <format>
 #include <iostream>
+#include <thread>
 #include "Adp.h"
 #include "Application.h"
 #include "MSGQ.hpp"
@@ -15,32 +18,32 @@ namespace adp {
         OnExit();
     }
 
-    void Application::UpdateLoop(MSGQ<QueueMessage*> &queue, const WebsocketServer &websocketServer) {
-        // ~60Hz update loop, should be enough for the websocket UI
+    void Application::UpdateLoop(MSGQ<QueueMessage>& queue, WebsocketServer& websocketServer, std::atomic<bool>& running) {
+        // ~60Hz update loop, should be enough for the websocket UI.
         constexpr auto sleep_time = std::chrono::milliseconds(16);
 
-        while (true)
+        while (running.load())
         {
-            std::this_thread::sleep_for(sleep_time);
-            Tick(); // Update data first before handling messages
+            // Update device data first (discovery + poll + publish snapshot).
+            Tick();
 
-            // Send sensor data to clients if device is connected
-            if (Device::Pad() != nullptr) {
+            // Broadcast the freshly published, immutable snapshot to clients.
+            if (auto snapshot = Device::GetSnapshot(); snapshot && snapshot->connected) {
                 json sensorJson;
-
-                Device::GetAllSensorStatesAsJson(sensorJson);
-                std::string sensorJsonString = sensorJson.dump();
-                websocketServer.SendMessageToClients(sensorJsonString);
+                Device::SnapshotToJson(*snapshot, sensorJson);
+                websocketServer.SendMessageToClients(sensorJson.dump());
             }
 
-            QueueMessage *item = nullptr;
-
-            // Try to get new messages from the queue on each iteration
-            while ((item = queue.popElem()) != nullptr) {
-                std::cout << "Got message with data : " << item->data << std::endl;
-                delete item;
+            // Drain and apply any inbound client messages. This runs on the
+            // device-I/O thread, so device access stays single-threaded.
+            while (auto item = queue.tryPop()) {
+                Device::HandleClientMessage(item->data);
             }
+
+            std::this_thread::sleep_for(sleep_time);
         }
+
+        std::cout << "Application update loop stopped" << std::endl;
     }
 
     void Application::OnInit()

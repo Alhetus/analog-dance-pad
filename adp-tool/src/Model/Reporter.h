@@ -179,6 +179,7 @@ struct DebugReport
 class ReporterBackend
 {
 public:
+	virtual ~ReporterBackend() = default;
 	virtual int get_feature_report(unsigned char *data, size_t length) = 0;
 	virtual int send_feature_report(const unsigned char *data, size_t length) = 0;
 	virtual int read(unsigned char *data, size_t length) = 0;
@@ -190,7 +191,7 @@ class Reporter
 {
 public:
 	Reporter(hid_device* device);
-	Reporter();
+	Reporter() = delete; // a Reporter without a backend is unusable
 	~Reporter();
 
 	ReadDataResult Get(SensorValuesReport& report, int numSensors);

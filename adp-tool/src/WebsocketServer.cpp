@@ -1,4 +1,5 @@
 #include "Adp.h"
+#include <cstdio>
 #include <string>
 #include <ixwebsocket/IXWebSocketServer.h>
 #include "WebsocketServer.h"
@@ -8,38 +9,25 @@ namespace adp {
     WebsocketServer::WebsocketServer() = default;
     WebsocketServer::~WebsocketServer() = default;
 
-    void WebsocketServer::Init(MSGQ<QueueMessage*> &queue) {
+    void WebsocketServer::Init(MSGQ<QueueMessage>& queue) {
         // Run a server on localhost at a given port.
         // Bound host name, max connections and listen backlog can also be passed in as parameters.
         constexpr int port = 8008;
         const std::string host("127.0.0.1"); // If you need this server to be accessible on a different machine, use "0.0.0.0"
-        ix::WebSocketServer server(port, host);
 
-        wsServer = &server;
+        auto srv = std::make_unique<ix::WebSocketServer>(port, host);
 
-        server.setOnClientMessageCallback([&queue](const std::shared_ptr<ix::ConnectionState>& connectionState, ix::WebSocket & webSocket, const ix::WebSocketMessagePtr & msg) {
+        srv->setOnClientMessageCallback([&queue](const std::shared_ptr<ix::ConnectionState>& connectionState, ix::WebSocket& webSocket, const ix::WebSocketMessagePtr& msg) {
+            (void)webSocket;
             // The ConnectionState object contains information about the connection,
             // at this point only the client ip address and the port.
-            std::printf("Remote ip: %s\n", connectionState->getRemoteIp().c_str());
 
             if (msg->type == ix::WebSocketMessageType::Open)
             {
-                std::printf("New connection\n");
-
-                // A connection state object is available, and has a default id
-                // You can subclass ConnectionState and pass an alternate factory
-                // to override it. It is useful if you want to store custom
-                // attributes per connection (authenticated bool flag, attributes, etc...)
-                std::printf("id: %s\n", connectionState->getId().c_str());
-
-                // The uri the client did connect to.
-                std::printf("Uri: %s\n", msg->openInfo.uri.c_str());
-
-                std::printf("Headers:\n");
-                for (auto it : msg->openInfo.headers)
-                {
-                    std::printf("\t%s: %s\n", it.first.c_str(), it.second.c_str());
-                }
+                std::printf("New connection from %s (id: %s), uri: %s\n",
+                    connectionState->getRemoteIp().c_str(),
+                    connectionState->getId().c_str(),
+                    msg->openInfo.uri.c_str());
             }
             else if (msg->type == ix::WebSocketMessageType::Close)
             {
@@ -47,16 +35,12 @@ namespace adp {
             }
             else if (msg->type == ix::WebSocketMessageType::Message)
             {
-                std::printf("Received: %s\n", msg->str.c_str());
-
-                // Add the message to the queue
-                auto *const item = new QueueMessage();
-                item->data = msg->str;
-                queue.addElem(item);
+                // Enqueue the message by value; the device thread drains and applies it.
+                queue.push(QueueMessage(msg->str));
             }
         });
 
-        if (auto [success, error] = server.listen(); !success)
+        if (auto [success, error] = srv->listen(); !success)
         {
             std::printf("ERROR: %s\n", error.c_str());
             return;
@@ -64,24 +48,37 @@ namespace adp {
 
         // Per message deflate connection is enabled by default. It can be disabled
         // which might be helpful when running on low power devices such as a Raspberry Pi
-        server.disablePerMessageDeflate();
+        srv->disablePerMessageDeflate();
 
-        // Run the server in the background. Server can be stoped by calling server.stop()
-        server.start();
+        // Run the server in the background. Server can be stopped by calling Stop().
+        srv->start();
+        std::printf("Websocket server started on ws://%s:%d\n", host.c_str(), port);
 
-        std::printf("Websocket server started\n");
+        // Publish the owned server so other threads can broadcast/stop.
+        {
+            std::lock_guard<std::mutex> lock(serverMutex);
+            server = std::move(srv);
+        }
 
-        // Block until server.stop() is called.
-        server.wait();
+        // Block until Stop() is called.
+        server->wait();
     }
 
-    void WebsocketServer::SendMessageToClients(const std::string &message) const {
-        if (wsServer == nullptr) {
+    void WebsocketServer::SendMessageToClients(const std::string& message) {
+        std::lock_guard<std::mutex> lock(serverMutex);
+        if (server == nullptr) {
             return;
         }
 
-        for (const auto& socket : wsServer->getClients()) {
+        for (const auto& socket : server->getClients()) {
             socket->send(message);
+        }
+    }
+
+    void WebsocketServer::Stop() {
+        std::lock_guard<std::mutex> lock(serverMutex);
+        if (server != nullptr) {
+            server->stop();
         }
     }
 }

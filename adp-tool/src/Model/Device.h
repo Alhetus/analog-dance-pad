@@ -3,6 +3,8 @@
 #include "stdint.h"
 #include <string>
 #include <map>
+#include <memory>
+#include <vector>
 
 #include <nlohmann/json.hpp>
 using json = nlohmann::json;
@@ -57,6 +59,21 @@ struct SensorState
 	bool pressed = false;
 
 	SensorReport ToReport(int index);
+};
+
+// An immutable, self-contained copy of everything the WebSocket clients need to
+// see about the currently connected pad. Built on the device-I/O thread each
+// tick and published via an atomic shared_ptr, so readers never touch live
+// device state (no locks, no torn reads, no TOCTOU null-deref).
+struct SensorSnapshot
+{
+	bool connected = false;
+	int deviceCount = 0;
+	std::string name;
+	int pollingRate = 0;
+	double releaseThreshold = 1.0;
+	int releaseMode = 0;
+	std::vector<SensorState> sensors;
 };
 
 struct VersionType
@@ -136,7 +153,20 @@ public:
 
 	static const SensorState* Sensor(int sensorIndex);
 
-	static void GetAllSensorStatesAsJson(json& j);
+	// Builds an immutable snapshot of the connected pad and publishes it
+	// atomically. Called on the device-I/O thread (from Update()).
+	static void PublishSnapshot();
+
+	// Returns the most recently published snapshot (may be null before the
+	// first tick). Lock-free; safe to call from any thread.
+	static std::shared_ptr<const SensorSnapshot> GetSnapshot();
+
+	// Serializes a snapshot to the client-facing JSON wire format.
+	static void SnapshotToJson(const SensorSnapshot& snapshot, json& j);
+
+	// Parses and dispatches one inbound client message. Must be called on the
+	// device-I/O thread so device access stays single-threaded.
+	static void HandleClientMessage(const std::string& message);
 
 	static std::string ReadDebug();
 

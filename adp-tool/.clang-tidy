@@ -1,0 +1,21 @@
+# Focused ruleset for first-party adp-tool code. Kept deliberately narrow
+# (correctness + concurrency + a little modernization) to avoid drowning in
+# noise from the packed HID wire structs and the C-style hidapi boundary.
+Checks: >
+  -*,
+  bugprone-*,
+  concurrency-*,
+  cppcoreguidelines-slicing,
+  cppcoreguidelines-virtual-class-destructor,
+  misc-use-after-move,
+  modernize-use-nullptr,
+  modernize-use-override,
+  modernize-use-using,
+  performance-*,
+  -bugprone-easily-swappable-parameters,
+  -bugprone-narrowing-conversions,
+  -performance-avoid-endl
+
+WarningsAsErrors: ''
+HeaderFilterRegex: '.*/src/.*'
+FormatStyle: file

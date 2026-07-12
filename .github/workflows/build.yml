@@ -4,12 +4,29 @@ on:
   push:
     branches:
       - staging
+      - master
   pull_request:
     branches:
       - staging
+      - master
   workflow_dispatch:
 
 jobs:
+  format-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install clang-format
+        run: sudo apt update && sudo apt install -y clang-format
+
+      - name: Check first-party formatting
+        run: |
+          cd adp-tool
+          find src tests -type f \( -name '*.cpp' -o -name '*.h' -o -name '*.hpp' \) \
+            | xargs clang-format --dry-run --Werror
+
   build-adp-tool-linux:
     runs-on: ubuntu-latest
 
@@ -20,22 +37,26 @@ jobs:
           submodules: 'true'
 
       - name: Install dependencies
-        run: sudo apt update && sudo apt install -y build-essential cmake libudev-dev libglfw3-dev libgtk-3-dev
-      
-      - name: Build project
+        run: sudo apt update && sudo apt install -y build-essential cmake ninja-build libudev-dev libx11-dev
+
+      - name: Configure and build
         run: |
-          cmake -S adp-tool -B adp-tool/BuildNix
-          cmake --build adp-tool/BuildNix
+          cd adp-tool
+          cmake --preset=default
+          cmake --build build
+
+      - name: Run tests
+        run: |
+          cd adp-tool
+          ctest --preset=default
 
       - name: Archive artifacts
         uses: actions/upload-artifact@v4
         with:
           name: Build Linux
-          path: |
-            adp-tool/BuildNix/adp-tool
-            adp-tool/BuildNix/adp-cli
+          path: adp-tool/build/adp-tool
 
-  build-adp-tool-wasm:
+  sanitizers-linux:
     runs-on: ubuntu-latest
 
     steps:
@@ -45,31 +66,22 @@ jobs:
           submodules: 'true'
 
       - name: Install dependencies
-        run: sudo apt update && sudo apt install -y build-essential cmake
+        run: sudo apt update && sudo apt install -y build-essential cmake ninja-build libudev-dev libx11-dev
 
-      - name: Install emsdk
+      - name: ThreadSanitizer tests
         run: |
-          git clone https://github.com/emscripten-core/emsdk.git
-          cd emsdk
-          ./emsdk install latest
-          ./emsdk activate latest
-          
-      - name: Build project
-        run: |
-          source emsdk/emsdk_env.sh
-          emcmake cmake -S adp-tool -B adp-tool/BuildWasm
-          cd adp-tool/BuildWasm
-          emmake make -j4
+          cd adp-tool
+          cmake --preset=tsan
+          cmake --build build-tsan
+          ctest --preset=tsan
 
-      - name: Archive artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: Build Wasm
-          path: |
-            adp-tool/BuildWasm/*.js
-            adp-tool/BuildWasm/*.html
-            adp-tool/BuildWasm/*.wasm
-  
+      - name: Address/UB Sanitizer tests
+        run: |
+          cd adp-tool
+          cmake --preset=asan-ubsan
+          cmake --build build-asan
+          ctest --preset=asan-ubsan
+
   build-adp-tool-windows:
     runs-on: windows-latest
 
@@ -81,24 +93,23 @@ jobs:
 
       - name: Install dependencies
         run: choco install -y cmake
-        # run: choco install -y visualstudio2022buildtools visualstudio2022-workload-nativedesktop cmake
-      
-      - name: Build project
+
+      - name: Configure and build
         run: |
-          cmake -S adp-tool -B adp-tool/BuildWin
-          cmake --build adp-tool/BuildWin --config Release
-          
+          cd adp-tool
+          cmake --preset=default
+          cmake --build build --config RelWithDebInfo
+
+      - name: Run tests
+        run: |
+          cd adp-tool
+          ctest --preset=default
+
       - name: Archive artifacts
         uses: actions/upload-artifact@v4
         with:
           name: Build Windows
-          path: |
-            adp-tool/BuildWin/Release/adp-tool.exe
-            adp-tool/BuildWin/Release/adp-cli.exe
-  
-            
-
-
+          path: adp-tool/build/adp-tool.exe
 
   build-adp-firmware:
     runs-on: ubuntu-latest
@@ -111,7 +122,7 @@ jobs:
 
       - name: Install dependencies
         run: pip install platformio
-      
+
       - name: Build project
         run: |
           cd firmware

@@ -124,6 +124,8 @@ std::string BoardTypeStruct::ToString() const
 		case ARCH_ESP:
 			ret += "esp_";
 			break;
+		default:
+			break;
 	}
 
 	switch (boardType)

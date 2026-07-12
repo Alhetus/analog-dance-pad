@@ -1,27 +1,16 @@
 {
   "dependencies": [
-    "asio",
     "fmt",
-    {
-      "name": "glfw3"
-    },
-    {
-      "name": "imgui",
-      "features": [
-        "docking-experimental",
-        "glfw-binding",
-        "opengl3-binding"
-      ]
-    },
     "libzippp",
-    "nativefiledialog",
     "nlohmann-json",
-    "stb",
-    {
-      "name": "websocketpp",
-      "default-features": false
-    },
-    "argparse",
-    "pthreads"
-  ]
+    "argparse"
+  ],
+  "features": {
+    "tests": {
+      "description": "Dependencies for the unit test suite",
+      "dependencies": [
+        "catch2"
+      ]
+    }
+  }
 }
