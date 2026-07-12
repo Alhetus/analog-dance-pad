@@ -2,8 +2,11 @@ node_modules
 *.user
 .vscode
 .idea/
-adp-tool/lib/IXWebSocket/
-adp-tool/lib/mbedtls/
+# IXWebSocket is vendored (locally patched); track only the compiled sources + license
+adp-tool/lib/IXWebSocket/*
+!adp-tool/lib/IXWebSocket/ixwebsocket/
+!adp-tool/lib/IXWebSocket/LICENSE.txt
+# mbedtls is a git submodule (see .gitmodules)
 
 adp-tool/imgui.ini
 adp-tool/build*

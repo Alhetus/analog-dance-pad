@@ -13,3 +13,6 @@
 [submodule "adp-tool/vcpkg"]
 	path = adp-tool/vcpkg
 	url = https://github.com/microsoft/vcpkg
+[submodule "adp-tool/lib/mbedtls"]
+	path = adp-tool/lib/mbedtls
+	url = https://github.com/Mbed-TLS/mbedtls.git
