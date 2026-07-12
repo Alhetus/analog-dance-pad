@@ -5,10 +5,12 @@ on:
     branches:
       - staging
       - master
+      - mckyla
   pull_request:
     branches:
       - staging
       - master
+      - mckyla
   workflow_dispatch:
 
 jobs:
