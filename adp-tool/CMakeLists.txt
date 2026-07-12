@@ -9,17 +9,10 @@ option(ADP_BUILD_TESTS "Build the adp-tool unit tests" ON)
 option(ADP_WERROR "Treat first-party compiler warnings as errors" ON)
 
 # Load dependencies start
-if(WIN32)
-	SET(VCPKG_TARGET_TRIPLET "x64-windows-static-md" CACHE STRING "Triplet" FORCE)
-endif()
-
-# Pull in the test-only vcpkg dependencies (catch2) only when tests are enabled.
-if(ADP_BUILD_TESTS)
-	list(APPEND VCPKG_MANIFEST_FEATURES "tests")
-endif()
-
-include("${CMAKE_CURRENT_SOURCE_DIR}/vcpkg/scripts/buildsystems/vcpkg.cmake")
-
+# The vcpkg toolchain file is loaded via the CMake preset (CMakePresets.json ->
+# toolchainFile) so it runs BEFORE project() above — the supported ordering for
+# manifest-mode auto-install. VCPKG_TARGET_TRIPLET (static-md on Windows) and
+# VCPKG_MANIFEST_FEATURES ("tests" -> Catch2) are set by the presets too.
 add_subdirectory(lib)
 
 find_package(fmt REQUIRED)

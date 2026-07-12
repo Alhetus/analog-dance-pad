@@ -10,10 +10,20 @@
       "name": "default",
       "displayName": "Default (vcpkg, tests on)",
       "binaryDir": "${sourceDir}/build",
+      "toolchainFile": "${sourceDir}/vcpkg/scripts/buildsystems/vcpkg.cmake",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
         "ADP_BUILD_TESTS": "ON",
-        "ADP_WERROR": "ON"
+        "ADP_WERROR": "ON",
+        "VCPKG_MANIFEST_FEATURES": "tests"
+      }
+    },
+    {
+      "name": "windows",
+      "displayName": "Windows (static-md triplet)",
+      "inherits": "default",
+      "cacheVariables": {
+        "VCPKG_TARGET_TRIPLET": "x64-windows-static-md"
       }
     },
     {
@@ -43,6 +53,7 @@
   ],
   "buildPresets": [
     { "name": "default", "configurePreset": "default" },
+    { "name": "windows", "configurePreset": "windows" },
     { "name": "asan-ubsan", "configurePreset": "asan-ubsan" },
     { "name": "tsan", "configurePreset": "tsan" }
   ],
@@ -50,6 +61,11 @@
     {
       "name": "default",
       "configurePreset": "default",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "windows",
+      "configurePreset": "windows",
       "output": { "outputOnFailure": true }
     },
     {

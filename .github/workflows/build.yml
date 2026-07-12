@@ -99,13 +99,13 @@ jobs:
       - name: Configure and build
         run: |
           cd adp-tool
-          cmake --preset=default
+          cmake --preset=windows
           cmake --build build --config RelWithDebInfo
 
       - name: Run tests
         run: |
           cd adp-tool
-          ctest --preset=default
+          ctest --preset=windows
 
       - name: Archive artifacts
         uses: actions/upload-artifact@v4

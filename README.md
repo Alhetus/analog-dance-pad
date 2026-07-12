@@ -52,13 +52,14 @@ brew install cmake pkg-config
 
 All commands run from the `adp-tool/` directory. The build is driven by
 `CMakePresets.json`; the `default` preset configures a `RelWithDebInfo` build
-with the unit tests and warnings-as-errors on.
+with the unit tests and warnings-as-errors on. Windows uses the `windows`
+preset, which is `default` plus the `x64-windows-static-md` vcpkg triplet.
 
 **Windows:**
 
 ```
 cd adp-tool
-cmake --preset=default
+cmake --preset=windows
 cmake --build build --config RelWithDebInfo
 ```
 
@@ -78,7 +79,7 @@ Unit tests use Catch2 and run through CTest:
 
 ```
 cd adp-tool
-ctest --preset=default
+ctest --preset=default    # ctest --preset=windows on Windows
 ```
 
 ## Run
