@@ -1,6 +1,7 @@
 #include <Adp.h>
 
 #include <atomic>
+#include <mutex>
 #include <memory>
 #include <algorithm>
 #include <map>
@@ -594,7 +595,6 @@ private:
 	
 	unique_ptr<PadDevice> myConnectedDevice;
 	map<DevicePath, DeviceName> myFailedDevices;
-	bool emulator = false;
 };
 
 // ====================================================================================================================
@@ -605,8 +605,12 @@ static std::unique_ptr<ConnectionManager> connectionManager;
 static std::atomic<bool> searching = true;
 
 // The latest immutable sensor snapshot. Written only on the device-I/O thread
-// (PublishSnapshot); read lock-free from any thread (GetSnapshot).
-static std::atomic<std::shared_ptr<const SensorSnapshot>> gSnapshot;
+// (PublishSnapshot); read from any thread (GetSnapshot). Guarded by a mutex
+// rather than std::atomic<shared_ptr> because Apple's libc++ doesn't implement
+// the C++20 atomic<shared_ptr> specialization. The critical section is a single
+// pointer swap/copy, so contention is negligible.
+static std::mutex gSnapshotMutex;
+static std::shared_ptr<const SensorSnapshot> gSnapshot;
 
 
 bool DeviceConnection::ConnectStage2()
@@ -642,7 +646,10 @@ void Device::Shutdown()
 {
 	connectionManager.reset();
 
-	gSnapshot.store(nullptr);
+	{
+		std::lock_guard<std::mutex> lock(gSnapshotMutex);
+		gSnapshot = nullptr;
+	}
 
 	hid_exit();
 }
@@ -733,12 +740,14 @@ void Device::PublishSnapshot()
 	}
 
 	// Publish as immutable; readers get a stable, consistent view.
-	gSnapshot.store(std::shared_ptr<const SensorSnapshot>(std::move(snapshot)));
+	std::lock_guard<std::mutex> lock(gSnapshotMutex);
+	gSnapshot = std::move(snapshot);
 }
 
 std::shared_ptr<const SensorSnapshot> Device::GetSnapshot()
 {
-	return gSnapshot.load();
+	std::lock_guard<std::mutex> lock(gSnapshotMutex);
+	return gSnapshot;
 }
 
 void Device::SnapshotToJson(const SensorSnapshot& snapshot, json& j)
