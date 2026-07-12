@@ -90,3 +90,40 @@ Launch the built binary; it serves the WebSocket JSON API on
 ```
 ./build/adp-tool
 ```
+
+## Formatting
+
+First-party sources under `adp-tool/src` and `adp-tool/tests` are formatted with
+**clang-format** (config in `adp-tool/.clang-format`). CI rejects unformatted
+code, so run it before pushing. Vendored code under `lib/` and `vcpkg/` is not
+formatted.
+
+Install clang-format:
+
+- **Windows** — `winget install LLVM.LLVM` (or `choco install llvm`). It also
+  ships with the Visual Studio "Desktop development with C++" workload. `winget`
+  installs to `C:\Program Files\LLVM\bin`, which is not on `PATH` by default —
+  add it (System → Environment Variables, or `[Environment]::SetEnvironmentVariable('Path', "$env:Path;C:\Program Files\LLVM\bin", 'User')`)
+  and open a new terminal so `clang-format` resolves.
+- **Linux** (Debian/Ubuntu) — `sudo apt install -y clang-format`
+- **macOS** — `brew install clang-format`
+
+Format in place:
+
+```
+cd adp-tool
+find src tests -type f \( -name '*.cpp' -o -name '*.h' -o -name '*.hpp' \) | xargs clang-format -i
+```
+
+To check without modifying files (what CI does), swap `-i` for `--dry-run --Werror`.
+
+## Helper scripts
+
+`adp-tool/scripts` has one-shot scripts that format, configure, build, and run
+the tests in sequence:
+
+```
+cd adp-tool
+./scripts/check.sh                 # Linux / macOS
+powershell -File scripts\check.ps1 # Windows
+```
