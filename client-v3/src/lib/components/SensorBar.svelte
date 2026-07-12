@@ -91,6 +91,7 @@
 		<div
 			class="absolute inset-x-0 h-11 cursor-row-resize touch-none"
 			style="bottom: calc({pct(sensor.threshold)}% - 22px)"
+			onclick={(e) => e.stopPropagation()}
 			onpointerdown={onPointerDown}
 			onpointermove={onPointerMove}
 			onpointerup={onPointerUp}
