@@ -29,7 +29,7 @@ bool Reporter::GetFeatureReport(T& report, const char* name)
 	#endif
 
 	int bytesRead = backend->get_feature_report(buffer, sizeof(buffer));
-	if (bytesRead >= 0 && (size_t)bytesRead == expectedSize)
+	if (bytesRead >= 0 && (size_t)bytesRead == (size_t)expectedSize)
 	{
 		memcpy(&report, buffer, size);
 		std::printf("%s :: done\n", name);
@@ -73,7 +73,7 @@ ReadDataResult Reporter::ReadData(T& report, const char* name, int expectedSize)
 
 	int bytesRead = backend->read(buffer, sizeof(buffer));
 
-	if (bytesRead >= 0 && (size_t)bytesRead == expectedSize)
+	if (bytesRead >= 0 && (size_t)bytesRead == (size_t)expectedSize)
 	{
 		memcpy(&report, buffer, expectedSize);
 		return ReadDataResult::SUCCESS;
