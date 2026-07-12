@@ -141,28 +141,3 @@ jobs:
         with:
           name: Build macOS
           path: adp-tool/build/adp-tool
-
-  build-adp-firmware:
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          submodules: 'recursive'
-
-      - name: Install dependencies
-        run: pip install platformio
-
-      - name: Build project
-        run: |
-          cd firmware
-          pio run
-          mkdir build_artifacts
-          cp .pio/build/*/*.adpf build_artifacts/
-
-      - name: Archive artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: Build Firmware
-          path: firmware/build_artifacts
