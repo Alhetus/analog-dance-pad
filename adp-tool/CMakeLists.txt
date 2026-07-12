@@ -50,6 +50,10 @@ list(APPEND GLOBAL_LIBS avrdude serial libzippp::libzippp)
 
 if(WIN32 OR MINGW)
 	list(APPEND GLOBAL_LIBS setupapi ws2_32)
+elseif(APPLE)
+	# hidapi's mac backend and serial's list_ports_osx need these frameworks
+	# (the udev/X11 the Linux branch links do not exist on macOS).
+	list(APPEND GLOBAL_LIBS "-framework IOKit" "-framework CoreFoundation" "-framework AppKit")
 elseif(UNIX)
 	list(APPEND GLOBAL_LIBS udev X11)
 endif()

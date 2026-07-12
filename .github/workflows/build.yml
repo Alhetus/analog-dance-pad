@@ -113,6 +113,35 @@ jobs:
           name: Build Windows
           path: adp-tool/build/adp-tool.exe
 
+  build-adp-tool-macos:
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: 'recursive'
+
+      - name: Install dependencies
+        run: brew install cmake pkg-config
+
+      - name: Configure and build
+        run: |
+          cd adp-tool
+          cmake --preset=default
+          cmake --build build
+
+      - name: Run tests
+        run: |
+          cd adp-tool
+          ctest --preset=default
+
+      - name: Archive artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: Build macOS
+          path: adp-tool/build/adp-tool
+
   build-adp-firmware:
     runs-on: ubuntu-latest
 
