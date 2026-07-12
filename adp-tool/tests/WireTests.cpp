@@ -56,3 +56,25 @@ TEST_CASE("device sensor value mapping clamps to [0,MAX]", "[wire]")
 	CHECK(ToDeviceSensorValue(-1.0) == 0);
 	CHECK(ToDeviceSensorValue(2.0) == MAX_SENSOR_VALUE);
 }
+
+TEST_CASE("raw little-endian bytes decode with the right weights", "[wire]")
+{
+	// Not a round-trip: pin that byte[0] is the low byte, byte[1] the high byte.
+	CHECK(ReadU16LE(uint16_le{ { 0xCD, 0xAB } }) == 0xABCD);
+	CHECK(ReadU32LE(uint32_le{ { 0x01, 0x02, 0x03, 0x04 } }) == 0x04030201u);
+}
+
+TEST_CASE("WriteU16LE truncates to the low 16 bits", "[wire]")
+{
+	// Values above 0xFFFF drop their high bits (only two bytes are written).
+	auto v = WriteU16LE(0x12345);
+	CHECK(v.bytes[0] == 0x45);
+	CHECK(v.bytes[1] == 0x23);
+	CHECK(ReadU16LE(v) == 0x2345);
+}
+
+TEST_CASE("ToDeviceSensorValue rounds half away from zero", "[wire]")
+{
+	// 0.25 * 850 == 212.5, which lround pushes up to 213.
+	CHECK(ToDeviceSensorValue(0.25) == 213);
+}

@@ -156,6 +156,11 @@ Reporter::Reporter(hid_device* device)
 {
 }
 
+Reporter::Reporter(std::unique_ptr<ReporterBackend> backend)
+	: backend(std::move(backend))
+{
+}
+
 Reporter::~Reporter()
 {
 }

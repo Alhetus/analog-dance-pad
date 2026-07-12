@@ -3,7 +3,18 @@ find_package(Catch2 3 CONFIG REQUIRED)
 add_executable(adp-tool-tests
 	WireTests.cpp
 	MsgqTests.cpp
+	ColorTests.cpp
+	SensorReportTests.cpp
+	SnapshotJsonTests.cpp
+	UtilsTests.cpp
+	FirmwareTests.cpp
+	ReporterTests.cpp
+	PadDeviceTests.cpp
+	ProfileTests.cpp
+	HandleMessageTests.cpp
 )
+
+target_include_directories(adp-tool-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
 # Link adp-core for its public include paths (Model/*, the vendored hidapi
 # header pulled in by Reporter.h, etc.). adp_warnings keeps the tests held to

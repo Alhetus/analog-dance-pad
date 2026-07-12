@@ -191,6 +191,8 @@ class Reporter
 {
 public:
 	Reporter(hid_device* device);
+	// Injects an arbitrary backend (e.g. a fake for unit tests).
+	explicit Reporter(std::unique_ptr<ReporterBackend> backend);
 	Reporter() = delete; // a Reporter without a backend is unusable
 	~Reporter();
 
