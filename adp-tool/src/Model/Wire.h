@@ -11,7 +11,8 @@
 
 #include <Model/Reporter.h>
 
-namespace adp {
+namespace adp
+{
 
 inline int ReadU16LE(uint16_le u16)
 {
@@ -48,11 +49,10 @@ inline uint32_le WriteU32LE(uint32_t value)
 
 inline float32_le WriteF32LE(float value)
 {
-	return { WriteU32LE(std::bit_cast<uint32_t>(value)) };
+	return {WriteU32LE(std::bit_cast<uint32_t>(value))};
 }
 
-template <typename T>
-inline double ToNormalizedSensorValue(T deviceValue)
+template <typename T> inline double ToNormalizedSensorValue(T deviceValue)
 {
 	constexpr double scalar = 1.0 / static_cast<double>(MAX_SENSOR_VALUE);
 	return std::clamp(deviceValue * scalar, 0.0, 1.0);

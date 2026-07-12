@@ -5,16 +5,19 @@
 #include <nlohmann/json.hpp>
 using json = nlohmann::json;
 
-namespace adp {
-	
-enum ArchType {
+namespace adp
+{
+
+enum ArchType
+{
 	ARCH_UNKNOWN,
 	ARCH_AVR,
 	ARCH_ESP,
 	ARCH_AVR_ARD
 };
 
-enum BoardType {
+enum BoardType
+{
 	BOARD_UNKNOWN,
 	BOARD_FSRMINIPAD,
 	BOARD_FSRMINIPAD_V2,
@@ -41,20 +44,16 @@ enum FlashResult
 
 struct BoardTypeStruct
 {
-	BoardTypeStruct() : archType(ARCH_UNKNOWN), boardType(BOARD_UNKNOWN)
-	{
-	}
+	BoardTypeStruct() : archType(ARCH_UNKNOWN), boardType(BOARD_UNKNOWN) {}
 
 	BoardTypeStruct(std::string boardType);
 
-	BoardTypeStruct(ArchType archType, BoardType boardType) : archType(archType), boardType(boardType)
-	{
-	}
+	BoardTypeStruct(ArchType archType, BoardType boardType) : archType(archType), boardType(boardType) {}
 
 	static ArchType ParseArchType(const std::string& str);
 	static BoardType ParseBoardType(const std::string& str);
 
-	bool CompatibleWith(BoardTypeStruct other, bool strict=true) const;
+	bool CompatibleWith(BoardTypeStruct other, bool strict = true) const;
 
 	ArchType archType = ARCH_UNKNOWN;
 	BoardType boardType = BOARD_UNKNOWN;
@@ -62,4 +61,4 @@ struct BoardTypeStruct
 	std::string ToString() const;
 };
 
-}
+} // namespace adp

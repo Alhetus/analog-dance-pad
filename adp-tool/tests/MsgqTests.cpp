@@ -40,7 +40,8 @@ TEST_CASE("waitPop blocks then wakes on push", "[msgq]")
 
 	std::thread consumer([&] {
 		auto v = q.waitPop();
-		if (v == 42) {
+		if (v == 42)
+		{
 			gotValue = true;
 		}
 	});
@@ -57,7 +58,8 @@ TEST_CASE("stop() wakes a blocked waiter with nullopt", "[msgq]")
 
 	std::thread consumer([&] {
 		auto v = q.waitPop();
-		if (!v.has_value()) {
+		if (!v.has_value())
+		{
 			returnedEmpty = true;
 		}
 	});

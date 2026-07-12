@@ -12,7 +12,8 @@
 #include <Model/Reporter.h>
 #include <Model/Wire.h>
 
-namespace adp {
+namespace adp
+{
 
 // Wraps a fresh RecordingBackend in a real Reporter; `raw` stays valid for as
 // long as the returned Reporter lives.

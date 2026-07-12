@@ -58,8 +58,8 @@ TEST_CASE("CompatibleWith checks arch and (strict) board", "[firmware]")
 
 	// Strict (default): same arch and same known board.
 	CHECK(avr1.CompatibleWith(avr1b));
-	CHECK_FALSE(avr1.CompatibleWith(avr2));   // different board
-	CHECK_FALSE(avr1.CompatibleWith(esp1));   // different arch
+	CHECK_FALSE(avr1.CompatibleWith(avr2)); // different board
+	CHECK_FALSE(avr1.CompatibleWith(esp1)); // different arch
 
 	// The other side's ARCH_AVR_ARD is coerced to ARCH_AVR.
 	CHECK(avr1.CompatibleWith(ard1));

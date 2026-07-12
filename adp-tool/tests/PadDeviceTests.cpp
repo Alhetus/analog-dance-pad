@@ -54,9 +54,9 @@ TEST_CASE("PadDevice normalizes sensor thresholds and maps buttons", "[paddevice
 	RecordingBackend* raw = nullptr;
 	auto rep = makeReporter(raw);
 	std::vector<SensorReport> sensors = {
-		makeSensor(0, 425, 2),   // button 2 < 8 buttons -> 1-based button 3
-		makeSensor(1, 850, 10),  // button 10 >= 8 buttons -> unmapped (0)
-		makeSensor(2, 0, 0),     // button 0 < 8 buttons -> 1-based button 1
+	    makeSensor(0, 425, 2),  // button 2 < 8 buttons -> 1-based button 3
+	    makeSensor(1, 850, 10), // button 10 >= 8 buttons -> unmapped (0)
+	    makeSensor(2, 0, 0),    // button 0 < 8 buttons -> 1-based button 1
 	};
 	PadDevice pad(rep, "t", makeName("x"), makeIdent(1, 0, 8, 3), {}, {}, sensors);
 
@@ -81,7 +81,7 @@ TEST_CASE("PadDevice rejects out-of-range sensor indices without touching the wi
 
 TEST_CASE("PadDevice picks the report by firmware version", "[paddevice]")
 {
-	std::vector<SensorReport> sensors = { makeSensor(0, 400, 0), makeSensor(1, 400, 1) };
+	std::vector<SensorReport> sensors = {makeSensor(0, 400, 0), makeSensor(1, 400, 1)};
 
 	SECTION("v1.3+ sends a SensorReport")
 	{
@@ -114,8 +114,8 @@ TEST_CASE("PadDevice clamps the release threshold to [0.01, 1.0]", "[paddevice]"
 {
 	RecordingBackend* raw = nullptr;
 	auto rep = makeReporter(raw);
-	PadDevice pad(rep, "t", makeName("x"), makeIdent(1, 1, 8, 2),
-		{}, {}, { makeSensor(0, 400, 0), makeSensor(1, 400, 1) });
+	PadDevice pad(rep, "t", makeName("x"), makeIdent(1, 1, 8, 2), {}, {},
+	              {makeSensor(0, 400, 0), makeSensor(1, 400, 1)});
 
 	PadConfigurationReport echo;
 	raw->QueueGet(echo);
@@ -131,8 +131,8 @@ TEST_CASE("PadDevice averages polled samples and derives pressed state", "[padde
 {
 	RecordingBackend* raw = nullptr;
 	auto rep = makeReporter(raw);
-	PadDevice pad(rep, "t", makeName("x"), makeIdent(1, 0, 4, 2),
-		{}, {}, { makeSensor(0, 400, 0), makeSensor(1, 400, 1) });
+	PadDevice pad(rep, "t", makeName("x"), makeIdent(1, 0, 4, 2), {}, {},
+	              {makeSensor(0, 400, 0), makeSensor(1, 400, 1)});
 	raw->sent.clear();
 
 	const int expected = 1 + 2 + 2 * 2; // reportId + buttonBits + 2 sensors

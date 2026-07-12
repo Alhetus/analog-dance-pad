@@ -125,11 +125,11 @@ TEST_CASE("Send serializes the report to the wire and captures the bytes", "[rep
 
 	const auto& bytes = raw->sent[0];
 	REQUIRE(bytes.size() == sizeof(SensorReport));
-	CHECK(bytes[0] == REPORT_SENSOR); // reportId
-	CHECK(bytes[1] == 5);             // index
+	CHECK(bytes[0] == REPORT_SENSOR);           // reportId
+	CHECK(bytes[1] == 5);                       // index
 	CHECK((bytes[2] | (bytes[3] << 8)) == 300); // threshold, little-endian
-	CHECK((int8_t)bytes[6] == 2);     // buttonMapping
-	CHECK(bytes[7] == 7);             // resistorValue
+	CHECK((int8_t)bytes[6] == 2);               // buttonMapping
+	CHECK(bytes[7] == 7);                       // resistorValue
 }
 
 TEST_CASE("Send returns false on a short feature-report write", "[reporter]")

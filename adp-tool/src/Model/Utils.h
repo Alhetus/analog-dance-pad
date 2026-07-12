@@ -3,7 +3,8 @@
 #include <cstdint>
 #include <string>
 
-namespace adp {
+namespace adp
+{
 
 // Constants to subtract from decoded UTF-8 codepoint to cancel out non-codepoint bits.
 // Indexed by number of trailing bytes (0-5).
@@ -26,4 +27,4 @@ std::wstring widen(const char* str, size_t len);
 // Converts a string (UTF-8) to a wide string (UTF-16/UTF-32).
 std::wstring widen(const std::string str);
 
-}
+} // namespace adp

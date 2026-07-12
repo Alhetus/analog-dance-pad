@@ -8,25 +8,25 @@
 
 using namespace std;
 
-namespace adp {
+namespace adp
+{
 
 // ====================================================================================================================
 // Helper functions.
 // ====================================================================================================================
 
-template <typename T>
-bool Reporter::GetFeatureReport(T& report, const char* name)
+template <typename T> bool Reporter::GetFeatureReport(T& report, const char* name)
 {
 	uint8_t buffer[MAX_REPORT_SIZE];
 	buffer[0] = report.reportId;
 
 	auto size = sizeof(T);
-	
-	#ifdef __MINGW32__
-	auto expectedSize = sizeof(T)+1;
-	#else
+
+#ifdef __MINGW32__
+	auto expectedSize = sizeof(T) + 1;
+#else
 	auto expectedSize = sizeof(T);
-	#endif
+#endif
 
 	int bytesRead = backend->get_feature_report(buffer, sizeof(buffer));
 	if (bytesRead >= 0 && (size_t)bytesRead == (size_t)expectedSize)
@@ -43,8 +43,7 @@ bool Reporter::GetFeatureReport(T& report, const char* name)
 	return false;
 }
 
-template <typename T>
-bool Reporter::SendFeatureReport(const T& report, const char* name)
+template <typename T> bool Reporter::SendFeatureReport(const T& report, const char* name)
 {
 	using namespace std::chrono_literals;
 
@@ -65,8 +64,7 @@ bool Reporter::SendFeatureReport(const T& report, const char* name)
 	return false;
 }
 
-template <typename T>
-ReadDataResult Reporter::ReadData(T& report, const char* name, int expectedSize)
+template <typename T> ReadDataResult Reporter::ReadData(T& report, const char* name, int expectedSize)
 {
 	uint8_t buffer[MAX_REPORT_SIZE];
 	buffer[0] = report.reportId;
@@ -93,7 +91,7 @@ ReadDataResult Reporter::ReadData(T& report, const char* name, int expectedSize)
 bool Reporter::WriteData(uint8_t reportId, const char* name, bool performErrorCheck)
 {
 	// Linux wants reports of at leats 2 bytes
-	uint8_t buf[2] = { reportId, 0 };
+	uint8_t buf[2] = {reportId, 0};
 
 	int bytesWritten = backend->write(buf, sizeof(buf));
 	if (bytesWritten > 0 || !performErrorCheck)
@@ -107,43 +105,29 @@ bool Reporter::WriteData(uint8_t reportId, const char* name, bool performErrorCh
 
 class BackendHid : public ReporterBackend
 {
-public:
-	BackendHid(hid_device* device)
-		:ReporterBackend(), myHid(device)
-	{
-	}
+  public:
+	BackendHid(hid_device* device) : ReporterBackend(), myHid(device) {}
 
-	~BackendHid()
-	{
-		hid_close(myHid);
-	}
-	
-	int get_feature_report(unsigned char *data, size_t length)
-	{
-		return hid_get_feature_report(myHid, data, length);
-	}
+	~BackendHid() { hid_close(myHid); }
 
-	int send_feature_report(const unsigned char *data, size_t length)
+	int get_feature_report(unsigned char* data, size_t length) { return hid_get_feature_report(myHid, data, length); }
+
+	int send_feature_report(const unsigned char* data, size_t length)
 	{
 		return hid_send_feature_report(myHid, data, length);
 	}
 
-	int read(unsigned char *data, size_t length)
+	int read(unsigned char* data, size_t length)
 	{
 		return hid_read(myHid, data, length);
 		// return hid_read_timeout(myHid, data, length, 1);
 	}
 
-	int write(unsigned char *data, size_t length)
-	{
-		return hid_write(myHid, data, length);
-	}
+	int write(unsigned char* data, size_t length) { return hid_write(myHid, data, length); }
 
-	const wchar_t* error()
-	{
-		return hid_error(myHid);
-	}
-protected:
+	const wchar_t* error() { return hid_error(myHid); }
+
+  protected:
 	hid_device* myHid;
 };
 
@@ -151,13 +135,11 @@ protected:
 // Reporter.
 // ====================================================================================================================
 
-Reporter::Reporter(hid_device* device)
-	: backend(std::make_unique<BackendHid>(device))
+Reporter::Reporter(hid_device* device) : backend(std::make_unique<BackendHid>(device))
 {
 }
 
-Reporter::Reporter(std::unique_ptr<ReporterBackend> backend)
-	: backend(std::move(backend))
+Reporter::Reporter(std::unique_ptr<ReporterBackend> backend) : backend(std::move(backend))
 {
 }
 
@@ -168,7 +150,7 @@ Reporter::~Reporter()
 ReadDataResult Reporter::Get(SensorValuesReport& report, int numSensors)
 {
 	int expectedSize = sizeof(uint8_t) + sizeof(uint16_le) + (sizeof(uint16_le) * numSensors);
-	
+
 	return ReadData(report, "GetSensorValuesReport", expectedSize);
 }
 
@@ -262,10 +244,9 @@ bool Reporter::Send(const SetPropertyReport& report)
 	return SendFeatureReport(report, "SendSetPropertyReport");
 }
 
-
 bool Reporter::SendAndGet(NameReport& report)
 {
-	if(!Send(report))
+	if (!Send(report))
 		return false;
 
 	// Wait for the controller to get into a ready state
@@ -305,4 +286,4 @@ bool Reporter::SendAndGet(SetPropertyReport& report)
 	return true;
 }
 
-}
+} // namespace adp

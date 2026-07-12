@@ -12,26 +12,27 @@ using json = nlohmann::json;
 #include <Model/Firmware.h>
 #include <Model/Reporter.h>
 
-namespace adp {
+namespace adp
+{
 
 enum DeviceChangeFlags
 {
-	DCF_DEVICE         = 1 << 0,
+	DCF_DEVICE = 1 << 0,
 	DCF_BUTTON_MAPPING = 1 << 1,
-	DCF_NAME           = 1 << 2,
-	DCF_LIGHTS         = 1 << 3
+	DCF_NAME = 1 << 2,
+	DCF_LIGHTS = 1 << 3
 };
 
 typedef int32_t DeviceChanges;
 
 enum DeviceProfileGroupFlags
 {
-	DPG_SENSITIVITY	= 1 << 0,
-	DPG_MAPPING		= 1 << 1,
-	DPG_DEVICE		= 1 << 2,
-	DPG_LIGHTS		= 1 << 3,
+	DPG_SENSITIVITY = 1 << 0,
+	DPG_MAPPING = 1 << 1,
+	DPG_DEVICE = 1 << 2,
+	DPG_LIGHTS = 1 << 3,
 
-	DGP_ALL			= 0b1111111111111111
+	DGP_ALL = 0b1111111111111111
 };
 
 typedef int32_t DeviceProfileGroups;
@@ -83,11 +84,13 @@ struct VersionType
 
 	bool IsNewer(VersionType then)
 	{
-		if (major > then.major) {
+		if (major > then.major)
+		{
 			return true;
 		}
 
-		if (major == then.major && minor > then.minor) {
+		if (major == then.major && minor > then.minor)
+		{
 			return true;
 		}
 
@@ -95,7 +98,7 @@ struct VersionType
 	}
 };
 
-static const VersionType versionTypeUnknown = { 0, 0 };
+static const VersionType versionTypeUnknown = {0, 0};
 
 struct PadState
 {
@@ -138,7 +141,7 @@ struct LightsState
 
 class Device
 {
-public:
+  public:
 	static void Init();
 
 	static void Shutdown();
@@ -217,4 +220,4 @@ public:
 	static void DiscoverNewDevices();
 };
 
-}
+} // namespace adp

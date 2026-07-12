@@ -20,7 +20,8 @@
 #include <Model/Reporter.h>
 #include <Model/Wire.h>
 
-namespace adp {
+namespace adp
+{
 
 enum LedMappingFlags
 {
@@ -29,8 +30,8 @@ enum LedMappingFlags
 
 enum LightRuleFlags
 {
-	LRF_ENABLED  = 1 << 0,
-	LRF_FADE_ON  = 1 << 1,
+	LRF_ENABLED = 1 << 0,
+	LRF_FADE_ON = 1 << 1,
 	LRF_FADE_OFF = 1 << 2,
 };
 
@@ -43,12 +44,12 @@ inline bool IsBitSet(int bits, int index)
 
 inline RgbColor ToRgbColor(color24 color)
 {
-	return { color.red, color.green, color.blue };
+	return {color.red, color.green, color.blue};
 }
 
 inline color24 ToColor24(RgbColor color)
 {
-	return { color.red, color.green, color.blue };
+	return {color.red, color.green, color.blue};
 }
 
 struct PollingData
@@ -60,17 +61,11 @@ struct PollingData
 
 class PadDevice
 {
-public:
-	PadDevice(
-		std::shared_ptr<Reporter> reporter,
-		const char* path,
-		const NameReport& name,
-		const IdentificationV2Report& identification,
-		const std::vector<LightRuleReport>& lightRules,
-		const std::vector<LedMappingReport>& ledMappings,
-		const std::vector<SensorReport>& sensors)
-		: myReporter(std::move(reporter))
-		, myPath(path)
+  public:
+	PadDevice(std::shared_ptr<Reporter> reporter, const char* path, const NameReport& name,
+	          const IdentificationV2Report& identification, const std::vector<LightRuleReport>& lightRules,
+	          const std::vector<LedMappingReport>& ledMappings, const std::vector<SensorReport>& sensors)
+	    : myReporter(std::move(reporter)), myPath(path)
 	{
 		// Clamp the device-reported sensor count so a malformed/hostile device
 		// can't drive out-of-bounds access downstream.
@@ -104,27 +99,36 @@ public:
 			UpdateSensor(sensor);
 		}
 
-		if (myPad.firmwareVersion.IsNewer({ 1, 2 })) {
+		if (myPad.firmwareVersion.IsNewer({1, 2}))
+		{
 			myPad.releaseThreshold = mySensors[0].releaseThreshold / mySensors[0].threshold;
 		}
-		else if (myPad.firmwareVersion.IsNewer({ 1, 1 })) {
+		else if (myPad.firmwareVersion.IsNewer({1, 1}))
+		{
 			myPad.featureLights = (bool)(identification.ledCount > 0);
 		}
 
-		try {
+		try
+		{
 			SetPropertyReport report;
 			report.propertyId = WriteU32LE(SetPropertyReport::SPID_SELECTED_PROPERTY);
 			report.propertyValue = WriteU32LE(SetPropertyReport::SPID_RELEASE_MODE);
 
-			if (myReporter->SendAndGet(report)) {
+			if (myReporter->SendAndGet(report))
+			{
 				int resultId = ReadU32LE(report.propertyId);
-				if (resultId != SetPropertyReport::SPID_RELEASE_MODE) {
+				if (resultId != SetPropertyReport::SPID_RELEASE_MODE)
+				{
 					std::printf("Fetching release mode bugged (1)\n");
-				} else {
+				}
+				else
+				{
 					myPad.releaseMode = (ReleaseMode)ReadU32LE(report.propertyValue);
 				}
 			}
-		} catch(...) {
+		}
+		catch (...)
+		{
 			std::printf("Fetching release mode failed\n");
 		}
 
@@ -136,22 +140,21 @@ public:
 
 	// True if the index is a valid position in mySensors. Used to reject
 	// out-of-range indices coming from the device or from client profiles.
-	bool ValidSensorIndex(int index) const
-	{
-		return index >= 0 && index < (int)mySensors.size();
-	}
+	bool ValidSensorIndex(int index) const { return index >= 0 && index < (int)mySensors.size(); }
 
 	void UpdateName(const NameReport& report)
 	{
-        if(report.size <= MAX_NAME_LENGTH) {
-            myPad.name = "";
-            myPad.name.append((const char*)report.name, (size_t)report.size);
-        }
-        else {
-            myPad.name = "Unknown";
-        }
+		if (report.size <= MAX_NAME_LENGTH)
+		{
+			myPad.name = "";
+			myPad.name.append((const char*)report.name, (size_t)report.size);
+		}
+		else
+		{
+			myPad.name = "Unknown";
+		}
 
-        myChanges |= DCF_NAME;
+		myChanges |= DCF_NAME;
 	}
 
 	void UpdateLightRule(const LightRuleReport& report)
@@ -190,7 +193,8 @@ public:
 		}
 	}
 
-	void UpdateLightsConfiguration(const std::vector<LightRuleReport>& lightRules, const std::vector<LedMappingReport>& ledMappings)
+	void UpdateLightsConfiguration(const std::vector<LightRuleReport>& lightRules,
+	                               const std::vector<LedMappingReport>& ledMappings)
 	{
 		for (auto& report : lightRules)
 			UpdateLightRule(report);
@@ -253,7 +257,9 @@ public:
 		}
 
 		// Use the loop to save changes if needed
-		if (myHasUnsavedChanges && std::chrono::duration_cast<std::chrono::milliseconds>(now - myLastPendingChange).count() > 2000) {
+		if (myHasUnsavedChanges &&
+		    std::chrono::duration_cast<std::chrono::milliseconds>(now - myLastPendingChange).count() > 2000)
+		{
 			SaveChanges();
 		}
 
@@ -280,10 +286,12 @@ public:
 		mySensors[sensorIndex].releaseThreshold = releaseThreshold;
 
 		// From v1.3 we have the SensorReport. Before that it's the PadConfiguration report
-		if (myPad.firmwareVersion.IsNewer({ 1, 2 })) {
+		if (myPad.firmwareVersion.IsNewer({1, 2}))
+		{
 			return SendSensor(sensorIndex);
 		}
-		else {
+		else
+		{
 			return SendPadConfiguration();
 		}
 	}
@@ -293,17 +301,21 @@ public:
 		myPad.releaseThreshold = std::clamp(threshold, 0.01, 1.00);
 
 		// From v1.3 we have the SensorReport. Before that it's the PadConfiguration report
-		if (myPad.firmwareVersion.IsNewer({ 1, 2 })) {
-			for (int i = 0; i < myPad.numSensors; ++i) {
+		if (myPad.firmwareVersion.IsNewer({1, 2}))
+		{
+			for (int i = 0; i < myPad.numSensors; ++i)
+			{
 				mySensors[i].releaseThreshold = mySensors[i].threshold * myPad.releaseThreshold;
-				if (!SendSensor(i)) {
+				if (!SendSensor(i))
+				{
 					return false;
 				}
 			}
 
 			return true;
 		}
-		else {
+		else
+		{
 			return SendPadConfiguration();
 		}
 	}
@@ -320,7 +332,8 @@ public:
 
 	void UpdateSensor(SensorReport sensor)
 	{
-		if (!ValidSensorIndex(sensor.index)) {
+		if (!ValidSensorIndex(sensor.index))
+		{
 			return;
 		}
 
@@ -339,7 +352,8 @@ public:
 
 		bool success = myReporter->Send(report);
 
-		if (success) {
+		if (success)
+		{
 			NotifyUnsavedChanges();
 			UpdateSensor(report);
 		}
@@ -356,10 +370,12 @@ public:
 		myChanges |= DCF_BUTTON_MAPPING;
 
 		// From v1.3 we have the SensorReport. Before that it's the PadConfiguration report
-		if (myPad.firmwareVersion.IsNewer({ 1, 2 })) {
+		if (myPad.firmwareVersion.IsNewer({1, 2}))
+		{
 			return SendSensor(sensorIndex);
 		}
-		else {
+		else
+		{
 			return SendPadConfiguration();
 		}
 	}
@@ -379,7 +395,8 @@ public:
 		report.size = (uint8_t)length;
 		std::memcpy(report.name, name, length);
 		bool result = myReporter->SendAndGet(report);
-		if (result) {
+		if (result)
+		{
 			NotifyUnsavedChanges();
 			UpdateName(report);
 		}
@@ -393,7 +410,7 @@ public:
 
 		UpdateLedMapping(report);
 
-        // Only set when to update the tab
+		// Only set when to update the tab
 		// myChanges |= DCF_LIGHTS;
 
 		NotifyUnsavedChanges();
@@ -507,10 +524,7 @@ public:
 		myLastPendingChange = std::chrono::system_clock::now();
 	}
 
-	bool HasUnsavedChanges()
-	{
-		return myHasUnsavedChanges;
-	}
+	bool HasUnsavedChanges() { return myHasUnsavedChanges; }
 
 	void SaveChanges()
 	{
@@ -531,7 +545,8 @@ public:
 
 	const SensorState* Sensor(int index)
 	{
-		if(index < 0 || index >= myPad.numSensors) {
+		if (index < 0 || index >= myPad.numSensors)
+		{
 			return nullptr;
 		}
 
@@ -540,12 +555,14 @@ public:
 
 	std::string ReadDebug()
 	{
-		if (!myPad.featureDebug) {
+		if (!myPad.featureDebug)
+		{
 			return "";
 		}
 
 		DebugReport report;
-		if (!myReporter->Get(report)) {
+		if (!myReporter->Get(report))
+		{
 			return "";
 		}
 
@@ -554,7 +571,8 @@ public:
 		// Bound the length by the actual packet buffer; messagePacket is not
 		// guaranteed to be NUL-terminated, so never construct from a bare char*.
 		messageSize = std::clamp<int>(messageSize, 0, (int)sizeof(report.messagePacket));
-		if (messageSize == 0) {
+		if (messageSize == 0)
+		{
 			return "";
 		}
 
@@ -573,12 +591,9 @@ public:
 	void LoadProfile(json& j, DeviceProfileGroups groups);
 	void SaveProfile(json& j, DeviceProfileGroups groups);
 
-	void TriggerChange(int type)
-	{
-        myChanges |= type;
-	}
+	void TriggerChange(int type) { myChanges |= type; }
 
-private:
+  private:
 	// Shared ownership: the DeviceConnection also holds this reporter (for name
 	// refreshes), so refcounting keeps it alive for whichever outlives the other.
 	std::shared_ptr<Reporter> myReporter;

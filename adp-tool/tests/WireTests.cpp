@@ -60,8 +60,8 @@ TEST_CASE("device sensor value mapping clamps to [0,MAX]", "[wire]")
 TEST_CASE("raw little-endian bytes decode with the right weights", "[wire]")
 {
 	// Not a round-trip: pin that byte[0] is the low byte, byte[1] the high byte.
-	CHECK(ReadU16LE(uint16_le{ { 0xCD, 0xAB } }) == 0xABCD);
-	CHECK(ReadU32LE(uint32_le{ { 0x01, 0x02, 0x03, 0x04 } }) == 0x04030201u);
+	CHECK(ReadU16LE(uint16_le{{0xCD, 0xAB}}) == 0xABCD);
+	CHECK(ReadU32LE(uint32_le{{0x01, 0x02, 0x03, 0x04}}) == 0x04030201u);
 }
 
 TEST_CASE("WriteU16LE truncates to the low 16 bits", "[wire]")

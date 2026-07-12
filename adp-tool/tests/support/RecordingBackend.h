@@ -14,11 +14,12 @@
 
 #include <Model/Reporter.h>
 
-namespace adp {
+namespace adp
+{
 
 class RecordingBackend : public ReporterBackend
 {
-public:
+  public:
 	// Every outgoing feature-report / write payload, in order.
 	std::vector<std::vector<uint8_t>> sent;
 
@@ -38,11 +39,7 @@ public:
 	// Queue a report struct as a well-formed read (returns its exact size).
 	// NOTE: matches the non-MINGW expected-size (sizeof(T)); the MINGW build
 	// path expects sizeof(T)+1, which these tests do not target.
-	template <typename T>
-	void QueueGet(const T& report)
-	{
-		QueueRead(&report, sizeof(T), (int)sizeof(T));
-	}
+	template <typename T> void QueueGet(const T& report) { QueueRead(&report, sizeof(T), (int)sizeof(T)); }
 
 	// Queue raw bytes plus the value the backend call should return.
 	void QueueRead(const void* data, size_t nbytes, int returnValue)
@@ -56,20 +53,11 @@ public:
 
 	// Queue a read that returns a byte count with no meaningful content
 	// (e.g. 0 for NO_DATA, negative for a HID failure).
-	void QueueReadCount(int returnValue)
-	{
-		reads.push_back(Response{ {}, returnValue });
-	}
+	void QueueReadCount(int returnValue) { reads.push_back(Response{{}, returnValue}); }
 
-	int get_feature_report(unsigned char* data, size_t length) override
-	{
-		return ServeRead(data, length);
-	}
+	int get_feature_report(unsigned char* data, size_t length) override { return ServeRead(data, length); }
 
-	int read(unsigned char* data, size_t length) override
-	{
-		return ServeRead(data, length);
-	}
+	int read(unsigned char* data, size_t length) override { return ServeRead(data, length); }
 
 	int send_feature_report(const unsigned char* data, size_t length) override
 	{
@@ -85,7 +73,7 @@ public:
 
 	const wchar_t* error() override { return L"RecordingBackend"; }
 
-private:
+  private:
 	int ServeRead(unsigned char* data, size_t length)
 	{
 		if (reads.empty())

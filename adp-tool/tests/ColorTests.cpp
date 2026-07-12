@@ -23,7 +23,7 @@ TEST_CASE("RgbColor accepts hex without leading #", "[color]")
 TEST_CASE("RgbColor falls back to black on malformed input", "[color]")
 {
 	// Fewer than three hex bytes, or non-hex, leaves all channels 0.
-	for (const char* bad : { "", "#", "xyz", "#12", "12", "#gg0000" })
+	for (const char* bad : {"", "#", "xyz", "#12", "12", "#gg0000"})
 	{
 		RgbColor c(bad);
 		CHECK(c.red == 0);

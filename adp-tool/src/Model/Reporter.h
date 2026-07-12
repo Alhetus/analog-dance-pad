@@ -9,38 +9,39 @@
 #undef NO_DATA
 #endif
 
-namespace adp {
+namespace adp
+{
 
 #pragma pack(1)
 
-constexpr int SENSOR_COUNT_MAX  = 32;
-constexpr int SENSOR_COUNT_V1   = 12;
-constexpr int MAX_BUTTON_COUNT  = 16;
-constexpr int MAX_NAME_LENGTH   = 50;
-constexpr int MAX_SENSOR_VALUE  = 850;
-constexpr int MAX_LIGHT_RULES   = 16;
-constexpr int MAX_LED_MAPPINGS  = 16;
+constexpr int SENSOR_COUNT_MAX = 32;
+constexpr int SENSOR_COUNT_V1 = 12;
+constexpr int MAX_BUTTON_COUNT = 16;
+constexpr int MAX_NAME_LENGTH = 50;
+constexpr int MAX_SENSOR_VALUE = 850;
+constexpr int MAX_LIGHT_RULES = 16;
+constexpr int MAX_LED_MAPPINGS = 16;
 constexpr int BOARD_TYPE_LENGTH = 32;
 
 constexpr size_t MAX_REPORT_SIZE = 512;
 
 enum ReportId
 {
-	REPORT_SENSOR_VALUES      = 0x1,
-	REPORT_PAD_CONFIGURATION  = 0x2,
-	REPORT_RESET              = 0x3,
+	REPORT_SENSOR_VALUES = 0x1,
+	REPORT_PAD_CONFIGURATION = 0x2,
+	REPORT_RESET = 0x3,
 	REPORT_SAVE_CONFIGURATION = 0x4,
-	REPORT_NAME               = 0x5,
-	REPORT_UNUSED_JOYSTICK    = 0x6,
-	REPORT_LIGHT_RULE         = 0x7,
-	REPORT_FACTORY_RESET	  = 0x8,
-	REPORT_IDENTIFICATION	  = 0x9,
-	REPORT_LED_MAPPING        = 0xA,
-	REPORT_SET_PROPERTY       = 0xB,
-	REPORT_SENSOR			  = 0xC,
-	REPORT_DEBUG			  = 0xD,
-	REPORT_IDENTIFICATION_V2  = 0xE,
-	REPORT_SENSOR_V2  		  = 0x10,
+	REPORT_NAME = 0x5,
+	REPORT_UNUSED_JOYSTICK = 0x6,
+	REPORT_LIGHT_RULE = 0x7,
+	REPORT_FACTORY_RESET = 0x8,
+	REPORT_IDENTIFICATION = 0x9,
+	REPORT_LED_MAPPING = 0xA,
+	REPORT_SET_PROPERTY = 0xB,
+	REPORT_SENSOR = 0xC,
+	REPORT_DEBUG = 0xD,
+	REPORT_IDENTIFICATION_V2 = 0xE,
+	REPORT_SENSOR_V2 = 0x10,
 };
 
 enum class ReadDataResult
@@ -50,11 +51,23 @@ enum class ReadDataResult
 	FAILURE,
 };
 
-struct uint16_le { uint8_t bytes[2]; };
-struct uint32_le { uint8_t bytes[4]; };
-struct color24 { uint8_t red, green, blue; };
+struct uint16_le
+{
+	uint8_t bytes[2];
+};
+struct uint32_le
+{
+	uint8_t bytes[4];
+};
+struct color24
+{
+	uint8_t red, green, blue;
+};
 
-struct float32_le { uint32_le bits; };
+struct float32_le
+{
+	uint32_le bits;
+};
 
 struct SensorValuesReport
 {
@@ -92,10 +105,7 @@ struct IdentificationReport
 
 struct IdentificationV2Report : public IdentificationReport
 {
-	IdentificationV2Report()
-	{
-		reportId = REPORT_IDENTIFICATION_V2;
-	}
+	IdentificationV2Report() { reportId = REPORT_IDENTIFICATION_V2; }
 
 	enum Features
 	{
@@ -133,7 +143,7 @@ struct SensorReport
 {
 	enum Ids
 	{
-		ADC_DISABLED		= 1 << 0,
+		ADC_DISABLED = 1 << 0,
 	};
 
 	uint8_t reportId = REPORT_SENSOR;
@@ -161,10 +171,11 @@ struct SetPropertyReport
 	uint32_le propertyValue;
 };
 
-enum ReleaseMode {
-    RELEASE_NONE = 0,
-    RELEASE_GLOBAL = 1,
-    RELEASE_INDIVIDUAL = 2
+enum ReleaseMode
+{
+	RELEASE_NONE = 0,
+	RELEASE_GLOBAL = 1,
+	RELEASE_INDIVIDUAL = 2
 };
 
 struct DebugReport
@@ -178,18 +189,18 @@ struct DebugReport
 
 class ReporterBackend
 {
-public:
+  public:
 	virtual ~ReporterBackend() = default;
-	virtual int get_feature_report(unsigned char *data, size_t length) = 0;
-	virtual int send_feature_report(const unsigned char *data, size_t length) = 0;
-	virtual int read(unsigned char *data, size_t length) = 0;
-	virtual int write(unsigned char *data, size_t length) = 0;
+	virtual int get_feature_report(unsigned char* data, size_t length) = 0;
+	virtual int send_feature_report(const unsigned char* data, size_t length) = 0;
+	virtual int read(unsigned char* data, size_t length) = 0;
+	virtual int write(unsigned char* data, size_t length) = 0;
 	virtual const wchar_t* error() = 0;
 };
 
 class Reporter
 {
-public:
+  public:
 	Reporter(hid_device* device);
 	// Injects an arbitrary backend (e.g. a fake for unit tests).
 	explicit Reporter(std::unique_ptr<ReporterBackend> backend);
@@ -217,24 +228,20 @@ public:
 	bool Send(const SensorReport& report);
 	bool Send(const SetPropertyReport& report);
 
-
 	bool SendAndGet(NameReport& report);
 	bool SendAndGet(PadConfigurationReport& report);
 	bool SendAndGet(SetPropertyReport& report);
 
-private:
+  private:
 	std::unique_ptr<ReporterBackend> backend;
 
-	template <typename T>
-	bool GetFeatureReport(T& report, const char* name);
+	template <typename T> bool GetFeatureReport(T& report, const char* name);
 
-	template <typename T>
-	bool SendFeatureReport(const T& report, const char* name);
+	template <typename T> bool SendFeatureReport(const T& report, const char* name);
 
-	template <typename T>
-	ReadDataResult ReadData(T& report, const char* name, int expectedSize);
+	template <typename T> ReadDataResult ReadData(T& report, const char* name, int expectedSize);
 
 	bool WriteData(uint8_t reportId, const char* name, bool performErrorCheck);
 };
 
-}
+} // namespace adp

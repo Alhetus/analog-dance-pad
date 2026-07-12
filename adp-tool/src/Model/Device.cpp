@@ -24,7 +24,8 @@ using namespace chrono;
 typedef std::function<void(uint8_t reportId, std::vector<uint8_t> data)> HidReadCallback;
 int HID_API_EXPORT HID_API_CALL hid_read_register(HidReadCallback callback);
 
-namespace adp {
+namespace adp
+{
 
 struct HidIdentifier
 {
@@ -32,26 +33,23 @@ struct HidIdentifier
 	int productId;
 };
 
-constexpr HidIdentifier HID_IDS[] =
-{
-	// TODO: document what these correspond to.
-	{0x1209, 0xb196},
-	{0x03eb, 0x204f},
+constexpr HidIdentifier HID_IDS[] = {
+    // TODO: document what these correspond to.
+    {0x1209, 0xb196},
+    {0x03eb, 0x204f},
 };
 
 static_assert(sizeof(float) == sizeof(uint32_t), "32-bit float required");
 
-
-RgbColor::RgbColor(uint8_t r, uint8_t g, uint8_t b)
-	: red(r), green(g), blue(b)
+RgbColor::RgbColor(uint8_t r, uint8_t g, uint8_t b) : red(r), green(g), blue(b)
 {
 }
 
-RgbColor::RgbColor(const std::string& input)
-	: RgbColor()
+RgbColor::RgbColor(const std::string& input) : RgbColor()
 {
 	const char* p = input.c_str();
-	if (*p == '#') ++p;
+	if (*p == '#')
+		++p;
 
 	unsigned int r = 0, g = 0, b = 0;
 	if (sscanf(p, "%02x%02x%02x", &r, &g, &b) == 3)
@@ -63,8 +61,7 @@ RgbColor::RgbColor(const std::string& input)
 	// On a malformed string the channels stay 0 (from the delegated ctor).
 }
 
-RgbColor::RgbColor()
-	: red(0), green(0), blue(0)
+RgbColor::RgbColor() : red(0), green(0), blue(0)
 {
 }
 
@@ -169,12 +166,8 @@ enum ConnectionState
 
 class DeviceConnection
 {
-public:
-	DeviceConnection(std::string path):
-		path(path)
-	{
-
-	}
+  public:
+	DeviceConnection(std::string path) : path(path) {}
 
 	// The hid_device* is owned solely by the Reporter's BackendHid (which closes
 	// it in its destructor), so there is no handle to close here.
@@ -182,7 +175,7 @@ public:
 
 	bool Probe()
 	{
-		if(state == CS_FAILED)
+		if (state == CS_FAILED)
 			return false;
 
 		std::this_thread::sleep_for(std::chrono::milliseconds(5));
@@ -206,13 +199,13 @@ public:
 		// Reporter/BackendHid takes ownership of the handle from here on.
 		reporter = make_shared<Reporter>(handle);
 
-		if(!reporter->Get(nameReport))
+		if (!reporter->Get(nameReport))
 		{
 			state = CS_FAILED;
 			return false;
 		}
 
-		if(!reporter->Get(identificationReport))
+		if (!reporter->Get(identificationReport))
 		{
 			state = CS_FAILED;
 			return false;
@@ -224,27 +217,19 @@ public:
 
 	string GetName(bool update = false)
 	{
-		if(update && reporter) {
+		if (update && reporter)
+		{
 			reporter->Get(nameReport);
 		}
 
 		return string((const char*)nameReport.name, nameReport.size);
 	}
 
-	string GetPath()
-	{
-		return path;
-	}
+	string GetPath() { return path; }
 
-	shared_ptr<Reporter> GetReporter()
-	{
-		return reporter;
-	}
+	shared_ptr<Reporter> GetReporter() { return reporter; }
 
-	ConnectionState GetState()
-	{
-		return state;
-	}
+	ConnectionState GetState() { return state; }
 
 	void SetFailed()
 	{
@@ -254,7 +239,7 @@ public:
 
 	bool ConnectStage2();
 
-protected:
+  protected:
 	ConnectionState state = CS_UNKNOWN;
 	std::string path;
 
@@ -266,7 +251,7 @@ protected:
 
 class ConnectionManager
 {
-public:
+  public:
 	~ConnectionManager()
 	{
 		if (myConnectedDevice)
@@ -299,34 +284,35 @@ public:
 		{
 			if (std::find(devicePaths.begin(), devicePaths.end(), it->first) == devicePaths.end())
 			{
-				if(myConnectedDevice && myConnectedDevice->Path() == it->first)
+				if (myConnectedDevice && myConnectedDevice->Path() == it->first)
 					myConnectedDevice.reset();
 
 				std::printf("ConnectionManager :: device removed (%s)\n", it->second.GetName().c_str());
 				it = devices.erase(it);
 			}
-			else ++it;
+			else
+				++it;
 		}
 
-		for(auto& path : devicePaths)
+		for (auto& path : devicePaths)
 		{
-			if(devices.contains(path))
+			if (devices.contains(path))
 				continue;
 
 			auto it = devices.emplace(path, path);
-			if(!it.first->second.Probe())
+			if (!it.first->second.Probe())
 			{
 				// devices.erase(it.first);
 				continue;
 			}
 		}
 
-		if(!myConnectedDevice)
+		if (!myConnectedDevice)
 		{
-			int c=0;
-			for(auto& it : devices)
+			int c = 0;
+			for (auto& it : devices)
 			{
-				if(it.second.GetState() != CS_FAILED)
+				if (it.second.GetState() != CS_FAILED)
 					return DeviceSelect(c);
 				c++;
 			}
@@ -369,15 +355,19 @@ public:
 		}
 		else
 		{
-			padVersion = { (uint16_t)ReadU16LE(padIdentification.firmwareMajor), (uint16_t)ReadU16LE(padIdentification.firmwareMinor) };
+			padVersion = {(uint16_t)ReadU16LE(padIdentification.firmwareMajor),
+			              (uint16_t)ReadU16LE(padIdentification.firmwareMinor)};
 
-			if (padVersion.IsNewer({1, 2})) {
-				if (!reporter->Get(padIdentificationV2)) {
+			if (padVersion.IsNewer({1, 2}))
+			{
+				if (!reporter->Get(padIdentificationV2))
+				{
 					static_cast<IdentificationReport&>(padIdentificationV2) = padIdentification;
 					padIdentificationV2.features = WriteU16LE(0);
 				}
 			}
-			else {
+			else
+			{
 				static_cast<IdentificationReport&>(padIdentificationV2) = padIdentification;
 				padIdentificationV2.features = WriteU16LE(0);
 			}
@@ -396,10 +386,10 @@ public:
 			for (int i = 0; i < MAX_LIGHT_RULES; ++i)
 			{
 				selectReport.propertyValue = WriteU32LE(i);
-				if(!reporter->Send(selectReport))
+				if (!reporter->Send(selectReport))
 					return false;
 
-				if(!reporter->Get(lightReport))
+				if (!reporter->Get(lightReport))
 					return false;
 
 				if (lightReport.flags & LRF_ENABLED)
@@ -415,10 +405,10 @@ public:
 			for (int i = 0; i < MAX_LED_MAPPINGS; ++i)
 			{
 				selectReport.propertyValue = WriteU32LE(i);
-				if(!reporter->Send(selectReport))
+				if (!reporter->Send(selectReport))
 					return false;
 
-				if(!reporter->Get(ledReport))
+				if (!reporter->Get(ledReport))
 					return false;
 
 				if (ledReport.flags & LMF_ENABLED)
@@ -431,27 +421,30 @@ public:
 
 		SensorReport sensorReport;
 
-		if (padVersion.IsNewer({ 1, 2 })) {
+		if (padVersion.IsNewer({1, 2}))
+		{
 			SetPropertyReport selectReport;
 			selectReport.propertyId = WriteU32LE(SetPropertyReport::SELECTED_SENSOR_INDEX);
 
 			for (int i = 0; i < padIdentificationV2.sensorCount; ++i)
 			{
 				selectReport.propertyValue = WriteU32LE(i);
-				if(!reporter->Send(selectReport))
+				if (!reporter->Send(selectReport))
 					return false;
 
-				if(!reporter->Get(sensorReport))
+				if (!reporter->Get(sensorReport))
 					return false;
 
 				PrintSensorReport(sensorReport);
 				sensors.push_back(sensorReport);
 			}
 		}
-		else {
+		else
+		{
 			// Backwards compat
 			PadConfigurationReport padConfig;
-			if (reporter->Get(padConfig)) {
+			if (reporter->Get(padConfig))
+			{
 				for (int i = 0; i < SENSOR_COUNT_V1; ++i)
 				{
 					sensorReport.index = i;
@@ -468,21 +461,16 @@ public:
 			}
 		}
 
-		auto device = make_unique<PadDevice>(
-			reporter,
-			devicePath.c_str(),
-			name,
-			padIdentificationV2,
-			lightRules,
-			ledMappings,
-			sensors);
+		auto device = make_unique<PadDevice>(reporter, devicePath.c_str(), name, padIdentificationV2, lightRules,
+		                                     ledMappings, sensors);
 
 		std::string boardType = device->State().boardType.ToString();
 
 		std::printf("ConnectionManager :: new device connected [\n");
 		std::printf("  Name: %s\n", device->State().name.c_str());
 		std::printf("  Board: %s: %s\n", padIdentificationV2.boardType, boardType.c_str());
-		std::printf("  Firmware version: v%u.%u\n", ReadU16LE(padIdentificationV2.firmwareMajor), ReadU16LE(padIdentificationV2.firmwareMinor));
+		std::printf("  Firmware version: v%u.%u\n", ReadU16LE(padIdentificationV2.firmwareMajor),
+		            ReadU16LE(padIdentificationV2.firmwareMinor));
 		std::printf("  Feature flags: %s\n", fmt::format("{:b}", ReadU16LE(padIdentificationV2.features)).c_str());
 		std::printf("  Path: %s\n", devicePath.c_str());
 
@@ -497,7 +485,7 @@ public:
 		auto device = myConnectedDevice.get();
 		if (device)
 		{
-			if(devices.contains(device->Path()))
+			if (devices.contains(device->Path()))
 				devices.at(device->Path()).SetFailed();
 
 			myConnectedDevice.reset();
@@ -510,10 +498,7 @@ public:
 			myFailedDevices[device->path] = narrow(device->product_string, wcslen(device->product_string));
 	}
 
-	int DeviceNumber()
-	{
-		return (int)devices.size();
-	}
+	int DeviceNumber() { return (int)devices.size(); }
 
 	string GetDeviceName(int index, bool update = false)
 	{
@@ -530,13 +515,13 @@ public:
 		if (index < 0 || (size_t)index >= devices.size())
 			return false;
 
-		if(index == DeviceSelected())
+		if (index == DeviceSelected())
 			return true;
 
 		auto it = devices.begin();
 		std::advance(it, index);
 
-		if(!it->second.ConnectStage2())
+		if (!it->second.ConnectStage2())
 			return false;
 
 		return true;
@@ -544,14 +529,14 @@ public:
 
 	int DeviceSelected()
 	{
-		if(!myConnectedDevice)
+		if (!myConnectedDevice)
 			return -1;
 
 		int c = 0;
-		
-		for(auto& it : devices)
+
+		for (auto& it : devices)
 		{
-			if(myConnectedDevice->Path() == it.first)
+			if (myConnectedDevice->Path() == it.first)
 				return c;
 			c++;
 		}
@@ -561,7 +546,8 @@ public:
 
 	bool ConnectToUrl(string url)
 	{
-		if (devices.contains(url)) {
+		if (devices.contains(url))
+		{
 			// Already known: find its index and select it.
 			int c = 0;
 			for (auto& it : devices)
@@ -581,7 +567,7 @@ public:
 			return false;
 		}
 
-		if(!it.first->second.ConnectStage2())
+		if (!it.first->second.ConnectStage2())
 		{
 			devices.erase(it.first);
 			return false;
@@ -590,9 +576,9 @@ public:
 		return true;
 	}
 
-private:
+  private:
 	map<DevicePath, DeviceConnection> devices;
-	
+
 	unique_ptr<PadDevice> myConnectedDevice;
 	map<DevicePath, DeviceName> myFailedDevices;
 };
@@ -612,18 +598,17 @@ static std::atomic<bool> searching = true;
 static std::mutex gSnapshotMutex;
 static std::shared_ptr<const SensorSnapshot> gSnapshot;
 
-
 bool DeviceConnection::ConnectStage2()
 {
-	if(!connectionManager)
+	if (!connectionManager)
 		return false;
 
-	if(state == CS_FAILED)
+	if (state == CS_FAILED)
 		return false;
 
-	for(int tries=0; tries<3; ++tries)
+	for (int tries = 0; tries < 3; ++tries)
 	{
-		if(connectionManager->ConnectToDeviceStage2(*this))
+		if (connectionManager->ConnectToDeviceStage2(*this))
 			return true;
 
 		std::printf("DeviceConnection :: ConnectStage2 failed (%d)\n", tries);
@@ -633,7 +618,6 @@ bool DeviceConnection::ConnectStage2()
 	state = CS_FAILED;
 	return false;
 }
-
 
 void Device::Init()
 {
@@ -680,7 +664,8 @@ DeviceChanges Device::Update()
 			changes |= DCF_DEVICE;
 		}
 
-		if(changes & DCF_NAME) {
+		if (changes & DCF_NAME)
+		{
 			connectionManager->GetDeviceName(connectionManager->DeviceSelected(), true);
 		}
 	}
@@ -889,7 +874,8 @@ bool Device::DisableLightRule(int lightRuleIndex)
 void Device::CalibrateSensor(int sensorIndex)
 {
 	auto device = connectionManager->ConnectedDevice();
-	if(device) {
+	if (device)
+	{
 		device->CalibrateSensor(sensorIndex);
 	}
 }
@@ -898,7 +884,8 @@ bool Device::SetReleaseMode(ReleaseMode mode)
 {
 	auto device = connectionManager->ConnectedDevice();
 
-	if (device) {
+	if (device)
+	{
 		return device->SetReleaseMode(mode);
 	}
 
@@ -908,19 +895,22 @@ bool Device::SetReleaseMode(ReleaseMode mode)
 void Device::SendDeviceReset()
 {
 	auto device = connectionManager->ConnectedDevice();
-	if (device) device->Reset();
+	if (device)
+		device->Reset();
 }
 
 void Device::SendFactoryReset()
 {
 	auto device = connectionManager->ConnectedDevice();
-	if (device) device->FactoryReset();
+	if (device)
+		device->FactoryReset();
 }
 
 void Device::SaveChanges()
 {
 	auto device = connectionManager->ConnectedDevice();
-	if (device) device->SaveChanges();
+	if (device)
+		device->SaveChanges();
 }
 
 void Device::SetSearching(bool s)
@@ -935,78 +925,79 @@ void Device::DiscoverNewDevices()
 
 int Device::DeviceNumber()
 {
-	if(!connectionManager) return 0;
+	if (!connectionManager)
+		return 0;
 	return connectionManager->DeviceNumber();
 }
 
 string Device::GetDeviceName(int index)
 {
-	if(!connectionManager) return "";
+	if (!connectionManager)
+		return "";
 	return connectionManager->GetDeviceName(index);
 }
 
 bool Device::DeviceSelect(int index)
 {
-	if(!connectionManager) return false;
+	if (!connectionManager)
+		return false;
 	return connectionManager->DeviceSelect(index);
 }
 
 int Device::DeviceSelected()
 {
-	if(!connectionManager) return -1;
+	if (!connectionManager)
+		return -1;
 	return connectionManager->DeviceSelected();
 }
-
 
 void PadDevice::LoadProfile(json& j, DeviceProfileGroups groups)
 {
 	const PadState* pad = &myPad;
 
-	if ((groups & DPG_LIGHTS) && pad->featureLights) {
-		if (j.contains("ledMappings") && j["ledMappings"].is_array()) {
+	if ((groups & DPG_LIGHTS) && pad->featureLights)
+	{
+		if (j.contains("ledMappings") && j["ledMappings"].is_array())
+		{
 			const auto& ledMappings = j["ledMappings"];
-			for (size_t key = 0; key < ledMappings.size() && key < (size_t)MAX_LED_MAPPINGS; ++key) {
+			for (size_t key = 0; key < ledMappings.size() && key < (size_t)MAX_LED_MAPPINGS; ++key)
+			{
 				const auto& value = ledMappings[key];
 
-				LedMapping lm = {
-					value.value("lightRuleIndex", 0),
-					value.value("sensorIndex", 0),
-					value.value("ledIndexBegin", 0),
-					value.value("ledIndexEnd", 0)
-				};
+				LedMapping lm = {value.value("lightRuleIndex", 0), value.value("sensorIndex", 0),
+				                 value.value("ledIndexBegin", 0), value.value("ledIndexEnd", 0)};
 
 				SendLedMapping((int)key, lm);
 			}
 
 			// Disable any slots not present in the profile.
-			for (int i = (int)std::min<size_t>(ledMappings.size(), MAX_LED_MAPPINGS); i < MAX_LED_MAPPINGS; ++i) {
+			for (int i = (int)std::min<size_t>(ledMappings.size(), MAX_LED_MAPPINGS); i < MAX_LED_MAPPINGS; ++i)
+			{
 				DisableLedMapping(i);
 			}
 		}
 
-		if (j.contains("lightRules") && j["lightRules"].is_array()) {
+		if (j.contains("lightRules") && j["lightRules"].is_array())
+		{
 			const auto& lightRules = j["lightRules"];
-			for (size_t key = 0; key < lightRules.size() && key < (size_t)MAX_LIGHT_RULES; ++key) {
+			for (size_t key = 0; key < lightRules.size() && key < (size_t)MAX_LIGHT_RULES; ++key)
+			{
 				const auto& value = lightRules[key];
 
 				auto color = [&value](const char* name) {
-					return (value.contains(name) && value[name].is_string())
-						? RgbColor((string)value[name]) : RgbColor(0, 0, 0);
+					return (value.contains(name) && value[name].is_string()) ? RgbColor((string)value[name])
+					                                                         : RgbColor(0, 0, 0);
 				};
 
 				LightRule lr = {
-					value.value("fadeOn", false),
-					value.value("fadeOff", false),
-					color("onColor"),
-					color("offColor"),
-					color("onFadeColor"),
-					color("offFadeColor")
-				};
+				    value.value("fadeOn", false), value.value("fadeOff", false), color("onColor"), color("offColor"),
+				    color("onFadeColor"),         color("offFadeColor")};
 
 				SendLightRule((int)key, lr);
 			}
 
-			for (int i = (int)std::min<size_t>(lightRules.size(), MAX_LIGHT_RULES); i < MAX_LIGHT_RULES; ++i) {
+			for (int i = (int)std::min<size_t>(lightRules.size(), MAX_LIGHT_RULES); i < MAX_LIGHT_RULES; ++i)
+			{
 				DisableLightRule(i);
 			}
 		}
@@ -1014,35 +1005,45 @@ void PadDevice::LoadProfile(json& j, DeviceProfileGroups groups)
 		TriggerChange(DCF_LIGHTS);
 	}
 
-	if (j.contains("sensors") && j["sensors"].is_array()) {
+	if (j.contains("sensors") && j["sensors"].is_array())
+	{
 		const auto& sensors = j["sensors"];
-		for (size_t key = 0; key < sensors.size(); ++key) {
+		for (size_t key = 0; key < sensors.size(); ++key)
+		{
 			const auto& sensor = sensors[key];
 			const int idx = (int)key;
 
-			if ((groups & DPG_SENSITIVITY) && sensor.contains("threshold") && sensor["threshold"].is_number()) {
+			if ((groups & DPG_SENSITIVITY) && sensor.contains("threshold") && sensor["threshold"].is_number())
+			{
 				double th = sensor["threshold"].get<double>();
 				SetThreshold(idx, th, th);
 			}
 
-			if ((groups & DPG_MAPPING) && sensor.contains("button") && sensor["button"].is_number_integer()) {
+			if ((groups & DPG_MAPPING) && sensor.contains("button") && sensor["button"].is_number_integer())
+			{
 				SetButtonMapping(idx, sensor["button"].get<int>());
 			}
 
-			if ((groups & DPG_MAPPING) && sensor.contains("resistorValue") && sensor["resistorValue"].is_number_integer() && pad->featureDigipot) {
+			if ((groups & DPG_MAPPING) && sensor.contains("resistorValue") &&
+			    sensor["resistorValue"].is_number_integer() && pad->featureDigipot)
+			{
 				SetAdcConfig(idx, sensor["resistorValue"].get<int>());
 			}
 		}
 	}
 
-	if (groups & DPG_SENSITIVITY) {
-		if (j.contains("releaseThreshold") && j["releaseThreshold"].is_number()) {
+	if (groups & DPG_SENSITIVITY)
+	{
+		if (j.contains("releaseThreshold") && j["releaseThreshold"].is_number())
+		{
 			SetReleaseThreshold(j["releaseThreshold"].get<double>());
 		}
 	}
 
-	if (groups & DPG_DEVICE) {
-		if (j.contains("name") && j["name"].is_string()) {
+	if (groups & DPG_DEVICE)
+	{
+		if (j.contains("name") && j["name"].is_string())
+		{
 			SendName(j["name"].get<string>().c_str());
 		}
 	}
@@ -1054,11 +1055,13 @@ void PadDevice::SaveProfile(json& j, DeviceProfileGroups groups)
 
 	j["adpToolVersion"] = fmt::format("v{}.{}", ADP_VERSION_MAJOR, ADP_VERSION_MINOR);
 
-	if ((groups & DPG_LIGHTS) && pad->featureLights) {
+	if ((groups & DPG_LIGHTS) && pad->featureLights)
+	{
 		{
 			const LightsState* lights = &Lights();
 			j["ledMappings"] = json::array();
-			for (const auto& [index, lm] : lights->ledMappings) {
+			for (const auto& [index, lm] : lights->ledMappings)
+			{
 				j["ledMappings"][index]["lightRuleIndex"] = lm.lightRuleIndex;
 				j["ledMappings"][index]["sensorIndex"] = lm.sensorIndex;
 				j["ledMappings"][index]["ledIndexBegin"] = lm.ledIndexBegin;
@@ -1066,7 +1069,8 @@ void PadDevice::SaveProfile(json& j, DeviceProfileGroups groups)
 			}
 
 			j["lightRules"] = json::array();
-			for (const auto& [index, lr] : lights->lightRules) {
+			for (const auto& [index, lr] : lights->lightRules)
+			{
 				j["lightRules"][index]["fadeOn"] = lr.fadeOn;
 				j["lightRules"][index]["fadeOff"] = lr.fadeOff;
 				j["lightRules"][index]["onColor"] = lr.onColor.ToString();
@@ -1077,7 +1081,8 @@ void PadDevice::SaveProfile(json& j, DeviceProfileGroups groups)
 		}
 	}
 
-	if (groups & (DPG_SENSITIVITY | DPG_MAPPING)) {
+	if (groups & (DPG_SENSITIVITY | DPG_MAPPING))
+	{
 		j["sensors"] = json::array();
 		for (int i = 0; i < pad->numSensors; ++i)
 		{
@@ -1085,12 +1090,14 @@ void PadDevice::SaveProfile(json& j, DeviceProfileGroups groups)
 			if (!s)
 				continue;
 
-			if (groups & DPG_SENSITIVITY) {
+			if (groups & DPG_SENSITIVITY)
+			{
 				j["sensors"][i]["threshold"] = s->threshold;
 				j["sensors"][i]["releaseThreshold"] = s->releaseThreshold;
 			}
 
-			if (groups & DPG_MAPPING) {
+			if (groups & DPG_MAPPING)
+			{
 				j["sensors"][i]["button"] = s->button;
 				j["sensors"][i]["resistorValue"] = s->resistorValue;
 			}
@@ -1099,7 +1106,8 @@ void PadDevice::SaveProfile(json& j, DeviceProfileGroups groups)
 		j["releaseThreshold"] = pad->releaseThreshold;
 	}
 
-	if (groups & DPG_DEVICE) {
+	if (groups & DPG_DEVICE)
+	{
 		j["name"] = pad->name;
 	}
 }
@@ -1107,7 +1115,8 @@ void PadDevice::SaveProfile(json& j, DeviceProfileGroups groups)
 void Device::LoadProfile(json& j, DeviceProfileGroups groups)
 {
 	auto device = connectionManager ? connectionManager->ConnectedDevice() : nullptr;
-	if (!device) {
+	if (!device)
+	{
 		std::printf("LoadProfile :: no device connected\n");
 		return;
 	}
@@ -1117,11 +1126,12 @@ void Device::LoadProfile(json& j, DeviceProfileGroups groups)
 void Device::SaveProfile(json& j, DeviceProfileGroups groups)
 {
 	auto device = connectionManager ? connectionManager->ConnectedDevice() : nullptr;
-	if (!device) {
+	if (!device)
+	{
 		std::printf("SaveProfile :: no device connected\n");
 		return;
 	}
 	device->SaveProfile(j, groups);
 }
 
-}
+} // namespace adp

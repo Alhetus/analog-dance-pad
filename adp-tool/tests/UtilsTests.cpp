@@ -31,8 +31,12 @@ TEST_CASE("narrow/widen round-trips UTF-8", "[utils]")
 {
 	CHECK(roundtrip("") == "");
 	CHECK(roundtrip("hello") == "hello");
-	CHECK(roundtrip("\xC3\xA9") == "\xC3\xA9");             // U+00E9 e-acute (2 bytes)
-	CHECK(roundtrip("\xE2\x82\xAC") == "\xE2\x82\xAC");     // U+20AC euro sign (3 bytes)
+	CHECK(roundtrip("\xC3\xA9") == "\xC3\xA9");                 // U+00E9 e-acute (2 bytes)
+	CHECK(roundtrip("\xE2\x82\xAC") == "\xE2\x82\xAC");         // U+20AC euro sign (3 bytes)
 	CHECK(roundtrip("\xF0\x9F\x98\x80") == "\xF0\x9F\x98\x80"); // U+1F600 (4 bytes, astral)
-	CHECK(roundtrip("a\xC3\xA9""b\xE2\x82\xAC""c") == "a\xC3\xA9""b\xE2\x82\xAC""c"); // mixed
+	CHECK(roundtrip("a\xC3\xA9"
+	                "b\xE2\x82\xAC"
+	                "c") == "a\xC3\xA9"
+	                        "b\xE2\x82\xAC"
+	                        "c"); // mixed
 }
