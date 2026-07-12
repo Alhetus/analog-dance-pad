@@ -12,7 +12,7 @@ export interface Sensor {
 }
 
 /** Fields a client may write back per sensor (positional in the `sensors` message). */
-export type SensorPatch = Partial<Pick<Sensor, 'threshold' | 'releaseThreshold' | 'resistorValue'>>;
+export type SensorPatch = Partial<Pick<Sensor, 'threshold' | 'releaseThreshold' | 'resistorValue' | 'button'>>;
 
 /** LED lighting config, in the same shape a saved profile uses. */
 export interface LightRule {
@@ -36,6 +36,10 @@ export interface Snapshot {
 	name: string;
 	pollingRate: number;
 	selectedIndex: number;
+	releaseThreshold: number; // global release ratio, 0.01..1
+	releaseMode: number; // 0 none, 1 global, 2 individual
+	numButtons: number; // mappable buttons this pad exposes
+	featureDigipot: boolean; // pad supports per-sensor gain
 	sensors: Sensor[];
 }
 
@@ -320,15 +324,17 @@ class PadsStore {
 
 	/** Mapped sensors of the active device, with optimistic thresholds overlaid. */
 	get mappedSensors(): MappedSensor[] {
+		return this.allSensors.filter((m) => m.sensor.button > 0);
+	}
+
+	/** Every sensor of the active device (mapped or not), with optimistic edits overlaid. */
+	get allSensors(): MappedSensor[] {
 		const snap = this.activeSnapshot;
 		if (!snap) return [];
-		const out: MappedSensor[] = [];
-		snap.sensors.forEach((s, index) => {
-			if (s.button <= 0) return;
+		return snap.sensors.map((s, index) => {
 			const p = this.pending[index];
-			out.push({ index, sensor: p === undefined ? s : { ...s, ...p } });
+			return { index, sensor: p === undefined ? s : { ...s, ...p } };
 		});
-		return out;
 	}
 
 	// ---- Profiles ----------------------------------------------------------
@@ -472,6 +478,39 @@ class PadsStore {
 		this.#patch(sensorIndex, { resistorValue: clampByte(byte) });
 	}
 
+	/** Map a sensor to a button (0 = unmapped/disabled, else 1-based). */
+	setButton(sensorIndex: number, button: number) {
+		this.#patch(sensorIndex, { button: Math.max(0, Math.round(button)) });
+	}
+
+	// ---- Device-level config (not per-sensor; sent directly, snapshot echoes back) ----
+
+	setName(name: string) {
+		this.activeConn?.send({ name });
+	}
+
+	/** Global release ratio; device clamps to 0.01..1. */
+	setGlobalRelease(value: number) {
+		this.activeConn?.send({ releaseThreshold: value < 0.01 ? 0.01 : value > 1 ? 1 : value });
+	}
+
+	/** Release mode: 0 none, 1 global, 2 individual. */
+	setReleaseMode(mode: number) {
+		this.activeConn?.send({ releaseMode: mode });
+	}
+
+	/** Recalibrate one sensor's baseline. */
+	calibrate(sensorIndex: number) {
+		this.activeConn?.send({ calibrateSensor: sensorIndex });
+	}
+
+	/** Recalibrate every sensor (server rejects a -1 index, so send one per sensor). */
+	calibrateAll() {
+		const c = this.#activeConn();
+		const n = c?.snapshot?.sensors.length ?? 0;
+		for (let i = 0; i < n; i++) c!.send({ calibrateSensor: i });
+	}
+
 	#scheduleSend() {
 		if (this.#sendTimer) return;
 		this.#sendTimer = setTimeout(() => {
@@ -510,6 +549,7 @@ class PadsStore {
 				delete patch.releaseThreshold;
 			if (patch.resistorValue !== undefined && s.resistorValue === patch.resistorValue)
 				delete patch.resistorValue;
+			if (patch.button !== undefined && s.button === patch.button) delete patch.button;
 			const after = Object.keys(patch).length;
 			if (after === 0) {
 				delete next[i];

@@ -749,6 +749,8 @@ void Device::PublishSnapshot()
 		snapshot->pollingRate = device->PollingRate();
 		snapshot->releaseThreshold = pad.releaseThreshold;
 		snapshot->releaseMode = (int)pad.releaseMode;
+		snapshot->numButtons = pad.numButtons;
+		snapshot->featureDigipot = pad.featureDigipot;
 
 		snapshot->sensors.reserve(pad.numSensors);
 		for (int i = 0; i < pad.numSensors; ++i)
@@ -807,6 +809,8 @@ void Device::SnapshotToJson(const SensorSnapshot& snapshot, json& j)
 	j["pollingRate"] = snapshot.pollingRate;
 	j["releaseThreshold"] = snapshot.releaseThreshold;
 	j["releaseMode"] = snapshot.releaseMode;
+	j["numButtons"] = snapshot.numButtons;
+	j["featureDigipot"] = snapshot.featureDigipot;
 	j["sensors"] = json::array();
 
 	for (const SensorState& s : snapshot.sensors)
@@ -905,6 +909,24 @@ void Device::HandleClientMessage(const std::string& message)
 	if (!connectionManager || !connectionManager->ConnectedDevice())
 	{
 		std::printf("HandleClientMessage :: no device connected, message ignored\n");
+		return;
+	}
+
+	// Release mode: 0 = none, 1 = global, 2 = individual (ReleaseMode enum).
+	if (j.contains("releaseMode") && j["releaseMode"].is_number_integer())
+	{
+		int mode = j["releaseMode"].get<int>();
+		if (mode >= RELEASE_NONE && mode <= RELEASE_INDIVIDUAL)
+			SetReleaseMode((ReleaseMode)mode);
+		else
+			std::printf("releaseMode :: out of range, ignored\n");
+		return;
+	}
+
+	// Recalibrate one sensor's baseline; out-of-range indices are rejected downstream.
+	if (j.contains("calibrateSensor") && j["calibrateSensor"].is_number_integer())
+	{
+		CalibrateSensor(j["calibrateSensor"].get<int>());
 		return;
 	}
 

@@ -100,6 +100,8 @@ struct SensorSnapshot
 	int pollingRate = 0;
 	double releaseThreshold = 1.0;
 	int releaseMode = 0;
+	int numButtons = 0;
+	bool featureDigipot = false;
 	std::vector<SensorState> sensors;
 	LightsState lights; // for client-side profile drift detection
 };

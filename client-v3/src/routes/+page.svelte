@@ -70,9 +70,7 @@
 </script>
 
 <div class="mx-auto flex h-[100dvh] max-w-4xl flex-col gap-6 overflow-hidden p-4 sm:p-6">
-	<header class="flex flex-wrap items-center gap-3">
-		<h1 class="text-primary mr-auto text-xl font-bold tracking-tight">ADP</h1>
-
+	<header class="flex flex-wrap items-center gap-2">
 		<Select.Root type="single" value={pads.activeKey} onValueChange={onSelect}>
 			<Select.Trigger class="w-56">{activeLabel}</Select.Trigger>
 			<Select.Content>
@@ -85,12 +83,7 @@
 			</Select.Content>
 		</Select.Root>
 
-		<Button variant="outline" size="sm" onclick={() => (showServers = !showServers)}>Servers</Button
-		>
-	</header>
-
-	{#if snap}
-		<div class="flex flex-wrap items-center gap-2">
+		{#if snap}
 			<Select.Root type="single" value={loadedProfile?.id ?? ''} onValueChange={onSelectProfile}>
 				<Select.Trigger class="w-56">
 					{loadedProfile?.name ?? 'No profile'}
@@ -114,8 +107,13 @@
 			<Button size="sm" onclick={saveProfile}>Save</Button>
 			<Button variant="outline" size="sm" onclick={newProfile}>New</Button>
 			<Button variant="outline" size="sm" onclick={() => goto('/profiles')}>Manage</Button>
-		</div>
-	{/if}
+			<Button variant="outline" size="sm" onclick={() => goto('/config')}>Configure</Button>
+		{/if}
+
+		<Button variant="outline" size="sm" class="ml-auto" onclick={() => (showServers = !showServers)}
+			>Servers</Button
+		>
+	</header>
 
 	<!-- per-endpoint connection status -->
 	<div class="flex flex-wrap gap-2">

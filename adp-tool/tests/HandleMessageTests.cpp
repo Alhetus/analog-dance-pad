@@ -16,5 +16,8 @@ TEST_CASE("HandleClientMessage ignores bad input without throwing", "[handlemess
 	CHECK_NOTHROW(Device::HandleClientMessage("[1,2,3]"));          // valid JSON, not an object
 	CHECK_NOTHROW(Device::HandleClientMessage("42"));               // valid JSON, not an object
 	CHECK_NOTHROW(Device::HandleClientMessage("{\"sensors\":[]}")); // object, but no device
+	CHECK_NOTHROW(Device::HandleClientMessage("{\"releaseMode\":1}"));
+	CHECK_NOTHROW(Device::HandleClientMessage("{\"releaseMode\":99}"));    // out of range
+	CHECK_NOTHROW(Device::HandleClientMessage("{\"calibrateSensor\":0}"));
 	CHECK_NOTHROW(Device::HandleClientMessage("{\"unhandled\":true}"));
 }
