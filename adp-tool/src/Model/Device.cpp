@@ -301,7 +301,7 @@ public:
 				if(myConnectedDevice && myConnectedDevice->Path() == it->first)
 					myConnectedDevice.reset();
 
-				std::printf("ConnectionManager :: device removed (%hs)\n", it->second.GetName().c_str());
+				std::printf("ConnectionManager :: device removed (%s)\n", it->second.GetName().c_str());
 				it = devices.erase(it);
 			}
 			else ++it;
@@ -363,7 +363,7 @@ public:
 			memset(padIdentification.boardType, 0, BOARD_TYPE_LENGTH);
 			strcpy(padIdentification.boardType, "unknown");
 
-			memcpy(&padIdentificationV2, &padIdentification, sizeof(padIdentification));
+			static_cast<IdentificationReport&>(padIdentificationV2) = padIdentification;
 			padIdentificationV2.features = WriteU16LE(0);
 		}
 		else
@@ -372,12 +372,12 @@ public:
 
 			if (padVersion.IsNewer({1, 2})) {
 				if (!reporter->Get(padIdentificationV2)) {
-					memcpy(&padIdentificationV2, &padIdentification, sizeof(padIdentification));
+					static_cast<IdentificationReport&>(padIdentificationV2) = padIdentification;
 					padIdentificationV2.features = WriteU16LE(0);
 				}
 			}
 			else {
-				memcpy(&padIdentificationV2, &padIdentification, sizeof(padIdentification));
+				static_cast<IdentificationReport&>(padIdentificationV2) = padIdentification;
 				padIdentificationV2.features = WriteU16LE(0);
 			}
 		}
@@ -516,7 +516,7 @@ public:
 
 	string GetDeviceName(int index, bool update = false)
 	{
-		if (index < 0 || index >= devices.size())
+		if (index < 0 || (size_t)index >= devices.size())
 			return "";
 
 		auto it = devices.begin();
@@ -526,7 +526,7 @@ public:
 
 	bool DeviceSelect(int index)
 	{
-		if (index < 0 || index >= devices.size())
+		if (index < 0 || (size_t)index >= devices.size())
 			return false;
 
 		if(index == DeviceSelected())
@@ -817,7 +817,7 @@ std::string Device::ReadDebug()
 	return device ? device->ReadDebug() : "";
 }
 
-const bool Device::HasUnsavedChanges()
+bool Device::HasUnsavedChanges()
 {
 	auto device = connectionManager->ConnectedDevice();
 	return device ? device->HasUnsavedChanges() : false;

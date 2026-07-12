@@ -170,7 +170,7 @@ public:
 
 	static std::string ReadDebug();
 
-	static const bool HasUnsavedChanges();
+	static bool HasUnsavedChanges();
 
 	static bool SetReleaseMode(ReleaseMode mode);
 

@@ -523,7 +523,7 @@ public:
 
 	const DevicePath& Path() const { return myPath; }
 
-	const int PollingRate() const { return myPollingData.pollingRate; }
+	int PollingRate() const { return myPollingData.pollingRate; }
 
 	const PadState& State() const { return myPad; }
 
