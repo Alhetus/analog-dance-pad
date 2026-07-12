@@ -7,6 +7,9 @@
 	import { Button } from '$lib/components/ui/button';
 	import { Badge } from '$lib/components/ui/badge';
 	import * as Select from '$lib/components/ui/select';
+	import SettingsIcon from '@lucide/svelte/icons/settings';
+	import SaveIcon from '@lucide/svelte/icons/save';
+	import PlusIcon from '@lucide/svelte/icons/plus';
 
 	let showServers = $state(false);
 	let endpointsText = $state('');
@@ -83,6 +86,15 @@
 			</Select.Content>
 		</Select.Root>
 
+		<Button
+			variant="outline"
+			size="icon"
+			aria-label="Configure"
+			onclick={() => goto('/config')}
+		>
+			<SettingsIcon />
+		</Button>
+
 		{#if snap}
 			<Select.Root type="single" value={loadedProfile?.id ?? ''} onValueChange={onSelectProfile}>
 				<Select.Trigger class="w-56">
@@ -104,10 +116,13 @@
 				<Badge variant="secondary">modified</Badge>
 			{/if}
 
-			<Button size="sm" onclick={saveProfile}>Save</Button>
-			<Button variant="outline" size="sm" onclick={newProfile}>New</Button>
+			<Button size="icon" aria-label="Save" onclick={saveProfile}>
+				<SaveIcon />
+			</Button>
+			<Button variant="outline" size="icon" aria-label="New profile" onclick={newProfile}>
+				<PlusIcon />
+			</Button>
 			<Button variant="outline" size="sm" onclick={() => goto('/profiles')}>Manage</Button>
-			<Button variant="outline" size="sm" onclick={() => goto('/config')}>Configure</Button>
 		{/if}
 
 		<Button variant="outline" size="sm" class="ml-auto" onclick={() => (showServers = !showServers)}

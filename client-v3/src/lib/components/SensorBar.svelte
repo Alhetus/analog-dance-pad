@@ -42,7 +42,7 @@
 </script>
 
 <div class="flex h-full flex-col items-center gap-1 select-none">
-	<span class="text-muted-foreground text-[10px] leading-none tabular-nums">
+	<span class="text-muted-foreground text-sm leading-none tabular-nums">
 		{pct(sensor.value)}%
 	</span>
 
@@ -105,7 +105,7 @@
 		></div>
 	</div>
 
-	<span class="text-primary text-[10px] leading-none font-medium tabular-nums">
+	<span class="text-primary text-sm leading-none font-medium tabular-nums">
 		{pct(sensor.threshold)}%
 	</span>
 	<button
