@@ -2,12 +2,14 @@
 	import { onMount } from 'svelte';
 	import { pads } from '$lib/pads.svelte';
 	import SensorBar from '$lib/components/SensorBar.svelte';
+	import SensorEditor from '$lib/components/SensorEditor.svelte';
 	import { Button } from '$lib/components/ui/button';
 	import { Badge } from '$lib/components/ui/badge';
 	import * as Select from '$lib/components/ui/select';
 
 	let showServers = $state(false);
 	let endpointsText = $state('');
+	let editingIndex = $state<number | null>(null);
 
 	onMount(() => {
 		pads.start();
@@ -35,6 +37,7 @@
 	);
 	const snap = $derived(pads.activeSnapshot);
 	const sensors = $derived(pads.mappedSensors);
+	const editing = $derived(sensors.find((m) => m.index === editingIndex));
 	const anyOpen = $derived(pads.conns.some((c) => c.status === 'open'));
 
 	function onSelect(key: string | undefined) {
@@ -49,7 +52,7 @@
 	}
 </script>
 
-<div class="mx-auto flex min-h-screen max-w-4xl flex-col gap-6 p-4 sm:p-6">
+<div class="mx-auto flex h-[100dvh] max-w-4xl flex-col gap-6 overflow-hidden p-4 sm:p-6">
 	<header class="flex flex-wrap items-center gap-3">
 		<h1 class="text-primary mr-auto text-xl font-bold tracking-tight">ADP</h1>
 
@@ -99,16 +102,20 @@
 		</div>
 	{/if}
 
-	<main class="flex flex-1 items-center justify-center">
+	<main class="flex min-h-0 flex-1 items-center justify-center">
 		{#if snap}
 			{#if sensors.length > 0}
-				<div class="flex w-full flex-col items-center gap-4">
-					<div class="flex items-end gap-2 overflow-x-auto sm:gap-3">
+				<div class="flex h-full max-h-[32rem] w-full flex-col items-center gap-2 py-2">
+					<div class="grid h-full min-h-0 w-full grid-flow-col auto-cols-fr gap-1 sm:gap-2">
 						{#each sensors as m (m.index)}
-							<SensorBar sensor={m.sensor} onthreshold={(v) => pads.setThreshold(m.index, v)} />
+							<SensorBar
+								sensor={m.sensor}
+								onthreshold={(v) => pads.setThreshold(m.index, v)}
+								onedit={() => (editingIndex = m.index)}
+							/>
 						{/each}
 					</div>
-					<p class="text-muted-foreground text-sm">
+					<p class="text-muted-foreground shrink-0 text-sm">
 						{snap.name || 'Pad'} · {snap.pollingRate} Hz
 					</p>
 				</div>
@@ -128,3 +135,14 @@
 		{/if}
 	</main>
 </div>
+
+{#if editing}
+	<SensorEditor
+		sensor={editing.sensor}
+		index={editing.index}
+		onthreshold={(v) => pads.setThreshold(editing.index, v)}
+		onrelease={(v) => pads.setReleaseThreshold(editing.index, v)}
+		ongain={(b) => pads.setGain(editing.index, b)}
+		onclose={() => (editingIndex = null)}
+	/>
+{/if}

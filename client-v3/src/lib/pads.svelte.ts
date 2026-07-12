@@ -4,12 +4,15 @@ import { browser } from '$app/environment';
 
 export interface Sensor {
 	threshold: number; // normalized 0..1
-	releaseThreshold: number;
+	releaseThreshold: number; // normalized 0..1
 	value: number; // normalized 0..1
-	resistorValue: number;
+	resistorValue: number; // raw digipot byte 0..255 (NOT normalized)
 	button: number; // 0 = unmapped, else 1-based
 	pressed: boolean; // pad-authoritative activation
 }
+
+/** Fields a client may write back per sensor (positional in the `sensors` message). */
+export type SensorPatch = Partial<Pick<Sensor, 'threshold' | 'releaseThreshold' | 'resistorValue'>>;
 
 export interface Snapshot {
 	msgType: 1;
@@ -46,6 +49,7 @@ const STALE_MS = 1000; // no snapshot for this long while open => pad considered
 const MAX_BACKOFF_MS = 5000;
 
 const clamp01 = (v: number) => (v < 0 ? 0 : v > 1 ? 1 : v);
+const clampByte = (v: number) => (v < 0 ? 0 : v > 255 ? 255 : Math.round(v));
 const hostLabel = (endpoint: string) => endpoint.replace(/^wss?:\/\//, '');
 
 /** One WebSocket connection to a single adp-tool server. */
@@ -147,8 +151,8 @@ class PadsStore {
 	endpoints: string[] = $state([...DEFAULT_ENDPOINTS]);
 	conns: Conn[] = $state([]);
 	active: ActiveRef | null = $state(null);
-	/** Optimistic thresholds for the active device, keyed by sensor index. */
-	pending: Record<number, number> = $state({});
+	/** Optimistic per-sensor edits for the active device, keyed by sensor index. */
+	pending: Record<number, SensorPatch> = $state({});
 	now = $state(0); // ticking clock so staleness stays reactive
 
 	#clock: ReturnType<typeof setInterval> | null = null;
@@ -254,7 +258,7 @@ class PadsStore {
 		snap.sensors.forEach((s, index) => {
 			if (s.button <= 0) return;
 			const p = this.pending[index];
-			out.push({ index, sensor: p === undefined ? s : { ...s, threshold: p } });
+			out.push({ index, sensor: p === undefined ? s : { ...s, ...p } });
 		});
 		return out;
 	}
@@ -267,10 +271,27 @@ class PadsStore {
 		this.conns.find((c) => c.endpoint === endpoint)?.send({ selectDevice: index });
 	}
 
+	/** Merge an optimistic patch for a sensor and (throttled) push it to the pad. */
+	#patch(sensorIndex: number, patch: SensorPatch) {
+		this.pending = {
+			...this.pending,
+			[sensorIndex]: { ...this.pending[sensorIndex], ...patch }
+		};
+		this.#scheduleSend();
+	}
+
 	/** Optimistically set a sensor threshold and (throttled) push it to the pad. */
 	setThreshold(sensorIndex: number, value: number) {
-		this.pending = { ...this.pending, [sensorIndex]: clamp01(value) };
-		this.#scheduleSend();
+		this.#patch(sensorIndex, { threshold: clamp01(value) });
+	}
+
+	setReleaseThreshold(sensorIndex: number, value: number) {
+		this.#patch(sensorIndex, { releaseThreshold: clamp01(value) });
+	}
+
+	/** Set the raw digipot gain byte (0..255). */
+	setGain(sensorIndex: number, byte: number) {
+		this.#patch(sensorIndex, { resistorValue: clampByte(byte) });
 	}
 
 	#scheduleSend() {
@@ -285,10 +306,8 @@ class PadsStore {
 		const c = this.#activeConn();
 		const snap = c?.snapshot;
 		if (!c || !snap) return;
-		// Positional array: {} for untouched sensors, {threshold} for pending ones.
-		const sensors = snap.sensors.map((_, i) =>
-			this.pending[i] === undefined ? {} : { threshold: this.pending[i] }
-		);
+		// Positional array: {} for untouched sensors, the patch for pending ones.
+		const sensors = snap.sensors.map((_, i) => this.pending[i] ?? {});
 		c.send({ sensors });
 	}
 
@@ -301,8 +320,24 @@ class PadsStore {
 		for (const k of Object.keys(next)) {
 			const i = Number(k);
 			const s = snap.sensors[i];
-			if (s && Math.abs(s.threshold - next[i]) < EPS) {
+			if (!s) continue;
+			const patch: SensorPatch = { ...next[i] };
+			const before = Object.keys(patch).length;
+			if (patch.threshold !== undefined && Math.abs(s.threshold - patch.threshold) < EPS)
+				delete patch.threshold;
+			if (
+				patch.releaseThreshold !== undefined &&
+				Math.abs(s.releaseThreshold - patch.releaseThreshold) < EPS
+			)
+				delete patch.releaseThreshold;
+			if (patch.resistorValue !== undefined && s.resistorValue === patch.resistorValue)
+				delete patch.resistorValue;
+			const after = Object.keys(patch).length;
+			if (after === 0) {
 				delete next[i];
+				changed = true;
+			} else if (after !== before) {
+				next[i] = patch;
 				changed = true;
 			}
 		}

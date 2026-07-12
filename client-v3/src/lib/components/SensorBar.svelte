@@ -4,9 +4,10 @@
 	interface Props {
 		sensor: Sensor;
 		onthreshold: (value: number) => void;
+		onedit: () => void;
 	}
 
-	let { sensor, onthreshold }: Props = $props();
+	let { sensor, onthreshold, onedit }: Props = $props();
 
 	let trackEl = $state<HTMLDivElement | null>(null);
 	let dragging = $state(false);
@@ -17,6 +18,7 @@
 	// `pressed` while a threshold change is in flight or release-mode differs.
 	const active = $derived(sensor.value > sensor.threshold);
 	const mismatch = $derived(active !== sensor.pressed);
+	const showRelease = $derived(sensor.releaseThreshold !== sensor.threshold);
 
 	function valueFromPointer(clientY: number) {
 		if (!trackEl) return sensor.threshold;
@@ -25,6 +27,7 @@
 	}
 
 	function onPointerDown(e: PointerEvent) {
+		e.stopPropagation(); // dragging the threshold must not open the editor
 		dragging = true;
 		(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
 		onthreshold(valueFromPointer(e.clientY));
@@ -38,16 +41,24 @@
 	}
 </script>
 
-<div class="flex flex-col items-center gap-2 select-none">
-	<span class="text-muted-foreground text-xs tabular-nums">{pct(sensor.value)}%</span>
+<div class="flex h-full flex-col items-center gap-1 select-none">
+	<span class="text-muted-foreground text-[10px] leading-none tabular-nums">
+		{pct(sensor.value)}%
+	</span>
 
+	<!-- tap the track (outside the drag handle) to open the editor -->
 	<div
 		bind:this={trackEl}
-		class="bg-muted relative h-72 w-12 overflow-hidden rounded-md sm:h-96 sm:w-16"
+		class="bg-muted relative w-full min-h-0 flex-1 cursor-pointer overflow-hidden rounded-md"
+		onclick={onedit}
+		role="button"
+		tabindex="0"
+		aria-label="Edit button {sensor.button}"
+		onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && onedit()}
 	>
 		<!-- value fill -->
 		<div
-			class="absolute inset-x-0 bottom-0 transition-[height] duration-75 ease-out {active
+			class="pointer-events-none absolute inset-x-0 bottom-0 transition-[height] duration-75 ease-out {active
 				? 'bg-primary shadow-[0_0_18px_2px_var(--color-primary)]'
 				: 'bg-secondary-foreground/25'}"
 			style="height: {pct(sensor.value)}%"
@@ -56,8 +67,17 @@
 		<!-- pressed / activation mismatch indicator -->
 		{#if mismatch}
 			<div
-				class="bg-destructive absolute top-1 right-1 size-2 rounded-full"
+				class="bg-destructive pointer-events-none absolute top-1 right-1 size-2 rounded-full"
 				title="Pad's pressed state disagrees with value vs threshold"
+			></div>
+		{/if}
+
+		<!-- release-threshold marker (read-only; edited only in the editor) -->
+		{#if showRelease}
+			<div
+				class="pointer-events-none absolute inset-x-0 h-0.5 bg-amber-400 shadow-[0_0_6px_theme(colors.amber.400)]"
+				style="bottom: calc({pct(sensor.releaseThreshold)}% - 1px)"
+				title="Release threshold"
 			></div>
 		{/if}
 
@@ -84,8 +104,14 @@
 		></div>
 	</div>
 
-	<span class="text-primary text-xs font-medium tabular-nums">{pct(sensor.threshold)}%</span>
-	<span class="bg-secondary text-secondary-foreground rounded px-2 py-0.5 text-sm font-semibold">
-		{sensor.button}
+	<span class="text-primary text-[10px] leading-none font-medium tabular-nums">
+		{pct(sensor.threshold)}%
 	</span>
+	<button
+		type="button"
+		onclick={onedit}
+		class="bg-secondary text-secondary-foreground rounded px-2 py-0.5 text-sm font-semibold"
+	>
+		{sensor.button}
+	</button>
 </div>
