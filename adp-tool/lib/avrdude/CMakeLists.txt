@@ -87,6 +87,7 @@ bin2h(
 )
 
 add_library(avrdude STATIC ${AVRDUDE_SOURCES})
+target_compile_features(avrdude PRIVATE cxx_std_11)   # avrdude-slic3r.cpp needs C++11; Clang otherwise defaults to pre-C++11
 # target_include_directories(avrdude PRIVATE
 #  "./../hidapi"
 #  C:/dev/analog-dance-pad/adp-tool/build/vcpkg_installed/x64-windows-static-md/include
