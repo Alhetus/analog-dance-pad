@@ -17,7 +17,6 @@
 	// Client-side activation (instant); may briefly disagree with the pad's own
 	// `pressed` while a threshold change is in flight or release-mode differs.
 	const active = $derived(sensor.value > sensor.threshold);
-	const mismatch = $derived(active !== sensor.pressed);
 	const showRelease = $derived(sensor.releaseThreshold !== sensor.threshold);
 
 	function valueFromPointer(clientY: number) {
@@ -63,14 +62,6 @@
 				: 'bg-secondary-foreground/25'}"
 			style="height: {pct(sensor.value)}%"
 		></div>
-
-		<!-- pressed / activation mismatch indicator -->
-		{#if mismatch}
-			<div
-				class="bg-destructive pointer-events-none absolute top-1 right-1 size-2 rounded-full"
-				title="Pad's pressed state disagrees with value vs threshold"
-			></div>
-		{/if}
 
 		<!-- release-threshold marker (read-only; edited only in the editor) -->
 		{#if showRelease}
