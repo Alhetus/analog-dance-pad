@@ -4,14 +4,17 @@
 	import { pads } from '$lib/pads.svelte';
 	import SensorBar from '$lib/components/SensorBar.svelte';
 	import SensorEditor from '$lib/components/SensorEditor.svelte';
+	import CalibrationModal from '$lib/components/CalibrationModal.svelte';
 	import { Button } from '$lib/components/ui/button';
 	import { Badge } from '$lib/components/ui/badge';
 	import * as Select from '$lib/components/ui/select';
 	import SettingsIcon from '@lucide/svelte/icons/settings';
 	import SaveIcon from '@lucide/svelte/icons/save';
 	import PlusIcon from '@lucide/svelte/icons/plus';
+	import ScaleIcon from '@lucide/svelte/icons/scale';
 
 	let showServers = $state(false);
+	let showCalibration = $state(false);
 	let endpointsText = $state('');
 	let editingIndex = $state<number | null>(null);
 
@@ -86,12 +89,7 @@
 			</Select.Content>
 		</Select.Root>
 
-		<Button
-			variant="outline"
-			size="icon"
-			aria-label="Configure"
-			onclick={() => goto('/config')}
-		>
+		<Button variant="outline" size="icon" aria-label="Configure" onclick={() => goto('/config')}>
 			<SettingsIcon />
 		</Button>
 
@@ -123,6 +121,17 @@
 				<PlusIcon />
 			</Button>
 			<Button variant="outline" size="sm" onclick={() => goto('/profiles')}>Manage</Button>
+
+			{#if sensors.length > 0}
+				<Button
+					variant="outline"
+					size="icon"
+					aria-label="Calibrate sensors"
+					onclick={() => (showCalibration = true)}
+				>
+					<ScaleIcon />
+				</Button>
+			{/if}
 		{/if}
 
 		<Button variant="outline" size="sm" class="ml-auto" onclick={() => (showServers = !showServers)}
@@ -202,5 +211,12 @@
 		onrelease={(v) => pads.setReleaseThreshold(editing.index, v)}
 		ongain={(b) => pads.setGain(editing.index, b)}
 		onclose={() => (editingIndex = null)}
+	/>
+{/if}
+
+{#if showCalibration}
+	<CalibrationModal
+		onapply={(pct, rel) => pads.calibrateThresholds(pct, rel)}
+		onclose={() => (showCalibration = false)}
 	/>
 {/if}

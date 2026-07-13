@@ -12,7 +12,9 @@ export interface Sensor {
 }
 
 /** Fields a client may write back per sensor (positional in the `sensors` message). */
-export type SensorPatch = Partial<Pick<Sensor, 'threshold' | 'releaseThreshold' | 'resistorValue' | 'button'>>;
+export type SensorPatch = Partial<
+	Pick<Sensor, 'threshold' | 'releaseThreshold' | 'resistorValue' | 'button'>
+>;
 
 /** LED lighting config, in the same shape a saved profile uses. */
 export interface LightRule {
@@ -207,7 +209,11 @@ const DEFAULT_ENDPOINTS = ['ws://127.0.0.1:8008'];
 const canon = (v: unknown): string =>
 	JSON.stringify(v, (_, val) =>
 		val && typeof val === 'object' && !Array.isArray(val)
-			? Object.fromEntries(Object.keys(val as object).sort().map((k) => [k, (val as Record<string, unknown>)[k]]))
+			? Object.fromEntries(
+					Object.keys(val as object)
+						.sort()
+						.map((k) => [k, (val as Record<string, unknown>)[k]])
+				)
 			: val
 	);
 
@@ -477,7 +483,8 @@ class PadsStore {
 		// overlay it in lockstep so the release marker tracks the drag instead of
 		// lagging until the pad echoes the recomputed value back.
 		const s = this.#activeConn()?.snapshot?.sensors[sensorIndex];
-		if (s && s.threshold > 0) patch.releaseThreshold = clamp01(v * (s.releaseThreshold / s.threshold));
+		if (s && s.threshold > 0)
+			patch.releaseThreshold = clamp01(v * (s.releaseThreshold / s.threshold));
 		this.#patch(sensorIndex, patch);
 	}
 
@@ -521,6 +528,26 @@ class PadsStore {
 		const c = this.#activeConn();
 		const n = c?.snapshot?.sensors.length ?? 0;
 		for (let i = 0; i < n; i++) c!.send({ calibrateSensor: i });
+	}
+
+	/**
+	 * Set threshold = live value + offset (percent points) across mapped sensors.
+	 * Re-reads each sensor's current live value as the baseline on every call, so
+	 * the pad should be at rest when this runs. When `overwriteRelease` is true the
+	 * release threshold tracks proportionally (via setThreshold); otherwise only the
+	 * threshold is written. All patches flush together in one `{sensors:[...]}` send.
+	 */
+	calibrateThresholds(offsetPct: number, overwriteRelease: boolean) {
+		const snap = this.activeSnapshot;
+		if (!snap) return;
+		const offset = offsetPct / 100;
+		snap.sensors.forEach((s, i) => {
+			if (s.button <= 0) return; // mapped sensors only
+			const threshold = clamp01(s.value + offset);
+			if (overwriteRelease)
+				this.setThreshold(i, threshold); // proportional release overlay
+			else this.#patch(i, { threshold }); // threshold only
+		});
 	}
 
 	#scheduleSend() {
