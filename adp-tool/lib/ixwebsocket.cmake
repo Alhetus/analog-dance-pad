@@ -102,6 +102,12 @@ target_compile_definitions("ixwebsocket" PRIVATE IXWEBSOCKET_USE_MBED_TLS)
 target_compile_definitions("ixwebsocket" PRIVATE IXWEBSOCKET_USE_MBED_TLS_MIN_VERSION_3)
 set(ENABLE_TESTING OFF CACHE INTERNAL "Don't build tests")
 set(GEN_FILES OFF CACHE INTERNAL "Don't generate files (requires perl and python)")
+# mbedtls defaults MBEDTLS_FATAL_WARNINGS to ON, which appends -Werror to its own
+# build. Newer Clang/GCC add warnings (e.g. -Wunterminated-string-initialization on
+# mbedtls's intentionally NUL-less TLS label arrays) that then break the build. Keep
+# warnings-as-errors first-party only (see the top-level CMakeLists.txt comment) by
+# disabling it for this vendored dependency.
+set(MBEDTLS_FATAL_WARNINGS OFF CACHE INTERNAL "Don't treat mbedtls warnings as errors")
 add_subdirectory("../lib/mbedtls" EXCLUDE_FROM_ALL)
 target_link_libraries("ixwebsocket" mbedtls mbedcrypto mbedx509)
 
