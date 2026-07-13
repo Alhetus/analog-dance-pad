@@ -156,12 +156,6 @@
 						<em>Per-sensor</em> lets each sensor release at its own lower threshold (hysteresis).
 					</p>
 				</div>
-
-				<div>
-					<Button variant="outline" size="sm" onclick={() => pads.calibrateAll()}>
-						Calibrate all sensors
-					</Button>
-				</div>
 			</Card.Content>
 		</Card.Root>
 

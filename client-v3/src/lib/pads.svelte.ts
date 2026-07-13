@@ -531,13 +531,6 @@ class PadsStore {
 		this.activeConn?.send({ calibrateSensor: sensorIndex });
 	}
 
-	/** Recalibrate every sensor (server rejects a -1 index, so send one per sensor). */
-	calibrateAll() {
-		const c = this.#activeConn();
-		const n = c?.snapshot?.sensors.length ?? 0;
-		for (let i = 0; i < n; i++) c!.send({ calibrateSensor: i });
-	}
-
 	/**
 	 * Set threshold = live value + offset (percent points) across mapped sensors.
 	 * Re-reads each sensor's current live value as the baseline on every call, so
