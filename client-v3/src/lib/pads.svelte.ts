@@ -83,7 +83,12 @@ export interface Profile {
 	ledMappings?: LedMapping[];
 }
 
-const EPS = 0.01; // device quantizes thresholds to /850 (~0.0012), so echoes differ slightly
+// Reconcile tolerance for float thresholds. Must sit between the device's
+// quantization noise (thresholds are stored /850 ~= 0.0012) and the smallest
+// deliberate edit (the +/- fine-tune buttons nudge by 1% = 0.01). If EPS were
+// >= that step, reconcile() would treat the pre-update snapshot as already
+// converged and delete a single-percent nudge before the device applied it.
+const EPS = 0.004;
 const SEND_THROTTLE_MS = 40;
 const STALE_MS = 1000; // no snapshot for this long while open => pad considered gone
 const MAX_BACKOFF_MS = 5000;

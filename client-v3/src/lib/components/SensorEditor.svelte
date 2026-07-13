@@ -72,6 +72,26 @@
 						<span class="text-muted-foreground w-3 text-sm">{unit}</span>
 					</div>
 				</div>
+				<div class="flex gap-1">
+					<Button
+						variant="outline"
+						size="icon-sm"
+						class="w-16"
+						onclick={() => commit(value - 1)}
+						aria-label="Decrease {label}"
+					>
+						−
+					</Button>
+					<Button
+						variant="outline"
+						size="icon-sm"
+						class="w-16"
+						onclick={() => commit(value + 1)}
+						aria-label="Increase {label}"
+					>
+						+
+					</Button>
+				</div>
 			</div>
 		{/snippet}
 
