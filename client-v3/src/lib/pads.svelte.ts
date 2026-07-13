@@ -38,8 +38,8 @@ export interface Snapshot {
 	name: string;
 	pollingRate: number;
 	selectedIndex: number;
-	releaseThreshold: number; // global release ratio, 0.01..1
-	releaseMode: number; // 0 none, 1 global, 2 individual
+	releaseThreshold: number; // legacy global release ratio, 0.01..1 (unused; see releaseMode)
+	releaseMode: number; // 0 none, 2 per-sensor (1 = legacy global, treated as per-sensor)
 	numButtons: number; // mappable buttons this pad exposes
 	featureDigipot: boolean; // pad supports per-sensor gain
 	sensors: Sensor[];
@@ -326,6 +326,15 @@ class PadsStore {
 		return c.snapshot;
 	}
 
+	/**
+	 * Whether per-sensor release thresholds are in effect. False only in "None"
+	 * mode (release == press threshold). Any non-zero mode (including legacy global)
+	 * counts as per-sensor. Defaults to true until a snapshot arrives.
+	 */
+	get releaseEnabled(): boolean {
+		return (this.activeSnapshot?.releaseMode ?? 2) !== 0;
+	}
+
 	/** True once a device is chosen but the server hasn't switched to it yet. */
 	get switching(): boolean {
 		const c = this.#activeConn();
@@ -489,7 +498,11 @@ class PadsStore {
 	}
 
 	setReleaseThreshold(sensorIndex: number, value: number) {
-		this.#patch(sensorIndex, { releaseThreshold: clamp01(value) });
+		// Release can never exceed the press threshold (hysteresis would break); the
+		// server enforces this too. Cap against the most current threshold we have.
+		const s = this.#activeConn()?.snapshot?.sensors[sensorIndex];
+		const cap = this.pending[sensorIndex]?.threshold ?? s?.threshold ?? 1;
+		this.#patch(sensorIndex, { releaseThreshold: clamp01(Math.min(value, cap)) });
 	}
 
 	/** Set the raw digipot gain byte (0..255). */
@@ -508,12 +521,7 @@ class PadsStore {
 		this.activeConn?.send({ name });
 	}
 
-	/** Global release ratio; device clamps to 0.01..1. */
-	setGlobalRelease(value: number) {
-		this.activeConn?.send({ releaseThreshold: value < 0.01 ? 0.01 : value > 1 ? 1 : value });
-	}
-
-	/** Release mode: 0 none, 1 global, 2 individual. */
+	/** Release mode: 0 none, 2 per-sensor. */
 	setReleaseMode(mode: number) {
 		this.activeConn?.send({ releaseMode: mode });
 	}

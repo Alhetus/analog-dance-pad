@@ -3,11 +3,12 @@
 
 	interface Props {
 		sensor: Sensor;
+		releaseEnabled: boolean; // false in "None" mode: hide the release marker
 		onthreshold: (value: number) => void;
 		onedit: () => void;
 	}
 
-	let { sensor, onthreshold, onedit }: Props = $props();
+	let { sensor, releaseEnabled, onthreshold, onedit }: Props = $props();
 
 	let trackEl = $state<HTMLDivElement | null>(null);
 	let dragging = $state(false);
@@ -16,7 +17,7 @@
 
 	// Pad-authoritative activation (honors release threshold / release mode).
 	const active = $derived(sensor.pressed);
-	const showRelease = $derived(sensor.releaseThreshold !== sensor.threshold);
+	const showRelease = $derived(releaseEnabled && sensor.releaseThreshold !== sensor.threshold);
 
 	function valueFromPointer(clientY: number) {
 		if (!trackEl) return sensor.threshold;

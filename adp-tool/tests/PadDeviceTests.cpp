@@ -110,6 +110,54 @@ TEST_CASE("PadDevice picks the report by firmware version", "[paddevice]")
 	}
 }
 
+TEST_CASE("Release mode governs the stored release threshold", "[paddevice]")
+{
+	RecordingBackend* raw = nullptr;
+	auto rep = makeReporter(raw);
+	// v1.3+ so per-sensor SensorReports are used (Send() alone, no echo needed).
+	PadDevice pad(rep, "t", makeName("x"), makeIdent(1, 3, 8, 1), {}, {}, {makeSensor(0, 425, 0)});
+	raw->sent.clear();
+
+	SECTION("individual mode honors the requested per-sensor release")
+	{
+		CHECK(pad.SetReleaseMode(RELEASE_INDIVIDUAL));
+		// 0.2*850=170 survives quantization exactly and differs from the ctor ratio
+		// (0.5*~0.499=~0.25), proving the requested value is kept verbatim.
+		CHECK(pad.SetThreshold(0, 0.5, 0.2));
+		CHECK(pad.Sensor(0)->threshold == Approx(0.5));
+		CHECK(pad.Sensor(0)->releaseThreshold == Approx(0.2));
+	}
+
+	SECTION("none mode forces release to equal the threshold")
+	{
+		CHECK(pad.SetReleaseMode(RELEASE_NONE));
+		// Switching to None immediately re-derives release == threshold.
+		CHECK(pad.Sensor(0)->releaseThreshold == Approx(pad.Sensor(0)->threshold));
+		// A later threshold edit keeps release pinned to the threshold, ignoring
+		// whatever release the caller passes.
+		CHECK(pad.SetThreshold(0, 0.7, 0.2));
+		CHECK(pad.Sensor(0)->threshold == Approx(0.7));
+		CHECK(pad.Sensor(0)->releaseThreshold == Approx(0.7));
+	}
+
+	SECTION("legacy global mode is treated as per-sensor")
+	{
+		// Global mode was removed; a device still reporting it must honor per-sensor
+		// release edits rather than deriving from a shared ratio.
+		CHECK(pad.SetReleaseMode(RELEASE_GLOBAL));
+		CHECK(pad.SetThreshold(0, 0.5, 0.2));
+		CHECK(pad.Sensor(0)->releaseThreshold == Approx(0.2));
+	}
+
+	SECTION("release threshold is clamped to never exceed the press threshold")
+	{
+		CHECK(pad.SetReleaseMode(RELEASE_INDIVIDUAL));
+		// Request a release above the threshold; it must be pinned to the threshold.
+		CHECK(pad.SetThreshold(0, 0.5, 0.9));
+		CHECK(pad.Sensor(0)->releaseThreshold == Approx(0.5));
+	}
+}
+
 TEST_CASE("PadDevice clamps the release threshold to [0.01, 1.0]", "[paddevice]")
 {
 	RecordingBackend* raw = nullptr;

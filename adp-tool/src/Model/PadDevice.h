@@ -124,6 +124,11 @@ class PadDevice
 				else
 				{
 					myPad.releaseMode = (ReleaseMode)ReadU32LE(report.propertyValue);
+					// Global release mode has been removed; a device still reporting
+					// it is treated as per-sensor (its stored per-sensor release
+					// values, previously threshold*ratio, carry over unchanged).
+					if (myPad.releaseMode == RELEASE_GLOBAL)
+						myPad.releaseMode = RELEASE_INDIVIDUAL;
 				}
 			}
 		}
@@ -266,6 +271,22 @@ class PadDevice
 		return true;
 	}
 
+	// Returns the releaseThreshold to actually store for a sensor given the active
+	// release mode. The caller's `requested` value is only honored in individual
+	// mode; None/Global derive the release from the sensor's threshold. Assumes
+	// mySensors[idx].threshold has already been set to its new value.
+	double ReleaseForMode(int idx, double requested) const
+	{
+		// None means no hysteresis (release tracks the press threshold); any other
+		// mode honors the caller's per-sensor value. Global mode has been removed —
+		// a device still reporting it is coerced to per-sensor, so it lands here too.
+		if (myPad.releaseMode == RELEASE_NONE)
+			return mySensors[idx].threshold;
+		// The release threshold must never exceed the press threshold, or hysteresis
+		// breaks (the button would release the instant it presses). Clamp it down.
+		return std::clamp(requested, 0.0, mySensors[idx].threshold);
+	}
+
 	bool SetReleaseMode(ReleaseMode mode)
 	{
 		myPad.releaseMode = mode;
@@ -274,7 +295,30 @@ class PadDevice
 		report.propertyId = WriteU32LE(SetPropertyReport::SPID_RELEASE_MODE);
 		report.propertyValue = WriteU32LE((uint32_t)mode);
 
-		return myReporter->Send(report);
+		if (!myReporter->Send(report))
+			return false;
+
+		// None derives every sensor's release from its threshold, so switching to it
+		// must re-apply that rule immediately. Per-sensor leaves the existing values
+		// untouched.
+		if (mode == RELEASE_NONE)
+		{
+			if (myPad.firmwareVersion.IsNewer({1, 2}))
+			{
+				for (int i = 0; i < myPad.numSensors; ++i)
+				{
+					mySensors[i].releaseThreshold = ReleaseForMode(i, mySensors[i].releaseThreshold);
+					if (!SendSensor(i))
+						return false;
+				}
+			}
+			else
+			{
+				return SendPadConfiguration();
+			}
+		}
+
+		return true;
 	}
 
 	bool SetThreshold(int sensorIndex, double threshold, double releaseThreshold)
@@ -283,7 +327,7 @@ class PadDevice
 			return false;
 
 		mySensors[sensorIndex].threshold = threshold;
-		mySensors[sensorIndex].releaseThreshold = releaseThreshold;
+		mySensors[sensorIndex].releaseThreshold = ReleaseForMode(sensorIndex, releaseThreshold);
 
 		// From v1.3 we have the SensorReport. Before that it's the PadConfiguration report
 		if (myPad.firmwareVersion.IsNewer({1, 2}))
@@ -299,6 +343,11 @@ class PadDevice
 	bool SetReleaseThreshold(double threshold)
 	{
 		myPad.releaseThreshold = std::clamp(threshold, 0.01, 1.00);
+
+		// The global ratio only fans out to sensors in global mode; in None/Individual
+		// the ratio is remembered but must not overwrite the per-sensor release values.
+		if (myPad.releaseMode != RELEASE_GLOBAL)
+			return true;
 
 		// From v1.3 we have the SensorReport. Before that it's the PadConfiguration report
 		if (myPad.firmwareVersion.IsNewer({1, 2}))

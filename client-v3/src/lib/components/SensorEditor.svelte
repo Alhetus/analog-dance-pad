@@ -6,13 +6,14 @@
 	interface Props {
 		sensor: Sensor; // optimistic-overlaid values
 		index: number; // snapshot sensor index
+		releaseEnabled: boolean; // false in "None" mode: hide the release slider
 		onthreshold: (value: number) => void; // 0..1
 		onrelease: (value: number) => void; // 0..1
 		ongain: (byte: number) => void; // 0..255
 		onclose: () => void;
 	}
 
-	let { sensor, index, onthreshold, onrelease, ongain, onclose }: Props = $props();
+	let { sensor, index, releaseEnabled, onthreshold, onrelease, ongain, onclose }: Props = $props();
 
 	// Gain: higher % = more sensitivity = LOWER resistor byte.
 	// 100% -> byte 0, 0% -> byte 255 (inverted).
@@ -46,14 +47,20 @@
 			<Button variant="ghost" size="sm" onclick={() => dialogEl?.close()}>Done</Button>
 		</header>
 
-		{#snippet row(label: string, value: number, unit: string, commit: (v: number) => void)}
+		{#snippet row(
+			label: string,
+			value: number,
+			unit: string,
+			commit: (v: number) => void,
+			max: number
+		)}
 			<div class="flex flex-col gap-1">
 				<span class="text-muted-foreground text-sm">{label}</span>
 				<div class="flex items-center gap-3">
 					<input
 						type="range"
 						min="0"
-						max="100"
+						{max}
 						{value}
 						oninput={(e) => commit(num(e))}
 						aria-label={label}
@@ -63,7 +70,7 @@
 						<Input
 							type="number"
 							min={0}
-							max={100}
+							{max}
 							{value}
 							oninput={(e) => commit(num(e))}
 							aria-label="{label} value"
@@ -95,8 +102,17 @@
 			</div>
 		{/snippet}
 
-		{@render row('Gain', gainPct, '%', (p) => ongain(pctToByte(p)))}
-		{@render row('Threshold', thresholdPct, '%', (p) => onthreshold(clampPct(p) / 100))}
-		{@render row('Release threshold', releasePct, '%', (p) => onrelease(clampPct(p) / 100))}
+		{@render row('Gain', gainPct, '%', (p) => ongain(pctToByte(p)), 100)}
+		{@render row('Threshold', thresholdPct, '%', (p) => onthreshold(clampPct(p) / 100), 100)}
+		{#if releaseEnabled}
+			<!-- Release can never exceed the threshold, or hysteresis breaks; cap it. -->
+			{@render row(
+				'Release threshold',
+				releasePct,
+				'%',
+				(p) => onrelease(Math.min(clampPct(p), thresholdPct) / 100),
+				thresholdPct
+			)}
+		{/if}
 	</div>
 </dialog>

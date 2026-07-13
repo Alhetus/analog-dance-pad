@@ -44,10 +44,7 @@
 	// Local drafts so live edits aren't stomped by the incoming snapshot mid-interaction.
 	let nameDraft = $state<string | null>(null);
 	const nameValue = $derived(nameDraft ?? snap?.name ?? '');
-	let releaseDraft = $state<number | null>(null); // percent while dragging
-	const releasePct = $derived(releaseDraft ?? Math.round((snap?.releaseThreshold ?? 1) * 100));
 
-	const num = (e: Event) => Number((e.currentTarget as HTMLInputElement).value);
 	const str = (e: Event) => (e.currentTarget as HTMLInputElement).value;
 
 	function onSelect(key: string | undefined) {
@@ -61,18 +58,14 @@
 		nameDraft = null;
 	}
 
-	function commitRelease() {
-		if (releaseDraft !== null) pads.setGlobalRelease(releaseDraft / 100);
-		releaseDraft = null;
-	}
-
 	const releaseModes = [
 		{ v: '0', label: 'None' },
-		{ v: '1', label: 'Global' },
 		{ v: '2', label: 'Per-sensor' }
 	];
+	// Legacy global (1) and any non-zero mode display as per-sensor.
+	const releaseModeValue = $derived(String((snap?.releaseMode ?? 2) === 0 ? 0 : 2));
 	const releaseModeLabel = $derived(
-		releaseModes.find((m) => m.v === String(snap?.releaseMode ?? 1))?.label ?? 'Global'
+		releaseModes.find((m) => m.v === releaseModeValue)?.label ?? 'Per-sensor'
 	);
 </script>
 
@@ -145,29 +138,10 @@
 				</div>
 
 				<div class="flex flex-col gap-1.5">
-					<Label>Global release threshold</Label>
-					<div class="flex items-center gap-3">
-						<input
-							type="range"
-							min="1"
-							max="100"
-							value={releasePct}
-							oninput={(e) => (releaseDraft = num(e))}
-							onchange={commitRelease}
-							aria-label="Global release threshold"
-							class="accent-primary h-2 max-w-sm flex-1 cursor-pointer"
-						/>
-						<span class="text-muted-foreground w-10 text-right text-sm tabular-nums"
-							>{releasePct}%</span
-						>
-					</div>
-				</div>
-
-				<div class="flex flex-col gap-1.5">
-					<Label>Release mode</Label>
+					<Label>Release threshold</Label>
 					<Select.Root
 						type="single"
-						value={String(snap.releaseMode)}
+						value={releaseModeValue}
 						onValueChange={(v) => v && pads.setReleaseMode(Number(v))}
 					>
 						<Select.Trigger class="w-40">{releaseModeLabel}</Select.Trigger>
@@ -177,6 +151,10 @@
 							{/each}
 						</Select.Content>
 					</Select.Root>
+					<p class="text-muted-foreground text-sm">
+						<em>None</em> releases as soon as a sensor drops below its threshold.
+						<em>Per-sensor</em> lets each sensor release at its own lower threshold (hysteresis).
+					</p>
 				</div>
 
 				<div>

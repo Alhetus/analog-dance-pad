@@ -150,11 +150,13 @@ TEST_CASE("LoadProfile applies gain only under DPG_GAIN", "[profile]")
 	CHECK(pad.Sensor(0)->resistorValue == 42);
 }
 
-TEST_CASE("LoadProfile restores per-sensor release threshold", "[profile]")
+TEST_CASE("LoadProfile restores per-sensor release threshold in individual mode", "[profile]")
 {
 	RecordingBackend* raw = nullptr;
 	auto rep = makeReporter(raw);
 	PadDevice pad(rep, "t", makeName("x"), makeIdent(1, 3, 8, 1), {}, {}, {makeSensor(0, 425, 0)});
+	// Per-sensor release is only honored in individual mode; other modes derive it.
+	pad.SetReleaseMode(RELEASE_INDIVIDUAL);
 
 	// 0.5*850=425, 0.2*850=170 — both survive device quantization exactly, so a
 	// distinct release proves it is no longer clobbered to equal the threshold.
@@ -167,6 +169,30 @@ TEST_CASE("LoadProfile restores per-sensor release threshold", "[profile]")
 
 	pad.LoadProfile(j, DPG_SENSITIVITY);
 
+	CHECK(pad.Sensor(0)->threshold == Approx(0.5));
+	CHECK(pad.Sensor(0)->releaseThreshold == Approx(0.2));
+}
+
+TEST_CASE("LoadProfile applies a release-only patch in individual mode", "[profile]")
+{
+	// Reproduces the reported bug: dragging only the per-sensor release slider
+	// sends a patch with releaseThreshold but no threshold. That edit must reach
+	// the device instead of being dropped for lacking a threshold field.
+	RecordingBackend* raw = nullptr;
+	auto rep = makeReporter(raw);
+	// Start from threshold 0.5, release 0.25 (212/850 via makeSensor's thr/2).
+	PadDevice pad(rep, "t", makeName("x"), makeIdent(1, 3, 8, 1), {}, {}, {makeSensor(0, 425, 0)});
+	pad.SetReleaseMode(RELEASE_INDIVIDUAL);
+
+	json j;
+	j["sensors"] = json::array();
+	json s0;
+	s0["releaseThreshold"] = 0.2; // no "threshold" key
+	j["sensors"].push_back(s0);
+
+	pad.LoadProfile(j, DPG_SENSITIVITY);
+
+	// Threshold is untouched; the release-only edit is applied.
 	CHECK(pad.Sensor(0)->threshold == Approx(0.5));
 	CHECK(pad.Sensor(0)->releaseThreshold == Approx(0.2));
 }

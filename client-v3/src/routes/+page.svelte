@@ -177,6 +177,7 @@
 						{#each sensors as m (m.index)}
 							<SensorBar
 								sensor={m.sensor}
+								releaseEnabled={pads.releaseEnabled}
 								onthreshold={(v) => pads.setThreshold(m.index, v)}
 								onedit={() => (editingIndex = m.index)}
 							/>
@@ -207,6 +208,7 @@
 	<SensorEditor
 		sensor={editing.sensor}
 		index={editing.index}
+		releaseEnabled={pads.releaseEnabled}
 		onthreshold={(v) => pads.setThreshold(editing.index, v)}
 		onrelease={(v) => pads.setReleaseThreshold(editing.index, v)}
 		ongain={(b) => pads.setGain(editing.index, b)}

@@ -1277,14 +1277,17 @@ void PadDevice::LoadProfile(json& j, DeviceProfileGroups groups)
 			const auto& sensor = sensors[key];
 			const int idx = (int)key;
 
-			if ((groups & DPG_SENSITIVITY) && sensor.contains("threshold") && sensor["threshold"].is_number())
+			const bool hasTh = sensor.contains("threshold") && sensor["threshold"].is_number();
+			const bool hasRel = sensor.contains("releaseThreshold") && sensor["releaseThreshold"].is_number();
+			if ((groups & DPG_SENSITIVITY) && (hasTh || hasRel))
 			{
-				double th = sensor["threshold"].get<double>();
-				// Restore the stored per-sensor release faithfully; fall back to
-				// the threshold only when a profile predates the release field.
-				double rel = (sensor.contains("releaseThreshold") && sensor["releaseThreshold"].is_number())
-				                 ? sensor["releaseThreshold"].get<double>()
-				                 : th;
+				// Apply whichever fields the message carries; default the missing one
+				// to the currently stored value. This lets a release-only patch (the
+				// client's per-sensor release slider) actually reach the device instead
+				// of being dropped for lacking a threshold. SetThreshold enforces the
+				// active release mode on the stored release value.
+				double th = hasTh ? sensor["threshold"].get<double>() : mySensors[idx].threshold;
+				double rel = hasRel ? sensor["releaseThreshold"].get<double>() : mySensors[idx].releaseThreshold;
 				SetThreshold(idx, th, rel);
 			}
 

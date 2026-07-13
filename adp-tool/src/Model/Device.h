@@ -141,7 +141,7 @@ struct PadState
 	bool featureDigipot;
 	bool featureLights;
 	VersionType firmwareVersion = versionTypeUnknown;
-	ReleaseMode releaseMode = ReleaseMode::RELEASE_GLOBAL;
+	ReleaseMode releaseMode = ReleaseMode::RELEASE_INDIVIDUAL;
 };
 
 class Device
