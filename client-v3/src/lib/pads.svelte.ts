@@ -542,7 +542,7 @@ class PadsStore {
 	 * Set threshold = live value + offset (percent points) across mapped sensors.
 	 * Re-reads each sensor's current live value as the baseline on every call, so
 	 * the pad should be at rest when this runs. When `overwriteRelease` is true the
-	 * release threshold tracks proportionally (via setThreshold); otherwise only the
+	 * release threshold is set equal to the new threshold; otherwise only the
 	 * threshold is written. All patches flush together in one `{sensors:[...]}` send.
 	 */
 	calibrateThresholds(offsetPct: number, overwriteRelease: boolean) {
@@ -553,7 +553,7 @@ class PadsStore {
 			if (s.button <= 0) return; // mapped sensors only
 			const threshold = clamp01(s.value + offset);
 			if (overwriteRelease)
-				this.setThreshold(i, threshold); // proportional release overlay
+				this.#patch(i, { threshold, releaseThreshold: threshold }); // release == press
 			else this.#patch(i, { threshold }); // threshold only
 		});
 	}
