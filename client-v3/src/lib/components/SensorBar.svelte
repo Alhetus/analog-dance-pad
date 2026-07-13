@@ -99,11 +99,4 @@
 	<span class="text-primary text-sm leading-none font-medium tabular-nums">
 		{pct(sensor.threshold)}%
 	</span>
-	<button
-		type="button"
-		onclick={onedit}
-		class="bg-secondary text-secondary-foreground rounded px-2 py-0.5 text-sm font-semibold"
-	>
-		{sensor.button}
-	</button>
 </div>

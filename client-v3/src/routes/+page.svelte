@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
 	import { pads } from '$lib/pads.svelte';
-	import SensorBar from '$lib/components/SensorBar.svelte';
+	import ButtonBox from '$lib/components/ButtonBox.svelte';
 	import SensorEditor from '$lib/components/SensorEditor.svelte';
 	import CalibrationModal from '$lib/components/CalibrationModal.svelte';
 	import { Button } from '$lib/components/ui/button';
@@ -35,6 +35,7 @@
 	);
 	const snap = $derived(pads.activeSnapshot);
 	const sensors = $derived(pads.mappedSensors);
+	const groups = $derived(pads.buttonGroups);
 	const editing = $derived(sensors.find((m) => m.index === editingIndex));
 	const anyOpen = $derived(pads.conns.some((c) => c.status === 'open'));
 
@@ -143,14 +144,16 @@
 		{#if snap}
 			{#if sensors.length > 0}
 				<div class="flex h-full max-h-[32rem] w-full flex-col items-center gap-2 py-2">
-					<div class="grid h-full min-h-0 w-full grid-flow-col auto-cols-fr gap-1 sm:gap-2">
-						{#each sensors as m (m.index)}
-							<SensorBar
-								sensor={m.sensor}
-								releaseEnabled={pads.releaseEnabled}
-								onthreshold={(v) => pads.setThreshold(m.index, v)}
-								onedit={() => (editingIndex = m.index)}
-							/>
+					<div class="flex h-full min-h-0 w-full gap-2">
+						{#each groups as g (g.button)}
+							<div class="min-w-0" style="flex: {g.sensors.length} 1 0">
+								<ButtonBox
+									group={g}
+									releaseEnabled={pads.releaseEnabled}
+									onthreshold={(i, v) => pads.setThreshold(i, v)}
+									onedit={(i) => (editingIndex = i)}
+								/>
+							</div>
 						{/each}
 					</div>
 					<p class="text-muted-foreground shrink-0 text-sm">

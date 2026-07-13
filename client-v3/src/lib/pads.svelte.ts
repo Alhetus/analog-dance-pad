@@ -64,6 +64,12 @@ export interface MappedSensor {
 	sensor: Sensor;
 }
 
+/** Mapped sensors sharing one button, grouped for display. */
+export interface ButtonGroup {
+	button: number; // 1-based button number
+	sensors: MappedSensor[]; // sensors mapped to this button, in snapshot-index order
+}
+
 export interface DeviceOption {
 	endpoint: string;
 	index: number;
@@ -338,6 +344,19 @@ class PadsStore {
 	/** Mapped sensors of the active device, with optimistic thresholds overlaid. */
 	get mappedSensors(): MappedSensor[] {
 		return this.allSensors.filter((m) => m.sensor.button > 0);
+	}
+
+	/** Mapped sensors grouped by button, sorted ascending; empty buttons skipped. */
+	get buttonGroups(): ButtonGroup[] {
+		const byButton = new Map<number, MappedSensor[]>();
+		for (const m of this.mappedSensors) {
+			let group = byButton.get(m.sensor.button);
+			if (!group) byButton.set(m.sensor.button, (group = []));
+			group.push(m);
+		}
+		return [...byButton.entries()]
+			.sort((a, b) => a[0] - b[0])
+			.map(([button, sensors]) => ({ button, sensors }));
 	}
 
 	/** Every sensor of the active device (mapped or not), with optimistic edits overlaid. */
