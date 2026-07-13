@@ -29,6 +29,27 @@ npm run dev
 npm run dev -- --open
 ```
 
+## Configuring servers
+
+The list of ADP Server WebSocket endpoints the app connects to is baked into the
+build from [`src/lib/servers.config.json`](src/lib/servers.config.json). There is
+no in-app editor — the list is fixed per build.
+
+```json
+{
+	"servers": ["ws://127.0.0.1:8008"]
+}
+```
+
+- Each entry is a full WebSocket URL (`ws://host:port` or `wss://host:port`).
+  The ADP Server defaults to `ws://127.0.0.1:8008`.
+- List multiple endpoints to connect to several servers at once; every device
+  found across all of them appears in the pad dropdown, and each endpoint gets a
+  connection-status badge on the main page.
+- Edit the file and rebuild (or restart `npm run dev`) for changes to take
+  effect. The selected pad is remembered in `localStorage`, but the server list
+  itself is not — it always comes from this file.
+
 ## Building
 
 To create a production version of your app:

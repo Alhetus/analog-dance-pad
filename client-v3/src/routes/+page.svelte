@@ -1,5 +1,4 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { pads } from '$lib/pads.svelte';
 	import SensorBar from '$lib/components/SensorBar.svelte';
@@ -13,14 +12,8 @@
 	import PlusIcon from '@lucide/svelte/icons/plus';
 	import ScaleIcon from '@lucide/svelte/icons/scale';
 
-	let showServers = $state(false);
 	let showCalibration = $state(false);
-	let endpointsText = $state('');
 	let editingIndex = $state<number | null>(null);
-
-	onMount(() => {
-		endpointsText = pads.endpoints.join('\n');
-	});
 
 	// Auto-pick the first device once one shows up and nothing is chosen yet.
 	$effect(() => {
@@ -67,11 +60,6 @@
 	function saveProfile() {
 		if (loadedProfile) pads.overwriteProfile(loadedProfile.id);
 		else newProfile();
-	}
-
-	function applyServers() {
-		pads.setEndpoints(endpointsText.split('\n'));
-		showServers = false;
 	}
 </script>
 
@@ -133,10 +121,6 @@
 				</Button>
 			{/if}
 		{/if}
-
-		<Button variant="outline" size="sm" class="ml-auto" onclick={() => (showServers = !showServers)}
-			>Servers</Button
-		>
 	</header>
 
 	<!-- per-endpoint connection status -->
@@ -154,20 +138,6 @@
 			</Badge>
 		{/each}
 	</div>
-
-	{#if showServers}
-		<div class="border-border bg-card flex flex-col gap-2 rounded-lg border p-4">
-			<p class="text-muted-foreground text-sm">One server URL per line.</p>
-			<textarea
-				bind:value={endpointsText}
-				rows={Math.max(2, pads.endpoints.length)}
-				class="border-input bg-background focus-visible:ring-ring w-full rounded-md border p-2 font-mono text-sm focus-visible:ring-2 focus-visible:outline-none"
-			></textarea>
-			<div class="flex justify-end">
-				<Button size="sm" onclick={applyServers}>Apply</Button>
-			</div>
-		</div>
-	{/if}
 
 	<main class="flex min-h-0 flex-1 items-center justify-center">
 		{#if snap}
@@ -199,7 +169,7 @@
 		{:else if anyOpen}
 			<p class="text-muted-foreground">Connected — no pad detected. Plug in a pad.</p>
 		{:else}
-			<p class="text-muted-foreground">Connecting to server… check it's running (Servers).</p>
+			<p class="text-muted-foreground">Connecting to server… check that it's running.</p>
 		{/if}
 	</main>
 </div>

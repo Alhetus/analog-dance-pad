@@ -1,4 +1,5 @@
 import { browser } from '$app/environment';
+import serversConfig from './servers.config.json';
 
 // ---- Protocol types (see adp-tool Device::SnapshotToJson / DeviceListToJson) ----
 
@@ -199,10 +200,10 @@ interface ActiveRef {
 	index: number;
 }
 
-const ENDPOINTS_KEY = 'adp-endpoints';
 const ACTIVE_KEY = 'adp-active';
 const LOADED_KEY = 'adp-loaded'; // { [padKey]: profileId } — last profile loaded onto each pad
-const DEFAULT_ENDPOINTS = ['ws://127.0.0.1:8008'];
+/** Server list is baked in at build time from servers.config.json — not user-editable. */
+const CONFIGURED_ENDPOINTS = serversConfig.servers;
 
 /** Order-independent deep equality via key-sorted JSON (both sides come from the
  * server's nlohmann serialization, so this is exact for lights comparison). */
@@ -227,7 +228,7 @@ const slugify = (name: string) => {
 };
 
 class PadsStore {
-	endpoints: string[] = $state([...DEFAULT_ENDPOINTS]);
+	endpoints: string[] = $state([...CONFIGURED_ENDPOINTS]);
 	conns: Conn[] = $state([]);
 	active: ActiveRef | null = $state(null);
 	/** Optimistic per-sensor edits for the active device, keyed by sensor index. */
@@ -243,8 +244,6 @@ class PadsStore {
 	start() {
 		if (!browser || this.#clock) return;
 		try {
-			const e = localStorage.getItem(ENDPOINTS_KEY);
-			if (e) this.endpoints = JSON.parse(e);
 			const a = localStorage.getItem(ACTIVE_KEY);
 			if (a) this.active = JSON.parse(a);
 			const l = localStorage.getItem(LOADED_KEY);
@@ -262,12 +261,6 @@ class PadsStore {
 		this.#clock = null;
 		for (const c of this.conns) c.close();
 		this.conns = [];
-	}
-
-	setEndpoints(list: string[]) {
-		this.endpoints = list.map((s) => s.trim()).filter(Boolean);
-		if (browser) localStorage.setItem(ENDPOINTS_KEY, JSON.stringify(this.endpoints));
-		this.#reconcileConns();
 	}
 
 	#reconcileConns() {
