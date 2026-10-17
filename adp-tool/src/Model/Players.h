@@ -80,7 +80,7 @@ void RequestRescan();
 // Latest published list (empty before the first scan). Thread-safe.
 std::shared_ptr<const PlayerList> Get();
 
-// Bumped after every completed scan, so the broadcaster knows to resend.
+// Bumped when a scan finds a different list, so the broadcaster knows to resend.
 uint64_t Version();
 
 // True if `name` is a known player. Client-supplied names are checked with

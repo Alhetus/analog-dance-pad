@@ -11,7 +11,6 @@ TEST_CASE("SnapshotToJson emits the WebSocket contract fields", "[snapshot]")
 	snap.path = "hid#1";
 	snap.name = "MyPad";
 	snap.pollingRate = 1000;
-	snap.releaseThreshold = 0.8;
 	snap.releaseMode = 1;
 
 	SensorState s;
@@ -31,7 +30,7 @@ TEST_CASE("SnapshotToJson emits the WebSocket contract fields", "[snapshot]")
 	CHECK(j["pad"] == "hid#1");
 	CHECK(j["name"] == "MyPad");
 	CHECK(j["pollingRate"] == 1000);
-	CHECK(j["releaseThreshold"] == 0.8);
+	CHECK_FALSE(j.contains("releaseThreshold")); // the removed global release ratio
 	CHECK(j["releaseMode"] == 1);
 
 	REQUIRE(j["sensors"].is_array());

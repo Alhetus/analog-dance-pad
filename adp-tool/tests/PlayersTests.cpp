@@ -165,9 +165,9 @@ TEST_CASE("Sanitize keeps only the storable settings of an imported profile", "[
 	                 {"description", 42},       {"junk", "y"}};
 	const json out = Profiles::Sanitize(in);
 	CHECK(out["sensorCount"] == 4);
-	CHECK(out["releaseThreshold"] == 0.5);
-	CHECK(out["description"] == ""); // wrong type replaced
-	CHECK_FALSE(out.contains("id")); // set by the server, never taken from the client
+	CHECK_FALSE(out.contains("releaseThreshold")); // the removed global release ratio
+	CHECK(out["description"] == "");               // wrong type replaced
+	CHECK_FALSE(out.contains("id"));               // set by the server, never taken from the client
 	CHECK_FALSE(out.contains("junk"));
 	CHECK_FALSE(out.contains("ledMappings"));
 

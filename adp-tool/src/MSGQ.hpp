@@ -7,15 +7,23 @@
 #include <optional>
 #include <string>
 
+namespace ix
+{
+class WebSocket;
+}
+
 // A single inbound message from a WebSocket client. Carried by value through
 // the queue below; no manual new/delete across the thread boundary.
 class QueueMessage
 {
   public:
 	QueueMessage() = default;
-	explicit QueueMessage(std::string d) : data(std::move(d)) {}
+	explicit QueueMessage(std::string d, const ix::WebSocket* s = nullptr) : data(std::move(d)), sender(s) {}
 
 	std::string data;
+	// Who sent it, so replies meant for the sender reach only it. Only compared
+	// against live clients, never dereferenced.
+	const ix::WebSocket* sender = nullptr;
 };
 
 // Thread-safe multi-producer / single-consumer queue.

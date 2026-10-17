@@ -322,9 +322,13 @@ void Start(const Path& localProfilesDir, const Path& profilesDir, std::chrono::s
 			if (next.localOk != prev->localOk || gVersion == 0)
 				std::printf("Players :: LocalProfiles %s\n", next.localOk ? "reachable" : "UNREACHABLE, retrying");
 			const bool healthy = next.localOk;
+			// Bump the version only on a real change, so clients aren't resent
+			// (and don't re-render) an identical list after every scan.
+			const bool changed = gVersion == 0 || ToJson(next) != ToJson(*prev);
 			lock.lock();
 			gList = std::make_shared<const PlayerList>(std::move(next));
-			gVersion++;
+			if (changed)
+				gVersion++;
 			gCv.wait_for(lock, healthy ? interval : retryInterval, [] { return gStop || gRescan; });
 			gRescan = false;
 		}

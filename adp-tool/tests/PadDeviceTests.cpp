@@ -158,21 +158,53 @@ TEST_CASE("Release mode governs the stored release threshold", "[paddevice]")
 	}
 }
 
-TEST_CASE("PadDevice clamps the release threshold to [0.01, 1.0]", "[paddevice]")
+TEST_CASE("PadDevice clamps a hostile button count to the 16-bit button mask", "[paddevice]")
 {
 	RecordingBackend* raw = nullptr;
 	auto rep = makeReporter(raw);
-	PadDevice pad(rep, "t", makeName("x"), makeIdent(1, 1, 8, 2), {}, {},
-	              {makeSensor(0, 400, 0), makeSensor(1, 400, 1)});
+	PadDevice pad(rep, "t", makeName("x"), makeIdent(1, 3, 200, 1), {}, {}, {makeSensor(0, 425, 0)});
 
-	PadConfigurationReport echo;
-	raw->QueueGet(echo);
-	pad.SetReleaseThreshold(5.0);
-	CHECK(pad.State().releaseThreshold == Approx(1.0));
+	CHECK(pad.State().numButtons == MAX_BUTTON_COUNT);
+	CHECK(pad.SetButtonMapping(0, MAX_BUTTON_COUNT));
+	CHECK_FALSE(pad.SetButtonMapping(0, MAX_BUTTON_COUNT + 1));
+}
 
-	raw->QueueGet(echo);
-	pad.SetReleaseThreshold(-1.0);
-	CHECK(pad.State().releaseThreshold == Approx(0.01));
+TEST_CASE("PadDevice clamps gain to one digipot byte", "[paddevice]")
+{
+	RecordingBackend* raw = nullptr;
+	auto rep = makeReporter(raw);
+	PadDevice pad(rep, "t", makeName("x"), makeIdent(1, 3, 8, 1), {}, {}, {makeSensor(0, 425, 0)});
+
+	CHECK(pad.SetAdcConfig(0, 300));
+	CHECK(pad.Sensor(0)->resistorValue == 255);
+	CHECK(pad.SetAdcConfig(0, -5));
+	CHECK(pad.Sensor(0)->resistorValue == 0);
+}
+
+TEST_CASE("PadDevice keeps its state when the device refuses a sensor report", "[paddevice]")
+{
+	RecordingBackend* raw = nullptr;
+	auto rep = makeReporter(raw);
+	PadDevice pad(rep, "t", makeName("x"), makeIdent(1, 3, 8, 1), {}, {}, {makeSensor(0, 425, 0)});
+	raw->sendFeatureReturn = -1;
+
+	CHECK_FALSE(pad.SetThreshold(0, 0.2, 0.1));
+	CHECK(pad.Sensor(0)->threshold == Approx(0.5));
+	CHECK_FALSE(pad.SetButtonMapping(0, 4));
+	CHECK(pad.Sensor(0)->button == 1);
+	CHECK_FALSE(pad.HasUnsavedChanges());
+}
+
+TEST_CASE("PadDevice sends nothing for a sensor edit the device already holds", "[paddevice]")
+{
+	RecordingBackend* raw = nullptr;
+	auto rep = makeReporter(raw);
+	PadDevice pad(rep, "t", makeName("x"), makeIdent(1, 3, 8, 1), {}, {}, {makeSensor(0, 425, 0)});
+	raw->sent.clear();
+
+	const SensorState s = *pad.Sensor(0);
+	CHECK(pad.SetThreshold(0, s.threshold, s.releaseThreshold));
+	CHECK(raw->sent.empty());
 }
 
 TEST_CASE("PadDevice averages polled samples and derives pressed state", "[paddevice]")

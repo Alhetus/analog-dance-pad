@@ -18,14 +18,6 @@
 
 	let showCalibration = $state(false);
 	let editingIndex = $state<number | null>(null);
-	let toast = $state<string | null>(null);
-	let toastTimer: ReturnType<typeof setTimeout> | undefined;
-
-	// Clear optimistic thresholds the pad has caught up to, on every snapshot.
-	$effect(() => {
-		void pads.activeSnapshot;
-		pads.reconcile();
-	});
 
 	// The selected pad vanished (unplugged / server down): back to the dashboard.
 	$effect(() => {
@@ -47,12 +39,6 @@
 	const modified = $derived(pads.isModified);
 	const order: Step[] = ['server', 'pad', 'player', 'profile', 'tune'];
 	const reached = (s: Step) => order.indexOf(step) > order.indexOf(s);
-
-	function onloaded(name: string) {
-		toast = name;
-		clearTimeout(toastTimer);
-		toastTimer = setTimeout(() => (toast = null), 4000);
-	}
 
 	function save() {
 		if (!loadedProfile) pads.goto('profile');
@@ -138,7 +124,7 @@
 		{:else if step === 'player'}
 			<PlayerPicker />
 		{:else if step === 'profile'}
-			<ProfilePicker {onloaded} />
+			<ProfilePicker />
 		{:else if snap}
 			{#if sensors.length > 0}
 				<div class="flex h-full max-h-[32rem] w-full flex-col items-center gap-2 py-2">
@@ -167,19 +153,25 @@
 	</main>
 </div>
 
-{#if toast}
+{#if pads.notice}
+	{@const notice = pads.notice}
 	<div
-		class="bg-card ring-foreground/10 fixed bottom-6 left-1/2 flex -translate-x-1/2 items-center gap-3 rounded-full px-5 py-3 shadow-lg ring-1"
+		role="status"
+		class="bg-card fixed bottom-6 left-1/2 flex -translate-x-1/2 items-center gap-3 rounded-full px-5 py-3 shadow-lg ring-1 {notice.ok
+			? 'ring-foreground/10'
+			: 'ring-destructive text-destructive'}"
 	>
-		<span>Loaded <strong>{toast}</strong></span>
-		<Button
-			variant="link"
-			size="sm"
-			onclick={() => {
-				toast = null;
-				pads.goto('profile');
-			}}>Change</Button
-		>
+		<span>{notice.text}</span>
+		{#if notice.ok && notice.op === 'loadProfile'}
+			<Button
+				variant="link"
+				size="sm"
+				onclick={() => {
+					pads.notice = null;
+					pads.goto('profile');
+				}}>Change</Button
+			>
+		{/if}
 	</div>
 {/if}
 

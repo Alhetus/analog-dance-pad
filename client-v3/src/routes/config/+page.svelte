@@ -14,12 +14,6 @@
 		if (!pads.pad) goto(resolve('/'));
 	});
 
-	// Clear optimistic edits the pad has caught up to, on every snapshot.
-	$effect(() => {
-		void pads.activeSnapshot;
-		pads.reconcile();
-	});
-
 	const snap = $derived(pads.activeSnapshot);
 	const numButtons = $derived(snap?.numButtons ?? 0);
 	const buttonOptions = $derived(Array.from({ length: numButtons }, (_, i) => i + 1));
@@ -52,7 +46,9 @@
 	}
 
 	function commitName() {
-		if (nameDraft !== null && nameDraft !== snap?.name) pads.setName(clipName(nameDraft));
+		// Profiles live under the pad name, so the server refuses an empty one too.
+		const name = clipName((nameDraft ?? '').trim());
+		if (nameDraft !== null && name && name !== snap?.name) pads.setName(name);
 		nameDraft = null;
 	}
 

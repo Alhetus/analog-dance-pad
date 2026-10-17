@@ -394,6 +394,8 @@ class ConnectionManager
 			}
 		}
 
+		ClampIdentification(padIdentificationV2);
+
 		// If we got some lights, try to read the light rules.
 		vector<LightRuleReport> lightRules;
 		vector<LedMappingReport> ledMappings;
@@ -705,7 +707,6 @@ void Device::PublishSnapshot()
 		snapshot.path = device->Path();
 		snapshot.name = pad.name;
 		snapshot.pollingRate = device->PollingRate();
-		snapshot.releaseThreshold = pad.releaseThreshold;
 		snapshot.releaseMode = (int)pad.releaseMode;
 		snapshot.numButtons = pad.numButtons;
 		snapshot.featureDigipot = pad.featureDigipot;
@@ -766,7 +767,6 @@ void Device::SnapshotToJson(const SensorSnapshot& snapshot, json& j)
 	j["pad"] = snapshot.path;
 	j["name"] = snapshot.name;
 	j["pollingRate"] = snapshot.pollingRate;
-	j["releaseThreshold"] = snapshot.releaseThreshold;
 	j["releaseMode"] = snapshot.releaseMode;
 	j["numButtons"] = snapshot.numButtons;
 	j["featureDigipot"] = snapshot.featureDigipot;
@@ -870,18 +870,25 @@ static void RenamePad(const std::string& from, const std::string& to)
 	std::error_code ec;
 	const auto escFrom = Profiles::U8Path(Profiles::EscapeName(from));
 	const auto escTo = Profiles::U8Path(Profiles::EscapeName(to));
+	// Moves one dir, logging (not hiding) why it stayed put.
+	auto move = [](const Profiles::Path& src, const Profiles::Path& dst) {
+		std::error_code ec;
+		if (!std::filesystem::exists(src, ec))
+			return;
+		if (std::filesystem::exists(dst, ec))
+			std::printf("RenamePad :: %s already exists, %s NOT moved\n", Profiles::PathU8(dst).c_str(),
+			            Profiles::PathU8(src).c_str());
+		else if (std::filesystem::rename(src, dst, ec); ec)
+			std::printf("RenamePad :: moving %s failed (%s)\n", Profiles::PathU8(src).c_str(), ec.message().c_str());
+	};
 	for (const auto& player : std::filesystem::directory_iterator(gProfilesDir / "players", ec))
-	{
-		if (!std::filesystem::exists(player.path() / escTo, ec))
-			std::filesystem::rename(player.path() / escFrom, player.path() / escTo, ec);
-	}
-	if (!std::filesystem::exists(PadStateDir(to), ec))
-		std::filesystem::rename(PadStateDir(from), PadStateDir(to), ec);
+		move(player.path() / escFrom, player.path() / escTo);
+	move(PadStateDir(from), PadStateDir(to));
 	gPadStates.erase(from);
 	gPadStates.erase(to);
 	gPadStatesDirty = true;
 	Players::RequestRescan();
-	std::printf("Pad renamed '%s' -> '%s', profiles moved\n", from.c_str(), to.c_str());
+	std::printf("Pad renamed '%s' -> '%s'\n", from.c_str(), to.c_str());
 }
 
 // ---- Client messages ---------------------------------------------------------------------------------------------
@@ -931,9 +938,9 @@ static bool HasString(const json& op, const char* key)
 	return op.contains(key) && op[key].is_string();
 }
 
-static std::vector<json> HandleClientMessageImpl(const std::string& message);
+static std::vector<ClientReply> HandleClientMessageImpl(const std::string& message);
 
-std::vector<json> Device::HandleClientMessage(const std::string& message)
+std::vector<ClientReply> Device::HandleClientMessage(const std::string& message)
 {
 	// Directory iteration throws on I/O errors (permissions, a dir removed
 	// mid-walk), and json throws on a client field of an unexpected type;
@@ -952,14 +959,15 @@ std::vector<json> Device::HandleClientMessage(const std::string& message)
 	}
 }
 
-static std::vector<json> HandleClientMessageImpl(const std::string& message)
+static std::vector<ClientReply> HandleClientMessageImpl(const std::string& message)
 {
 	using D = Device;
 	// Runs on the device-I/O thread, so any device mutation triggered here is
 	// single-threaded and safe. Parsing is fully defensive: a malformed or
-	// unrecognized message is logged and ignored, never fatal. Returns messages
-	// to broadcast in reply (e.g. a player's refreshed profile list).
-	std::vector<json> replies;
+	// unrecognized message is logged and ignored, never fatal. Returns the
+	// replies: a profile list for the asker, or for everyone after a change,
+	// and a result (msgType 8) for the asker after every profile op.
+	std::vector<ClientReply> replies;
 	json j;
 	try
 	{
@@ -988,7 +996,7 @@ static std::vector<json> HandleClientMessageImpl(const std::string& message)
 	if (j.contains("listProfiles"))
 	{
 		if (ValidPlayer(j["listProfiles"], player))
-			replies.push_back(PlayerProfilesJson(player));
+			replies.push_back({PlayerProfilesJson(player), true});
 		return replies;
 	}
 
@@ -1013,60 +1021,61 @@ static std::vector<json> HandleClientMessageImpl(const std::string& message)
 
 	// ---- Profile ops: {pad, <op>:{player, ...}} on <player>/<this pad>/. ----
 	// Profile files are on local disk, so this I/O on the device thread is fast.
+	// Each op answers its sender with {msgType 8, op, pad, ok, error, name}.
+	std::string opName;
 	const json* op = nullptr;
-	auto isOp = [&](const char* key) {
-		if (!j.contains(key))
-			return false;
-		op = ValidPlayer(j[key], player) ? &j[key] : nullptr;
-		return true;
+	for (const char* key : {"loadProfile", "saveProfile", "importProfile", "updateProfile", "deleteProfile"})
+	{
+		if (j.contains(key))
+		{
+			opName = key;
+			op = ValidPlayer(j[key], player) ? &j[key] : nullptr;
+			break;
+		}
+	}
+	auto done = [&](bool ok, const std::string& error, const std::string& name = "") {
+		if (!ok)
+			std::printf("%s :: %s\n", opName.c_str(), error.c_str());
+		replies.push_back(
+		    {{{"msgType", 8}, {"op", opName}, {"pad", j["pad"]}, {"ok", ok}, {"error", error}, {"name", name}}, true});
+		return replies;
 	};
 	auto refreshed = [&] {
-		replies.push_back(PlayerProfilesJson(player));
+		// Broadcast: other clients may be showing this player's profiles too.
+		replies.push_back({PlayerProfilesJson(player), false});
 		Players::RequestRescan(); // profile counts in the player list
 	};
+	const auto full = [&] {
+		return fmt::format("{} already has {} profiles on this pad", player, Profiles::MAX_PER_PAD);
+	};
 
-	if (isOp("loadProfile"))
+	if (!opName.empty() && !op)
+		return done(false, "unknown player");
+
+	if (opName == "loadProfile")
 	{
 		json blob;
-		if (!op || !HasString(*op, "id") || !Profiles::ReadProfile(padDir(), (*op)["id"].get<std::string>(), blob))
-		{
-			std::printf("loadProfile :: unknown profile, ignored\n");
-			return replies;
-		}
+		if (!HasString(*op, "id") || !Profiles::ReadProfile(padDir(), (*op)["id"].get<std::string>(), blob))
+			return done(false, "unknown profile");
 		if (blob.value("sensorCount", -1) != numSensors)
-		{
-			std::printf("loadProfile :: sensor-count mismatch, ignored\n");
-			return replies;
-		}
-		try
-		{
-			D::LoadProfile(blob, PROFILE_GROUPS);
-			SetPadSelection(padName, player, blob.value("id", std::string()), blob.value("name", std::string()));
-		}
-		catch (const std::exception& e)
-		{
-			std::printf("loadProfile :: failed (%s)\n", e.what());
-		}
-		return replies;
+			return done(false, "profile is for a pad with a different number of sensors");
+		D::LoadProfile(blob, PROFILE_GROUPS);
+		SetPadSelection(padName, player, blob.value("id", std::string()), blob.value("name", std::string()));
+		return done(true, "", blob.value("name", std::string()));
 	}
 
 	// Capture this pad's live settings. Two forms:
 	//   {saveProfile:{player, name, description?}} -> new profile (refused at MAX_PER_PAD)
 	//   {saveProfile:{player, id}}                 -> overwrite, keeping name/description
-	if (isOp("saveProfile"))
+	if (opName == "saveProfile")
 	{
-		if (!op)
-			return replies;
 		const auto dir = padDir();
 		std::string id, name, description;
 		if (HasString(*op, "id"))
 		{
 			json existing;
 			if (!Profiles::ReadProfile(dir, (*op)["id"].get<std::string>(), existing))
-			{
-				std::printf("saveProfile :: unknown id, ignored\n");
-				return replies;
-			}
+				return done(false, "unknown profile");
 			id = existing.value("id", std::string());
 			name = existing.value("name", std::string());
 			description = existing.value("description", std::string());
@@ -1074,20 +1083,13 @@ static std::vector<json> HandleClientMessageImpl(const std::string& message)
 		else if (HasString(*op, "name"))
 		{
 			if (Profiles::List(dir).size() >= Profiles::MAX_PER_PAD)
-			{
-				std::printf("saveProfile :: %s already has %zu profiles on %s, refused\n", player.c_str(),
-				            Profiles::MAX_PER_PAD, padName.c_str());
-				return replies;
-			}
+				return done(false, full());
 			name = (*op)["name"].get<std::string>();
 			description = (*op).value("description", std::string());
 			id = NewProfileId(dir, name);
 		}
 		else
-		{
-			std::printf("saveProfile :: needs a name or id, ignored\n");
-			return replies;
-		}
+			return done(false, "needs a name or id");
 
 		json blob;
 		D::SaveProfile(blob, PROFILE_GROUPS); // capture this pad
@@ -1096,81 +1098,80 @@ static std::vector<json> HandleClientMessageImpl(const std::string& message)
 		blob["description"] = description;
 		blob["sensorCount"] = numSensors;
 		blob["savedAt"] = (int64_t)std::time(nullptr);
-		if (Profiles::Write(dir, id, blob))
-		{
-			SetPadSelection(padName, player, id, name); // that is what the pad holds now
-			refreshed();
-		}
-		return replies;
+		if (!Profiles::Write(dir, id, blob))
+			return done(false, "could not write the profile");
+		SetPadSelection(padName, player, id, name); // that is what the pad holds now
+		refreshed();
+		return done(true, "", name);
 	}
 
 	// Store a profile the client read from any pad (this one: a duplicate; or
 	// one on another server, since every server keeps only its own pads'
 	// profiles) onto this pad under a new name:
 	//   {pad, importProfile:{player, name, profile:{...stored profile...}}}
-	if (isOp("importProfile"))
+	if (opName == "importProfile")
 	{
-		if (!op || !HasString(*op, "name") || !(*op).contains("profile"))
-			return replies;
+		if (!HasString(*op, "name") || !(*op).contains("profile"))
+			return done(false, "needs a name and a profile");
 		json blob = Profiles::Sanitize((*op)["profile"]);
 		const auto dir = padDir();
-		if (blob.is_null() || blob["sensorCount"] != numSensors || Profiles::List(dir).size() >= Profiles::MAX_PER_PAD)
-		{
-			std::printf("importProfile :: invalid profile, sensor-count mismatch or pad full, refused\n");
-			return replies;
-		}
+		if (blob.is_null())
+			return done(false, "invalid profile");
+		if (blob["sensorCount"] != numSensors)
+			return done(false, "profile is for a pad with a different number of sensors");
+		if (Profiles::List(dir).size() >= Profiles::MAX_PER_PAD)
+			return done(false, full());
 		const std::string name = (*op)["name"].get<std::string>();
 		const std::string id = NewProfileId(dir, name);
 		blob["id"] = id;
 		blob["name"] = name;
 		blob["savedAt"] = (int64_t)std::time(nullptr);
-		if (Profiles::Write(dir, id, blob))
-			refreshed();
-		return replies;
+		if (!Profiles::Write(dir, id, blob))
+			return done(false, "could not write the profile");
+		refreshed();
+		return done(true, "", name);
 	}
 
 	// Edit metadata (name/description) only — never re-captures the pad.
-	if (isOp("updateProfile"))
+	if (opName == "updateProfile")
 	{
 		json blob;
-		const auto dir = op ? padDir() : Profiles::Path();
-		if (!op || !HasString(*op, "id") || !Profiles::ReadProfile(dir, (*op)["id"].get<std::string>(), blob))
-			return replies;
+		const auto dir = padDir();
+		if (!HasString(*op, "id") || !Profiles::ReadProfile(dir, (*op)["id"].get<std::string>(), blob))
+			return done(false, "unknown profile");
 		if (HasString(*op, "name"))
 			blob["name"] = (*op)["name"].get<std::string>();
 		if (HasString(*op, "description"))
 			blob["description"] = (*op)["description"].get<std::string>();
 		const std::string id = blob.value("id", std::string());
-		if (Profiles::Write(dir, id, blob))
+		if (!Profiles::Write(dir, id, blob))
+			return done(false, "could not write the profile");
+		json& st = PadStateFor(padName);
+		if (st.value("player", "") == player && st.value("profileId", "") == id)
 		{
-			json& st = PadStateFor(padName);
-			if (st.value("player", "") == player && st.value("profileId", "") == id)
-			{
-				st["profileName"] = blob.value("name", std::string());
-				SavePadState(padName);
-			}
-			refreshed();
+			st["profileName"] = blob.value("name", std::string());
+			SavePadState(padName);
 		}
-		return replies;
+		refreshed();
+		return done(true, "", blob.value("name", std::string()));
 	}
 
-	if (isOp("deleteProfile"))
+	if (opName == "deleteProfile")
 	{
-		if (!op || !HasString(*op, "id"))
-			return replies;
+		if (!HasString(*op, "id"))
+			return done(false, "needs an id");
 		const std::string id = (*op)["id"].get<std::string>();
-		if (Profiles::Delete(padDir(), id))
+		if (!Profiles::Delete(padDir(), id))
+			return done(false, "could not delete the profile");
+		json& st = PadStateFor(padName);
+		if (st.value("player", "") == player && st.value("profileId", "") == id)
 		{
-			json& st = PadStateFor(padName);
-			if (st.value("player", "") == player && st.value("profileId", "") == id)
-			{
-				st["profileId"] = "";
-				st["profileName"] = "";
-				SavePadState(padName);
-			}
-			refreshed();
+			st["profileId"] = "";
+			st["profileName"] = "";
+			SavePadState(padName);
 		}
-		return replies;
+		refreshed();
+		return done(true, "");
 	}
 
 	// ---- Device ops. ----
@@ -1196,7 +1197,7 @@ static std::vector<json> HandleClientMessageImpl(const std::string& message)
 
 	// A configuration update reuses the hardened LoadProfile path, which
 	// validates every index and group before touching device state.
-	if (j.contains("sensors") || j.contains("releaseThreshold") || j.contains("name") || j.contains("lightRules"))
+	if (j.contains("sensors") || j.contains("name") || j.contains("lightRules"))
 	{
 		// Profiles and pad state are keyed by pad name, so two pads on this server
 		// with one name would share them: refuse such a rename.
@@ -1247,12 +1248,6 @@ bool Device::SetThreshold(int sensorIndex, double threshold, double releaseThres
 {
 	auto device = connectionManager->ConnectedDevice();
 	return device ? device->SetThreshold(sensorIndex, threshold, releaseThreshold) : false;
-}
-
-bool Device::SetReleaseThreshold(double threshold)
-{
-	auto device = connectionManager->ConnectedDevice();
-	return device ? device->SetReleaseThreshold(threshold) : false;
 }
 
 bool Device::SetAdcConfig(int sensorIndex, int resistorValue)
@@ -1475,38 +1470,25 @@ void PadDevice::LoadProfile(json& j, DeviceProfileGroups groups)
 			const auto& sensor = sensors[key];
 			const int idx = (int)key;
 
-			const bool hasTh = sensor.contains("threshold") && sensor["threshold"].is_number();
-			const bool hasRel = sensor.contains("releaseThreshold") && sensor["releaseThreshold"].is_number();
-			if ((groups & DPG_SENSITIVITY) && (hasTh || hasRel))
+			// Apply whichever fields the entry carries on top of the current values
+			// (a release-only patch from the client's release slider must still
+			// reach the device), then send them all in one report, or none if
+			// nothing changed.
+			SensorState want = mySensors[idx];
+			if (groups & DPG_SENSITIVITY)
 			{
-				// Apply whichever fields the message carries; default the missing one
-				// to the currently stored value. This lets a release-only patch (the
-				// client's per-sensor release slider) actually reach the device instead
-				// of being dropped for lacking a threshold. SetThreshold enforces the
-				// active release mode on the stored release value.
-				double th = hasTh ? sensor["threshold"].get<double>() : mySensors[idx].threshold;
-				double rel = hasRel ? sensor["releaseThreshold"].get<double>() : mySensors[idx].releaseThreshold;
-				SetThreshold(idx, th, rel);
+				if (sensor.contains("threshold") && sensor["threshold"].is_number())
+					want.threshold = sensor["threshold"].get<double>();
+				if (sensor.contains("releaseThreshold") && sensor["releaseThreshold"].is_number())
+					want.releaseThreshold = sensor["releaseThreshold"].get<double>();
 			}
-
-			if ((groups & DPG_MAPPING) && sensor.contains("button") && sensor["button"].is_number_integer())
-			{
-				SetButtonMapping(idx, sensor["button"].get<int>());
-			}
-
-			if ((groups & DPG_GAIN) && sensor.contains("resistorValue") &&
-			    sensor["resistorValue"].is_number_integer() && pad->featureDigipot)
-			{
-				SetAdcConfig(idx, sensor["resistorValue"].get<int>());
-			}
-		}
-	}
-
-	if (groups & DPG_SENSITIVITY)
-	{
-		if (j.contains("releaseThreshold") && j["releaseThreshold"].is_number())
-		{
-			SetReleaseThreshold(j["releaseThreshold"].get<double>());
+			if ((groups & DPG_MAPPING) && sensor.contains("button") && sensor["button"].is_number_integer() &&
+			    ValidButton(sensor["button"].get<int>()))
+				want.button = sensor["button"].get<int>();
+			if ((groups & DPG_GAIN) && pad->featureDigipot && sensor.contains("resistorValue") &&
+			    sensor["resistorValue"].is_number_integer())
+				want.resistorValue = sensor["resistorValue"].get<int>();
+			SetSensor(idx, want);
 		}
 	}
 
@@ -1555,8 +1537,6 @@ void PadDevice::SaveProfile(json& j, DeviceProfileGroups groups)
 				j["sensors"][i]["resistorValue"] = s->resistorValue;
 			}
 		}
-
-		j["releaseThreshold"] = pad->releaseThreshold;
 	}
 
 	if (groups & DPG_DEVICE)

@@ -2,6 +2,8 @@
 #include <chrono>
 #include <format>
 #include <iostream>
+#include <map>
+#include <string>
 #include <thread>
 #include "Adp.h"
 #include "Application.h"
@@ -29,6 +31,17 @@ void Application::UpdateLoop(MSGQ<QueueMessage>& queue, WebsocketServer& websock
 
 	uint64_t playersVersion = 0;
 
+	// Last snapshot sent per pad. An unchanged one is skipped, but still resent
+	// at least this often: clients treat a pad silent for 1s as gone, and a
+	// client that just connected or subscribed needs one.
+	constexpr auto snapshotHeartbeat = std::chrono::milliseconds(250);
+	struct Sent
+	{
+		std::string json;
+		std::chrono::steady_clock::time_point at;
+	};
+	std::map<std::string, Sent> lastSnapshot;
+
 	while (running.load())
 	{
 		// Update device data first (discovery + poll + publish snapshots).
@@ -37,11 +50,20 @@ void Application::UpdateLoop(MSGQ<QueueMessage>& queue, WebsocketServer& websock
 		// Send every pad's freshly published, immutable snapshot to the clients
 		// watching that pad.
 		auto snapshots = Device::GetSnapshots();
-		for (const auto& snapshot : snapshots ? *snapshots : std::vector<SensorSnapshot>{})
+		if (snapshots && websocketServer.HasClients())
 		{
-			json sensorJson;
-			Device::SnapshotToJson(snapshot, sensorJson);
-			websocketServer.SendSnapshot(snapshot.path, sensorJson.dump());
+			const auto now = std::chrono::steady_clock::now();
+			for (const auto& snapshot : *snapshots)
+			{
+				json sensorJson;
+				Device::SnapshotToJson(snapshot, sensorJson);
+				std::string message = sensorJson.dump();
+				Sent& last = lastSnapshot[snapshot.path];
+				if (message == last.json && now - last.at < snapshotHeartbeat)
+					continue;
+				websocketServer.SendSnapshot(snapshot.path, message);
+				last = {std::move(message), now};
+			}
 		}
 
 		// Everything below is sent on change only; Publish() replays the latest
@@ -83,7 +105,12 @@ void Application::UpdateLoop(MSGQ<QueueMessage>& queue, WebsocketServer& websock
 		while (auto item = queue.tryPop())
 		{
 			for (const auto& reply : Device::HandleClientMessage(item->data))
-				websocketServer.SendMessageToClients(reply.dump());
+			{
+				if (reply.toSender)
+					websocketServer.SendTo(item->sender, reply.message.dump());
+				else
+					websocketServer.SendMessageToClients(reply.message.dump());
+			}
 		}
 
 		std::this_thread::sleep_for(sleep_time);

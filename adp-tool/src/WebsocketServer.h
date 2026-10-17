@@ -28,6 +28,12 @@ class WebsocketServer
 	// Broadcasts a message to all connected clients. Thread-safe.
 	void SendMessageToClients(const std::string& message);
 
+	// Sends a message to one client, if it is still connected. Thread-safe.
+	void SendTo(const ix::WebSocket* client, const std::string& message);
+
+	// True if any client is connected. Thread-safe.
+	bool HasClients();
+
 	// Broadcasts `messages` and remembers them under `key` (replacing what was
 	// there), so a client that connects later gets the latest copy on open
 	// instead of waiting for the next change. Thread-safe.

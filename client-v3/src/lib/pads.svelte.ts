@@ -40,7 +40,6 @@ export interface Snapshot {
 	pad: string; // HID path: how messages address this pad
 	name: string;
 	pollingRate: number;
-	releaseThreshold: number; // legacy global release ratio, 0.01..1 (unused; see releaseMode)
 	releaseMode: number; // 0 none, 2 per-sensor (1 = legacy global, treated as per-sensor)
 	numButtons: number; // mappable buttons this pad exposes
 	featureDigipot: boolean; // pad supports per-sensor gain
@@ -84,9 +83,27 @@ export interface Profile {
 	sensorCount: number; // only loadable onto a pad with this many sensors
 	savedAt?: number; // unix seconds
 	sensors: Array<Pick<Sensor, 'threshold' | 'releaseThreshold' | 'resistorValue'>>;
-	releaseThreshold?: number;
 	lightRules?: LightRule[];
 	ledMappings?: LedMapping[];
+}
+
+export type ProfileOp =
+	'loadProfile' | 'saveProfile' | 'importProfile' | 'updateProfile' | 'deleteProfile';
+
+/** The server's answer to one of this client's profile ops (msgType 8). */
+export interface OpResult {
+	op: ProfileOp;
+	pad: string;
+	ok: boolean;
+	error: string; // '' when ok
+	name: string; // the profile's name, when there is one
+}
+
+/** A short-lived message for the user, e.g. an op result. */
+export interface Notice {
+	ok: boolean;
+	text: string;
+	op?: ProfileOp;
 }
 
 export interface Avatar {
@@ -127,9 +144,17 @@ const SEND_THROTTLE_MS = 40;
 const PENDING_TTL_MS = 1000;
 const STALE_MS = 1000; // no snapshot for this long while open => pad considered gone
 const MAX_BACKOFF_MS = 5000;
+const NOTICE_MS = 4000;
 
 const clamp01 = (v: number) => (v < 0 ? 0 : v > 1 ? 1 : v);
 const clampByte = (v: number) => (v < 0 ? 0 : v > 255 ? 255 : Math.round(v));
+
+interface ConnEvents {
+	/** A snapshot for `pad` arrived. */
+	snapshot: (conn: Conn, pad: string) => void;
+	/** The server answered one of this client's profile ops. */
+	result: (conn: Conn, result: OpResult) => void;
+}
 
 /** One WebSocket connection to a single adp-tool server. */
 class Conn {
@@ -157,10 +182,12 @@ class Conn {
 	#closed = false;
 	/** Pads this client wants snapshots for: '*' (server default), a pad path, or '' for none. */
 	#subscription = '*';
+	#events: ConnEvents;
 
-	constructor(server: ServerConfig) {
+	constructor(server: ServerConfig, events: ConnEvents) {
 		this.endpoint = server.url;
 		this.name = server.name;
+		this.#events = events;
 		this.#open();
 	}
 
@@ -200,6 +227,7 @@ class Conn {
 			const s = m as Snapshot;
 			this.snapshotAt[s.pad] = Date.now();
 			this.snapshots = { ...this.snapshots, [s.pad]: s };
+			this.#events.snapshot(this, s.pad);
 		} else if (msg.msgType === 2) {
 			this.deviceList = (m as { devices: DeviceInfo[] }).devices;
 		} else if (msg.msgType === 3) {
@@ -216,6 +244,8 @@ class Conn {
 		} else if (msg.msgType === 7) {
 			const a = m as { name: string; mime: string; data: string };
 			this.avatars[a.name] = { mime: a.mime, url: a.mime ? `data:${a.mime};base64,${a.data}` : '' };
+		} else if (msg.msgType === 8) {
+			this.#events.result(this, m as OpResult);
 		}
 	}
 
@@ -246,8 +276,11 @@ class Conn {
 		this.send({ subscribe: sub });
 	}
 
-	send(obj: unknown) {
-		if (this.#ws && this.status === 'open') this.#ws.send(JSON.stringify(obj));
+	/** False if not connected: the message was dropped. */
+	send(obj: unknown): boolean {
+		if (!this.#ws || this.status !== 'open') return false;
+		this.#ws.send(JSON.stringify(obj));
+		return true;
 	}
 
 	close() {
@@ -289,12 +322,17 @@ class PadsStore {
 	/** Optimistic per-sensor edits for the selected pad, keyed by sensor index. */
 	pending: Record<number, SensorPatch> = $state({});
 	now = $state(0); // ticking clock so staleness stays reactive
+	/** Shown as a toast for a few seconds (op results, send failures). */
+	notice: Notice | null = $state(null);
 
 	#clock: ReturnType<typeof setInterval> | null = null;
 	#sendTimer: ReturnType<typeof setTimeout> | null = null;
 	#stopEffects: (() => void) | null = null;
 	/** When each pending sensor patch was last edited (see PENDING_TTL_MS). */
 	#pendingAt: Record<number, number> = {};
+	/** Edits not sent yet; a flush sends only these, not every unconfirmed one. */
+	#unsent: Record<number, SensorPatch> = {};
+	#noticeTimer: ReturnType<typeof setTimeout> | undefined;
 
 	/** Call once from the browser (onMount). Safe to call more than once. */
 	start() {
@@ -310,7 +348,16 @@ class PadsStore {
 		}
 		this.now = Date.now();
 		this.#clock = setInterval(() => (this.now = Date.now()), 250);
-		this.conns = SERVERS.map((s) => new Conn(s));
+		this.conns = SERVERS.map(
+			(s) =>
+				new Conn(s, {
+					snapshot: (c, pad) => {
+						// Clear optimistic edits the selected pad has caught up to.
+						if (c === this.conn && pad === this.pad) this.reconcile();
+					},
+					result: (c, r) => this.#onResult(c, r)
+				})
+		);
 		// Stream only what's on screen: every pad of the selected server while
 		// picking one, then just the picked pad; nothing from other servers
 		// (they are only asked for profiles to copy).
@@ -325,6 +372,7 @@ class PadsStore {
 	}
 
 	stop() {
+		clearTimeout(this.#noticeTimer);
 		if (this.#clock) clearInterval(this.#clock);
 		this.#clock = null;
 		this.#stopEffects?.();
@@ -339,7 +387,7 @@ class PadsStore {
 		this.server = url;
 		this.pad = null;
 		this.player = null;
-		this.pending = {};
+		this.#clearEdits();
 		this.step = 'pad';
 		try {
 			localStorage.setItem(SERVER_KEY, url);
@@ -351,7 +399,7 @@ class PadsStore {
 	selectPad(path: string) {
 		this.pad = path;
 		this.player = null;
-		this.pending = {};
+		this.#clearEdits();
 		this.step = 'player';
 		this.conn?.send({ rescanPlayers: true }); // pick up just-created players
 	}
@@ -522,17 +570,46 @@ class PadsStore {
 		c.send({ getAvatar: player.name });
 	}
 
+	/** Drops optimistic and unsent edits (they belong to the previous pad or profile). */
+	#clearEdits() {
+		this.pending = {};
+		this.#unsent = {};
+	}
+
+	// ---- Notices ----
+
+	showNotice(notice: Notice) {
+		this.notice = notice;
+		clearTimeout(this.#noticeTimer);
+		this.#noticeTimer = setTimeout(() => (this.notice = null), NOTICE_MS);
+	}
+
+	#onResult(c: Conn, r: OpResult) {
+		if (c !== this.conn) return;
+		this.showNotice(
+			r.ok
+				? { ok: true, op: r.op, text: OP_DONE[r.op]?.(r.name) ?? 'Done' }
+				: { ok: false, op: r.op, text: `Couldn't ${OP_VERBS[r.op] ?? r.op}: ${r.error}` }
+		);
+		// A new profile is what the pad holds now: on to tuning it.
+		if (r.ok && r.op === 'saveProfile' && r.pad === this.pad && this.step === 'profile')
+			this.step = 'tune';
+	}
+
 	// ---- Profile actions (selected pad + player) ----
 
-	#sendPad(msg: Record<string, unknown>) {
-		if (this.pad) this.conn?.send({ pad: this.pad, ...msg });
+	/** Sends to the selected pad; false (with a notice) if it couldn't be sent. */
+	#sendPad(msg: Record<string, unknown>): boolean {
+		const sent = !!this.pad && !!this.conn?.send({ pad: this.pad, ...msg });
+		if (!sent) this.showNotice({ ok: false, text: `Not connected to ${this.serverName}` });
+		return sent;
 	}
 
 	loadProfile(id: string) {
-		this.#sendPad({ loadProfile: { player: this.player, id } });
-		this.pending = {};
+		if (this.#sendPad({ loadProfile: { player: this.player, id } })) this.#clearEdits();
 	}
 
+	/** Saves the pad's settings as a new profile; moves on to tuning once the server confirms. */
 	saveProfileAs(name: string) {
 		this.#sendPad({ saveProfile: { player: this.player, name } });
 	}
@@ -566,6 +643,7 @@ class PadsStore {
 			...this.pending,
 			[sensorIndex]: { ...this.pending[sensorIndex], ...patch }
 		};
+		this.#unsent[sensorIndex] = { ...this.#unsent[sensorIndex], ...patch };
 		this.#scheduleSend();
 	}
 
@@ -646,10 +724,11 @@ class PadsStore {
 
 	#flush() {
 		const snap = this.activeSnapshot;
-		if (!snap) return;
-		// Positional array: {} for untouched sensors, the patch for pending ones.
-		const sensors = snap.sensors.map((_, i) => this.pending[i] ?? {});
-		this.#sendPad({ sensors });
+		if (!snap || !this.pad) return; // kept in #unsent for the next flush
+		// Positional array: {} for sensors without new edits. Each patch is a HID
+		// round-trip on the server, so already-sent edits are not repeated.
+		const sensors = snap.sensors.map((_, i) => this.#unsent[i] ?? {});
+		if (this.conn?.send({ pad: this.pad, sensors })) this.#unsent = {};
 	}
 
 	/** Clear optimistic values the server has caught up to. Call each snapshot. */
@@ -691,6 +770,22 @@ class PadsStore {
 		if (changed) this.pending = next;
 	}
 }
+
+const OP_VERBS: Record<ProfileOp, string> = {
+	loadProfile: 'load the profile',
+	saveProfile: 'save the profile',
+	importProfile: 'copy the profile',
+	updateProfile: 'rename the profile',
+	deleteProfile: 'delete the profile'
+};
+
+const OP_DONE: Record<ProfileOp, (name: string) => string> = {
+	loadProfile: (n) => `Loaded ${n}`,
+	saveProfile: (n) => `Saved ${n}`,
+	importProfile: (n) => `Copied as ${n}`,
+	updateProfile: (n) => `Renamed to ${n}`,
+	deleteProfile: () => 'Profile deleted'
+};
 
 /** Mapped sensors grouped by button, sorted ascending; empty buttons skipped. */
 export function groupByButton(mapped: MappedSensor[]): ButtonGroup[] {

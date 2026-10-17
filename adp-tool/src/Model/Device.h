@@ -103,7 +103,6 @@ struct SensorSnapshot
 	std::string path; // HID path: how clients address this pad in messages
 	std::string name;
 	int pollingRate = 0;
-	double releaseThreshold = 1.0;
 	int releaseMode = 0;
 	int numButtons = 0;
 	bool featureDigipot = false;
@@ -149,6 +148,14 @@ struct PadState
 	ReleaseMode releaseMode = ReleaseMode::RELEASE_INDIVIDUAL;
 };
 
+// One reply to an inbound client message: to the client that sent it, or
+// broadcast to every client.
+struct ClientReply
+{
+	json message;
+	bool toSender = true;
+};
+
 class Device
 {
   public:
@@ -190,9 +197,9 @@ class Device
 	static bool TakeLightsDirty();
 
 	// Parses and dispatches one inbound client message. Must be called on the
-	// device-I/O thread so device access stays single-threaded. Returns any
-	// messages to broadcast in reply.
-	static std::vector<json> HandleClientMessage(const std::string& message);
+	// device-I/O thread so device access stays single-threaded. Returns the
+	// replies to send.
+	static std::vector<ClientReply> HandleClientMessage(const std::string& message);
 
 	// Serializes each pad's server-owned selection (msgType 5): current player
 	// and profile plus recent players, keyed by pad path.
@@ -210,8 +217,6 @@ class Device
 	static bool SetThreshold(int sensorIndex, double threshold, double releaseThreshold);
 
 	static bool SetAdcConfig(int sensorIndex, int resistorValue);
-
-	static bool SetReleaseThreshold(double threshold);
 
 	static bool SetButtonMapping(int sensorIndex, int button);
 

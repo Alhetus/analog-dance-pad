@@ -149,6 +149,8 @@ json List(const Path& dir)
 		const auto& p = entry.path();
 		if (p.extension() != ".json")
 			continue; // skips the ".json.tmp" write-in-progress files too
+		if (!ValidId(PathU8(p.stem())))
+			continue; // e.g. a hand-copied "My Profile.json": its id could never be sent back
 
 		std::ifstream in(p, std::ios::binary);
 		if (!in)
@@ -266,8 +268,6 @@ json Sanitize(const json& profile)
 	json out = json::object();
 	out["sensorCount"] = profile["sensorCount"];
 	out["sensors"] = profile["sensors"];
-	if (profile.contains("releaseThreshold") && profile["releaseThreshold"].is_number())
-		out["releaseThreshold"] = profile["releaseThreshold"];
 	for (const char* key : {"lightRules", "ledMappings"})
 		if (profile.contains(key) && profile[key].is_array())
 			out[key] = profile[key];

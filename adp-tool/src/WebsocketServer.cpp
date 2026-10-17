@@ -68,7 +68,7 @@ void WebsocketServer::Init(MSGQ<QueueMessage>& queue, std::string host, std::ato
 				}
 			}
 			// Enqueue the message by value; the device thread drains and applies it.
-			queue.push(QueueMessage(msg->str));
+			queue.push(QueueMessage(msg->str, &webSocket));
 		}
 	});
 
@@ -114,6 +114,25 @@ void WebsocketServer::SendMessageToClients(const std::string& message)
 	{
 		socket->send(message);
 	}
+}
+
+void WebsocketServer::SendTo(const ix::WebSocket* client, const std::string& message)
+{
+	std::lock_guard<std::mutex> lock(serverMutex);
+	if (server == nullptr)
+		return;
+
+	for (const auto& socket : server->getClients())
+	{
+		if (socket.get() == client)
+			socket->send(message);
+	}
+}
+
+bool WebsocketServer::HasClients()
+{
+	std::lock_guard<std::mutex> lock(serverMutex);
+	return server != nullptr && !server->getClients().empty();
 }
 
 void WebsocketServer::Publish(const std::string& key, std::vector<std::string> messages)

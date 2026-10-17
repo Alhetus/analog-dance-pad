@@ -12,6 +12,8 @@
 using namespace adp;
 using Catch::Approx;
 
+static constexpr DeviceProfileGroups PROFILE_TEST_GROUPS = DPG_SENSITIVITY | DPG_GAIN;
+
 TEST_CASE("LoadProfile applies sensor thresholds, buttons and name", "[profile]")
 {
 	RecordingBackend* raw = nullptr;
@@ -253,6 +255,46 @@ TEST_CASE("LoadProfile treats null light slots as disabled and skips unchanged o
 	pad.LoadProfile(j, DPG_LIGHTS);
 	CHECK(raw->sent.size() == 1);
 	CHECK_FALSE(pad.Lights().lightRules.contains(2));
+}
+
+TEST_CASE("A pad can't be renamed to an empty name", "[profile]")
+{
+	// Profiles and pad state live under the pad name: an empty one would put
+	// them in players/<player>/ and pads/ themselves.
+	RecordingBackend* raw = nullptr;
+	auto rep = makeReporter(raw);
+	PadDevice pad(rep, "t", makeName("Left"), makeIdent(1, 3, 8, 1), {}, {}, {makeSensor(0, 425, 0)});
+	raw->sent.clear();
+
+	CHECK_FALSE(pad.SendName(""));
+	CHECK_FALSE(pad.SendName("  "));
+	json j = {{"name", ""}};
+	pad.LoadProfile(j, DGP_ALL);
+
+	CHECK(pad.State().name == "Left");
+	CHECK(raw->sent.empty());
+}
+
+TEST_CASE("LoadProfile sends one report per changed sensor", "[profile]")
+{
+	RecordingBackend* raw = nullptr;
+	auto rep = makeReporter(raw);
+	PadDevice pad(rep, "t", makeName("x"), makeIdent(1, 3, 8, 2, IdentificationV2Report::FEATURE_DIGIPOT), {}, {},
+	              {makeSensor(0, 425, 0), makeSensor(1, 425, 1)});
+	raw->sent.clear();
+
+	// Sensor 0 gets a new threshold and gain (one report, not two); sensor 1
+	// gets the values it already has (no report).
+	json j;
+	j["sensors"] = json::array({{{"threshold", 0.4}, {"resistorValue", 42}},
+	                            {{"threshold", pad.Sensor(1)->threshold},
+	                             {"releaseThreshold", pad.Sensor(1)->releaseThreshold},
+	                             {"resistorValue", 0}}});
+	pad.LoadProfile(j, PROFILE_TEST_GROUPS);
+
+	CHECK(raw->sent.size() == 1);
+	CHECK(pad.Sensor(0)->threshold == Approx(0.4));
+	CHECK(pad.Sensor(0)->resistorValue == 42);
 }
 
 TEST_CASE("SetButtonMapping rejects buttons the pad doesn't have", "[profile]")

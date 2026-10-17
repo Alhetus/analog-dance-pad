@@ -52,6 +52,15 @@ inline color24 ToColor24(RgbColor color)
 	return {color.red, color.green, color.blue};
 }
 
+// The device is untrusted input: clamp every count it reports to what the
+// report structs and the 16-bit button mask can hold. Applied once, before
+// anything is indexed by these counts (see ConnectToDeviceStage2 / PadDevice).
+inline void ClampIdentification(IdentificationReport& id)
+{
+	id.sensorCount = (uint8_t)std::min<int>(id.sensorCount, SENSOR_COUNT_MAX);
+	id.buttonCount = (uint8_t)std::min<int>(id.buttonCount, MAX_BUTTON_COUNT);
+}
+
 struct PollingData
 {
 	int readsSinceLastUpdate = 0;
@@ -63,13 +72,12 @@ class PadDevice
 {
   public:
 	PadDevice(std::shared_ptr<Reporter> reporter, const char* path, const NameReport& name,
-	          const IdentificationV2Report& identification, const std::vector<LightRuleReport>& lightRules,
+	          IdentificationV2Report identification, const std::vector<LightRuleReport>& lightRules,
 	          const std::vector<LedMappingReport>& ledMappings, const std::vector<SensorReport>& sensors)
 	    : myReporter(std::move(reporter)), myPath(path)
 	{
-		// Clamp the device-reported sensor count so a malformed/hostile device
-		// can't drive out-of-bounds access downstream.
-		int sensorCount = std::clamp<int>(identification.sensorCount, 0, SENSOR_COUNT_MAX);
+		ClampIdentification(identification);
+		const int sensorCount = identification.sensorCount;
 
 		mySensors = std::vector<SensorState>(sensorCount);
 
@@ -99,15 +107,13 @@ class PadDevice
 			UpdateSensor(sensor);
 		}
 
-		if (myPad.firmwareVersion.IsNewer({1, 2}))
-		{
-			if (sensorCount > 0 && mySensors[0].threshold > 0)
-				myPad.releaseThreshold = mySensors[0].releaseThreshold / mySensors[0].threshold;
-		}
-		else if (myPad.firmwareVersion.IsNewer({1, 1}))
-		{
+		// Pre-1.3 firmware keeps one release ratio for the whole pad (its sensors
+		// were built as threshold*ratio); recover it so SendPadConfiguration
+		// writes it back unchanged instead of resetting it.
+		if (sensorCount > 0 && mySensors[0].threshold > 0)
+			myPad.releaseThreshold = mySensors[0].releaseThreshold / mySensors[0].threshold;
+		if (!myPad.firmwareVersion.IsNewer({1, 2}) && myPad.firmwareVersion.IsNewer({1, 1}))
 			myPad.featureLights = (bool)(identification.ledCount > 0);
-		}
 
 		try
 		{
@@ -272,21 +278,19 @@ class PadDevice
 		return true;
 	}
 
-	// Returns the releaseThreshold to actually store for a sensor given the active
-	// release mode. The caller's `requested` value is only honored in individual
-	// mode; None/Global derive the release from the sensor's threshold. Assumes
-	// mySensors[idx].threshold has already been set to its new value.
-	double ReleaseForMode(int idx, double requested) const
+	// The releaseThreshold to store for a sensor with press threshold
+	// `threshold` under the active release mode. None means no hysteresis
+	// (release tracks the press threshold); per-sensor honors `requested`.
+	double ReleaseForMode(double threshold, double requested) const
 	{
-		// None means no hysteresis (release tracks the press threshold); any other
-		// mode honors the caller's per-sensor value. Global mode has been removed —
-		// a device still reporting it is coerced to per-sensor, so it lands here too.
 		if (myPad.releaseMode == RELEASE_NONE)
-			return mySensors[idx].threshold;
+			return threshold;
 		// The release threshold must never exceed the press threshold, or hysteresis
 		// breaks (the button would release the instant it presses). Clamp it down.
-		return std::clamp(requested, 0.0, mySensors[idx].threshold);
+		return std::clamp(requested, 0.0, threshold);
 	}
+
+	bool ValidButton(int button) const { return button >= 0 && button <= myPad.numButtons; }
 
 	bool SetReleaseMode(ReleaseMode mode)
 	{
@@ -303,80 +307,68 @@ class PadDevice
 		// untouched.
 		if (mode == RELEASE_NONE)
 		{
-			if (myPad.firmwareVersion.IsNewer({1, 2}))
+			for (int i = 0; i < myPad.numSensors; ++i)
 			{
-				for (int i = 0; i < myPad.numSensors; ++i)
-				{
-					mySensors[i].releaseThreshold = ReleaseForMode(i, mySensors[i].releaseThreshold);
-					if (!SendSensor(i))
-						return false;
-				}
-			}
-			else
-			{
-				return SendPadConfiguration();
+				if (!SetSensor(i, mySensors[i]))
+					return false;
 			}
 		}
 
 		return true;
 	}
 
+	// Sets one sensor's threshold, release, button and gain in a single report
+	// (pre-1.3 firmware: one PadConfiguration report). Each report is a HID
+	// round-trip that stalls polling of every pad, so nothing is sent when the
+	// device already holds these values. Live state only changes once the
+	// device accepted the report.
+	bool SetSensor(int idx, SensorState want)
+	{
+		if (!ValidSensorIndex(idx) || !ValidButton(want.button))
+			return false;
+
+		want.threshold = std::clamp(want.threshold, 0.0, 1.0);
+		want.releaseThreshold = ReleaseForMode(want.threshold, want.releaseThreshold);
+		want.resistorValue = std::clamp(want.resistorValue, 0, 255); // one digipot byte
+
+		SensorState& cur = mySensors[idx];
+		const auto dev = [](double v) { return ToDeviceSensorValue(v); };
+		if (dev(want.threshold) == dev(cur.threshold) && dev(want.releaseThreshold) == dev(cur.releaseThreshold) &&
+		    want.button == cur.button && want.resistorValue == cur.resistorValue)
+			return true;
+
+		const SensorState old = cur;
+		cur.threshold = want.threshold;
+		cur.releaseThreshold = want.releaseThreshold;
+		cur.button = want.button;
+		cur.resistorValue = want.resistorValue;
+
+		// From v1.3 we have the SensorReport. Before that it's the PadConfiguration report
+		const bool ok = myPad.firmwareVersion.IsNewer({1, 2}) ? SendSensor(idx) : SendPadConfiguration();
+		if (!ok)
+			cur = old;
+		else if (old.button != cur.button)
+			myChanges |= DCF_BUTTON_MAPPING;
+		return ok;
+	}
+
 	bool SetThreshold(int sensorIndex, double threshold, double releaseThreshold)
 	{
 		if (!ValidSensorIndex(sensorIndex))
 			return false;
-
-		mySensors[sensorIndex].threshold = threshold;
-		mySensors[sensorIndex].releaseThreshold = ReleaseForMode(sensorIndex, releaseThreshold);
-
-		// From v1.3 we have the SensorReport. Before that it's the PadConfiguration report
-		if (myPad.firmwareVersion.IsNewer({1, 2}))
-		{
-			return SendSensor(sensorIndex);
-		}
-		else
-		{
-			return SendPadConfiguration();
-		}
-	}
-
-	bool SetReleaseThreshold(double threshold)
-	{
-		myPad.releaseThreshold = std::clamp(threshold, 0.01, 1.00);
-
-		// The global ratio only fans out to sensors in global mode; in None/Individual
-		// the ratio is remembered but must not overwrite the per-sensor release values.
-		if (myPad.releaseMode != RELEASE_GLOBAL)
-			return true;
-
-		// From v1.3 we have the SensorReport. Before that it's the PadConfiguration report
-		if (myPad.firmwareVersion.IsNewer({1, 2}))
-		{
-			for (int i = 0; i < myPad.numSensors; ++i)
-			{
-				mySensors[i].releaseThreshold = mySensors[i].threshold * myPad.releaseThreshold;
-				if (!SendSensor(i))
-				{
-					return false;
-				}
-			}
-
-			return true;
-		}
-		else
-		{
-			return SendPadConfiguration();
-		}
+		SensorState s = mySensors[sensorIndex];
+		s.threshold = threshold;
+		s.releaseThreshold = releaseThreshold;
+		return SetSensor(sensorIndex, s);
 	}
 
 	bool SetAdcConfig(int sensorIndex, int resistorValue)
 	{
 		if (!ValidSensorIndex(sensorIndex))
 			return false;
-
-		mySensors[sensorIndex].resistorValue = resistorValue;
-
-		return SendSensor(sensorIndex);
+		SensorState s = mySensors[sensorIndex];
+		s.resistorValue = resistorValue;
+		return SetSensor(sensorIndex, s);
 	}
 
 	void UpdateSensor(SensorReport sensor)
@@ -414,21 +406,11 @@ class PadDevice
 	{
 		// 0 = unmapped, else 1..numButtons; anything else would be truncated into
 		// the report's int8 and shift past the 16-bit button mask in PollSensors.
-		if (!ValidSensorIndex(sensorIndex) || button < 0 || button > myPad.numButtons)
+		if (!ValidSensorIndex(sensorIndex))
 			return false;
-
-		mySensors[sensorIndex].button = button;
-		myChanges |= DCF_BUTTON_MAPPING;
-
-		// From v1.3 we have the SensorReport. Before that it's the PadConfiguration report
-		if (myPad.firmwareVersion.IsNewer({1, 2}))
-		{
-			return SendSensor(sensorIndex);
-		}
-		else
-		{
-			return SendPadConfiguration();
-		}
+		SensorState s = mySensors[sensorIndex];
+		s.button = button;
+		return SetSensor(sensorIndex, s);
 	}
 
 	bool SendName(const char* name)
@@ -436,6 +418,14 @@ class PadDevice
 
 		NameReport report;
 		auto length = std::strlen(name);
+
+		// Profiles and pad state are stored under the pad name, so an empty (or
+		// blank) one would put them in the parent directories.
+		if (std::strspn(name, " \t") == length)
+		{
+			std::printf("SetName :: empty name refused\n");
+			return false;
+		}
 
 		if (length > sizeof(report.name))
 		{
@@ -564,8 +554,8 @@ class PadDevice
 		report.releaseThreshold = WriteF32LE((float)myPad.releaseThreshold);
 
 		bool result = myReporter->SendAndGet(report);
-
-		NotifyUnsavedChanges();
+		if (result)
+			NotifyUnsavedChanges();
 		return result;
 	}
 

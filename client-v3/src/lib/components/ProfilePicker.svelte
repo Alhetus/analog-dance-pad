@@ -3,8 +3,6 @@
 	import { Button } from '$lib/components/ui/button';
 	import { Input } from '$lib/components/ui/input';
 
-	let { onloaded }: { onloaded: (name: string) => void } = $props();
-
 	let newName = $state('');
 
 	const profiles = $derived(pads.playerProfiles);
@@ -22,7 +20,6 @@
 	function load(p: Profile) {
 		pads.loadProfile(p.id);
 		pads.goto('tune');
-		onloaded(p.name);
 	}
 
 	// A player with exactly one profile here gets it loaded right away (once,
@@ -36,9 +33,8 @@
 	function create() {
 		const name = newName.trim();
 		if (!name || full) return;
-		pads.saveProfileAs(name);
+		pads.saveProfileAs(name); // the store moves on to tuning once the server confirms
 		newName = '';
-		pads.goto('tune');
 	}
 
 	function rename(p: Profile) {
