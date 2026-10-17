@@ -7,9 +7,10 @@
 
 PadConfigurationFeatureHIDReport::PadConfigurationFeatureHIDReport()
 {
+    // A release threshold of 0 is valid; dividing by it traps on the ESP32.
+    const uint16_t release = configuration.padConfiguration.sensors[0].releaseThreshold;
     reportConfiguration.releaseMultiplier =
-        configuration.padConfiguration.sensors[0].threshold /
-        configuration.padConfiguration.sensors[0].releaseThreshold;
+        release == 0 ? 0 : configuration.padConfiguration.sensors[0].threshold / release;
 		
     for (int s = 0; s < SENSOR_COUNT_V1; s++) {
         reportConfiguration.sensorThresholds[s] = configuration.padConfiguration.sensors[s].threshold;

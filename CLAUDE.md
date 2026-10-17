@@ -20,7 +20,7 @@ Threading model (`src/Main.cpp`): device-I/O and WebSocket threads communicating
 
 Profiles live on each server's local disk at `<--profiles-dir>/players/<player>/<pad name>/<id>.json` (max 5 per player per pad); per-pad selection at `pads/<pad name>/state.json`. Only LocalProfiles is on a network share; while it is unreachable the last known player list is kept and rescans run every 5s. Run with `--host 0.0.0.0` so phones/tablets can connect.
 
-Sensor state crosses threads only as an immutable `shared_ptr<const vector<SensorSnapshot>>` (`Device::GetSnapshots()`), so readers are lock-free and never see torn/partial state.
+Sensor state crosses threads only as an immutable `shared_ptr<const vector<SensorSnapshot>>` (`Device::GetSnapshots()`), swapped under a short mutex (just a pointer copy), so readers never see torn/partial state.
 
 Shutdown is graceful: `SIGINT`/`SIGTERM` clears an atomic flag, the loop exits, the server is stopped, threads join, and destructors run (`Device::Shutdown` saves/closes the device).
 

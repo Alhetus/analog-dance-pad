@@ -41,6 +41,11 @@ std::string EscapeName(const std::string& name);
 // Inverse of EscapeName.
 std::string UnescapeName(const std::string& escaped);
 
+// `s` with every byte that isn't part of a valid UTF-8 sequence replaced by
+// U+FFFD. Names read from a pad or an Editable.ini are raw bytes, and json
+// refuses to serialize invalid UTF-8 (it throws), so they pass through this.
+std::string ValidUtf8(const std::string& s);
+
 // <profilesDir>/players/<esc(player)>/<esc(pad)>
 Path PlayerPadDir(const Path& profilesDir, const std::string& player, const std::string& pad);
 

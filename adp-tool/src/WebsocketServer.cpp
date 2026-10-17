@@ -122,6 +122,7 @@ void WebsocketServer::Init(MSGQ<QueueMessage>& queue, std::string host, Websocke
 			for (const auto& [key, messages] : replay)
 				for (const auto& m : messages)
 					webSocket.send(m);
+			snapshotResend = true;
 		}
 		else if (msg->type == ix::WebSocketMessageType::Close)
 		{
@@ -152,8 +153,11 @@ void WebsocketServer::Init(MSGQ<QueueMessage>& queue, std::string host, Websocke
 				}
 				if (j.is_object() && j.contains("subscribe") && j["subscribe"].is_string())
 				{
-					std::lock_guard<std::mutex> lock(clientsMutex);
-					clients[&webSocket].subscription = j["subscribe"].get<std::string>();
+					{
+						std::lock_guard<std::mutex> lock(clientsMutex);
+						clients[&webSocket].subscription = j["subscribe"].get<std::string>();
+					}
+					snapshotResend = true;
 					return;
 				}
 			}
@@ -216,16 +220,28 @@ void WebsocketServer::SendTo(const std::string& clientId, const std::string& mes
 	if (server == nullptr)
 		return;
 
-	for (const auto& socket : server->getClients())
+	std::shared_ptr<ix::WebSocket> target;
 	{
 		std::lock_guard<std::mutex> clientsLock(clientsMutex);
-		auto it = clients.find(socket.get());
-		if (it != clients.end() && it->second.id == clientId)
+		for (const auto& socket : server->getClients())
 		{
-			Deliver(*socket, message);
-			return;
+			auto it = clients.find(socket.get());
+			if (it != clients.end() && it->second.id == clientId)
+			{
+				target = socket;
+				break;
+			}
 		}
 	}
+	// Outside clientsMutex: a failing send closes the socket, and ix runs our
+	// Close handler (which takes clientsMutex) synchronously on this thread.
+	if (target)
+		Deliver(*target, message);
+}
+
+bool WebsocketServer::TakeSnapshotResend()
+{
+	return snapshotResend.exchange(false);
 }
 
 bool WebsocketServer::HasClients()

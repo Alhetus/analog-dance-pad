@@ -38,7 +38,7 @@ std::string ParseDisplayName(const std::string& ini)
 	{
 		line = Trim(line);
 		if (line.rfind("DisplayName=", 0) == 0)
-			return Trim(line.substr(12));
+			return Profiles::ValidUtf8(Trim(line.substr(12))); // e.g. a Latin-1 file edited by hand
 	}
 	return "";
 }
@@ -323,12 +323,19 @@ void Start(const Path& localProfilesDir, const Path& profilesDir, std::chrono::s
 	else
 		std::printf("LocalProfiles directory: %s\n", Profiles::PathU8(localProfilesDir).c_str());
 
+	{
+		std::lock_guard lock(gMutex);
+		gStop = false;
+	}
 	gThread = std::thread([=] {
 		constexpr auto retryInterval = std::chrono::seconds(5); // while LocalProfiles is unreachable
 		std::unique_lock lock(gMutex);
 		// This thread is the only writer of gList, so a recount can't be
 		// overwritten by the counts of a scan that started before it.
 		bool recountOnly = false;
+		// Due time of the next full scan. Recounts don't move it, so frequent
+		// profile ops can't keep new players from ever being picked up.
+		auto nextScan = std::chrono::steady_clock::now();
 		while (!gStop)
 		{
 			const auto prev = gList;
@@ -349,7 +356,8 @@ void Start(const Path& localProfilesDir, const Path& profilesDir, std::chrono::s
 			next.renamed.clear();
 			if (next.localOk != prev->localOk || gVersion == 0)
 				std::printf("Players :: LocalProfiles %s\n", next.localOk ? "reachable" : "UNREACHABLE, retrying");
-			const bool healthy = next.localOk;
+			if (!recountOnly)
+				nextScan = std::chrono::steady_clock::now() + (next.localOk ? interval : retryInterval);
 			// Bump the version only on a real change, so clients aren't resent
 			// (and don't re-render) an identical list after every scan.
 			const bool changed = gVersion == 0 || ToJson(next) != ToJson(*prev);
@@ -358,8 +366,10 @@ void Start(const Path& localProfilesDir, const Path& profilesDir, std::chrono::s
 			if (changed)
 				gVersion++;
 			gRenames.insert(gRenames.end(), renamed.begin(), renamed.end());
-			gCv.wait_for(lock, healthy ? interval : retryInterval, [] { return gStop || gRescan || gRecount; });
-			recountOnly = gRecount && !gRescan; // a full scan recounts too
+			gCv.wait_until(lock, nextScan, [] { return gStop || gRescan || gRecount; });
+			// A full scan recounts too, so a recount only runs alone before the
+			// next scan is due.
+			recountOnly = gRecount && !gRescan && std::chrono::steady_clock::now() < nextScan;
 			gRescan = gRecount = false;
 		}
 	});

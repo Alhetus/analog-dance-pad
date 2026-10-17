@@ -16,6 +16,7 @@
 #include <vector>
 
 #include <Model/Device.h>
+#include <Model/Profiles.h>
 #include <Model/Reporter.h>
 #include <Model/Wire.h>
 
@@ -81,7 +82,6 @@ class PadDevice
 		mySensors = std::vector<SensorState>(sensorCount);
 
 		UpdateName(name);
-		myPad.maxNameLength = MAX_NAME_LENGTH;
 
 		myPad.numButtons = identification.buttonCount;
 		myPad.numSensors = sensorCount;
@@ -102,33 +102,19 @@ class PadDevice
 			UpdateSensor(sensor);
 		}
 
-		try
-		{
-			SetPropertyReport report;
-			report.propertyId = WriteU32LE(SetPropertyReport::SPID_SELECTED_PROPERTY);
-			report.propertyValue = WriteU32LE(SetPropertyReport::SPID_RELEASE_MODE);
-
-			if (myReporter->SendAndGet(report))
-			{
-				int resultId = ReadU32LE(report.propertyId);
-				if (resultId != SetPropertyReport::SPID_RELEASE_MODE)
-				{
-					std::printf("Fetching release mode bugged (1)\n");
-				}
-				else
-				{
-					myPad.releaseMode = (ReleaseMode)ReadU32LE(report.propertyValue);
-					// Global release mode has been removed; a device still reporting
-					// it is treated as per-sensor (its stored per-sensor release
-					// values, previously threshold*ratio, carry over unchanged).
-					if (myPad.releaseMode == RELEASE_GLOBAL)
-						myPad.releaseMode = RELEASE_INDIVIDUAL;
-				}
-			}
-		}
-		catch (...)
-		{
+		SetPropertyReport report;
+		report.propertyId = WriteU32LE(SetPropertyReport::SPID_SELECTED_PROPERTY);
+		report.propertyValue = WriteU32LE(SetPropertyReport::SPID_RELEASE_MODE);
+		if (!myReporter->SendAndGet(report))
 			std::printf("Fetching release mode failed\n");
+		else if (ReadU32LE(report.propertyId) != SetPropertyReport::SPID_RELEASE_MODE)
+			std::printf("Fetching release mode bugged (1)\n");
+		else
+		{
+			// Only None stays None. Global release mode has been removed: a device
+			// still reporting it (or any unknown value) is treated as per-sensor,
+			// and its stored per-sensor release values carry over unchanged.
+			myPad.releaseMode = ReadU32LE(report.propertyValue) == RELEASE_NONE ? RELEASE_NONE : RELEASE_INDIVIDUAL;
 		}
 
 		UpdateLightsConfiguration(lightRules, ledMappings);
@@ -147,8 +133,9 @@ class PadDevice
 		// (they are stored under the pad name), so it is replaced too.
 		if (report.size > 0 && report.size <= MAX_NAME_LENGTH)
 		{
-			myPad.name = "";
-			myPad.name.append((const char*)report.name, (size_t)report.size);
+			// Raw device bytes: anything but UTF-8 would make every json dump of
+			// the name throw.
+			myPad.name = Profiles::ValidUtf8(std::string((const char*)report.name, (size_t)report.size));
 		}
 		else
 		{
@@ -279,7 +266,9 @@ class PadDevice
 			return threshold;
 		// The release threshold must never exceed the press threshold, or hysteresis
 		// breaks (the button would release the instant it presses). Clamp it down.
-		return std::clamp(requested, 0.0, threshold);
+		// Nor near 0: the pad releases only once the value drops to it, which ADC
+		// noise can keep from ever happening (a stuck button).
+		return std::clamp(requested, std::min(MIN_RELEASE_THRESHOLD, threshold), threshold);
 	}
 
 	bool ValidButton(int button) const { return button >= 0 && button <= myPad.numButtons; }
@@ -340,8 +329,6 @@ class PadDevice
 		const bool ok = SendSensor(idx);
 		if (!ok)
 			cur = old;
-		else if (old.button != cur.button)
-			myChanges |= DCF_BUTTON_MAPPING;
 		return ok;
 	}
 
@@ -356,7 +343,9 @@ class PadDevice
 		mySensors[sensor.index].releaseThreshold = ToNormalizedSensorValue(ReadU16LE(sensor.releaseThreshold));
 		mySensors[sensor.index].resistorValue = sensor.resistorValue;
 		mySensors[sensor.index].flags = ReadU16LE(sensor.flags);
-		mySensors[sensor.index].button = (sensor.buttonMapping >= myPad.numButtons ? 0 : (sensor.buttonMapping + 1));
+		// Negative (0xFF is the firmware's "unmapped") or past the last button: unmapped.
+		const int mapping = sensor.buttonMapping;
+		mySensors[sensor.index].button = mapping < 0 || mapping >= myPad.numButtons ? 0 : mapping + 1;
 	}
 
 	bool SendSensor(int sensorIndex)
@@ -486,16 +475,18 @@ class PadDevice
 	// True while the last save attempt failed (it is retried every 2s).
 	bool SaveFailed() const { return mySaveFailed; }
 
-	// Stays unsaved on failure, so the next poll (2s later) retries.
-	void SaveChanges()
+	// Stays unsaved on failure, so the next poll (2s later) retries. True if
+	// nothing is left unsaved.
+	bool SaveChanges()
 	{
 		if (!myHasUnsavedChanges)
-			return;
+			return true;
 		mySaveFailed = !myReporter->SendSaveConfiguration();
 		if (mySaveFailed)
 			myLastPendingChange = std::chrono::steady_clock::now();
 		else
 			myHasUnsavedChanges = false;
+		return !mySaveFailed;
 	}
 
 	const DevicePath& Path() const { return myPath; }

@@ -13,6 +13,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <optional>
+#include <set>
 
 #include "hidapi.h"
 #include <fmt/format.h>
@@ -107,9 +108,11 @@ class DeviceConnection
 	// it in its destructor), so there is no handle to close here.
 	~DeviceConnection() = default;
 
+	// Opens the pad and reads its name and identification (kept for stage 2).
 	bool Probe()
 	{
 		std::this_thread::sleep_for(std::chrono::milliseconds(5));
+		stage2Failures = 0;
 
 		hid_device* handle = hid_open_path(path.c_str());
 		if (!handle)
@@ -132,13 +135,12 @@ class DeviceConnection
 
 		// IdentificationV2 exists from firmware v1.3 on; older firmware is not
 		// supported (it fails here, and is retried with a backoff).
-		NameReport nameReport;
-		IdentificationV2Report identificationReport;
-		if (!reporter->Get(nameReport) || !reporter->Get(identificationReport))
+		if (!reporter->Get(name) || !reporter->Get(identification))
 		{
 			SetFailed();
 			return false;
 		}
+		ClampIdentification(identification);
 
 		state = CS_PROBED;
 		return true;
@@ -149,6 +151,25 @@ class DeviceConnection
 	shared_ptr<Reporter> GetReporter() { return reporter; }
 
 	ConnectionState GetState() { return state; }
+
+	const NameReport& Name() const { return name; }
+	const IdentificationV2Report& Identification() const { return identification; }
+
+	void SetConnected()
+	{
+		state = CS_CONNECTED;
+		failures = 0;
+	}
+
+	// Stage 2 (reading every slot) failed. It is retried on the next discovery
+	// pass (~1s) instead of sleeping on the device thread, which would stall
+	// polling of every pad; after 3 tries the pad goes into the failed backoff.
+	void Stage2Failed()
+	{
+		std::printf("DeviceConnection :: ConnectStage2 failed (%d)\n", stage2Failures);
+		if (++stage2Failures >= 3)
+			SetFailed();
+	}
 
 	// Closes the handle (unless a PadDevice still shares it) and remembers when,
 	// so discovery can retry after a backoff.
@@ -174,13 +195,14 @@ class DeviceConnection
 		return std::min(std::chrono::seconds(5) * (1 << std::min(failures - 1, 6)), std::chrono::seconds(300));
 	}
 
-	bool ConnectStage2();
-
   protected:
 	ConnectionState state = CS_UNKNOWN;
 	std::chrono::steady_clock::time_point failedAt;
-	int failures = 0; // consecutive, reset on a successful connect
+	int failures = 0;       // consecutive, reset on a successful connect
+	int stage2Failures = 0; // since the last probe
 	std::string path;
+	NameReport name;
+	IdentificationV2Report identification;
 
 	// Shared with the PadDevice created from this connection.
 	shared_ptr<Reporter> reporter;
@@ -236,6 +258,7 @@ class ConnectionManager
 			{
 				changed |= myPads.contains(it->first);
 				DropPad(it->first);
+				unsavedPaths.erase(it->first); // unplugged: its RAM, and the edits, are gone
 
 				std::printf("ConnectionManager :: device removed (%s)\n", it->first.c_str());
 				it = devices.erase(it);
@@ -245,14 +268,27 @@ class ConnectionManager
 		}
 
 		// Probe and connect every newly seen pad, and failed ones whose backoff is
-		// over; all pads are polled every tick.
+		// over, and finish probed ones whose stage 2 failed last time; all pads
+		// are polled every tick.
 		for (auto& path : devicePaths)
 		{
 			auto [it, isNew] = devices.try_emplace(path, path);
-			if (!isNew && !it->second.RetryDue())
+			DeviceConnection& con = it->second;
+			if (isNew || con.RetryDue())
+			{
+				if (!con.Probe())
+					continue;
+			}
+			else if (con.GetState() != CS_PROBED)
 				continue;
-			if (it->second.Probe())
-				changed |= it->second.ConnectStage2();
+
+			if (ConnectToDeviceStage2(con))
+			{
+				con.SetConnected();
+				changed = true;
+			}
+			else
+				con.Stage2Failed();
 		}
 
 		return changed;
@@ -262,14 +298,13 @@ class ConnectionManager
 	{
 		shared_ptr<Reporter> reporter = deviceCon.GetReporter();
 		string devicePath = deviceCon.GetPath();
+		if (reporter == nullptr)
+			return false;
 
 		// Firmware before v1.3 has no IdentificationV2 report, so Probe() already
 		// refused it: everything below assumes the v1.3+ reports.
-		NameReport name;
-		IdentificationV2Report identification;
-		if (reporter == nullptr || !reporter->Get(name) || !reporter->Get(identification))
-			return false;
-		ClampIdentification(identification);
+		const NameReport& name = deviceCon.Name();
+		const IdentificationV2Report& identification = deviceCon.Identification();
 
 		// Reads every slot of one kind: select slot i, then get it.
 		auto readSlots = [&](SetPropertyReport::Ids select, int count, auto& report, auto&& keep) {
@@ -320,6 +355,10 @@ class ConnectionManager
 		            pad.numSensors, pad.numButtons, fmt::format("{:b}", ReadU16LE(identification.features)).c_str(),
 		            devicePath.c_str());
 
+		// Back after a failed read that left edits in the pad's RAM unsaved.
+		if (unsavedPaths.erase(devicePath))
+			device->NotifyUnsavedChanges();
+
 		myPads[devicePath] = std::move(device);
 		return true;
 	}
@@ -330,8 +369,13 @@ class ConnectionManager
 		myPads[path] = std::move(pad);
 	}
 
+	// A HID read failed. The pad may only have hiccupped and keep its RAM, so
+	// unsaved edits are saved now if it still answers, else remembered and
+	// saved once it reconnects (unless it is unplugged meanwhile).
 	void DisconnectFailedDevice(const string& path)
 	{
+		if (PadDevice* pad = Find(path); pad && !pad->SaveChanges())
+			unsavedPaths.insert(path);
 		if (devices.contains(path))
 			devices.at(path).SetFailed();
 		DropPad(path);
@@ -341,6 +385,7 @@ class ConnectionManager
 
   private:
 	map<DevicePath, DeviceConnection> devices;
+	std::set<DevicePath> unsavedPaths;
 
 	map<DevicePath, unique_ptr<PadDevice>> myPads;
 };
@@ -376,31 +421,6 @@ static constexpr DeviceProfileGroups PROFILE_GROUPS = (DeviceProfileGroups)(DPG_
 // is a single pointer swap/copy, so contention is negligible.
 static std::mutex gSnapshotMutex;
 static std::shared_ptr<const std::vector<SensorSnapshot>> gSnapshots;
-
-bool DeviceConnection::ConnectStage2()
-{
-	if (!connectionManager)
-		return false;
-
-	if (state == CS_FAILED)
-		return false;
-
-	for (int tries = 0; tries < 3; ++tries)
-	{
-		if (connectionManager->ConnectToDeviceStage2(*this))
-		{
-			state = CS_CONNECTED;
-			failures = 0;
-			return true;
-		}
-
-		std::printf("DeviceConnection :: ConnectStage2 failed (%d)\n", tries);
-		std::this_thread::sleep_for(std::chrono::milliseconds(100));
-	}
-
-	SetFailed();
-	return false;
-}
 
 void Device::Init()
 {
@@ -463,7 +483,6 @@ void Device::PublishSnapshot()
 	{
 		SensorSnapshot snapshot;
 		const PadState& pad = device->State();
-		snapshot.connected = true;
 		snapshot.path = device->Path();
 		snapshot.name = pad.name;
 		snapshot.pollingRate = device->PollingRate();
@@ -837,9 +856,53 @@ static ClientReply OpResult(const OpContext& ctx, bool ok, const std::string& er
 	return {{{"msgType", 8}, {"op", ctx.op}, {"pad", ctx.pad}, {"ok", ok}, {"error", error}, {"name", name}}, true};
 }
 
-static std::vector<ClientReply> HandleClientMessageImpl(const std::string& message, OpContext& ctx);
+static std::vector<ClientReply> HandleClientMessageImpl(const json& j, OpContext& ctx);
 
 std::vector<ClientReply> Device::HandleClientMessage(const std::string& message)
+{
+	return HandleParsedMessage(json::parse(message, nullptr, false));
+}
+
+bool Device::IsConfigure(const json& j)
+{
+	return j.is_object() && HasString(j, "pad") && OpNameOf(j) == "configure";
+}
+
+bool Device::MergeConfigure(json& into, const json& next)
+{
+	const bool intoSensors = into.contains("sensors"), nextSensors = next.contains("sensors");
+	if (intoSensors && nextSensors)
+	{
+		json& a = into["sensors"];
+		const json& b = next["sensors"];
+		// Different lengths: at least one is refused as a whole, so keep both.
+		if (!a.is_array() || !b.is_array() || a.size() != b.size())
+			return false;
+		for (size_t i = 0; i < a.size(); ++i)
+		{
+			if (a[i].is_object() && b[i].is_object())
+				a[i].update(b[i]);
+			else if (b[i].is_object())
+				a[i] = b[i];
+		}
+	}
+	for (const auto& [key, value] : next.items())
+		if (key != "sensors" || !intoSensors)
+			into[key] = value; // lights arrays configure every slot, so the later wins
+	return true;
+}
+
+std::vector<ClientReply> Device::Refuse(const json& j, const std::string& error)
+{
+	OpContext ctx;
+	if (!j.is_object() || (ctx.op = OpNameOf(j)).empty())
+		return {};
+	if (HasString(j, "pad"))
+		ctx.pad = j["pad"];
+	return {OpResult(ctx, false, error)};
+}
+
+std::vector<ClientReply> Device::HandleParsedMessage(const json& message)
 {
 	// Directory iteration throws on I/O errors (permissions, a dir removed
 	// mid-walk), and json throws on a client field of an unexpected type;
@@ -860,7 +923,7 @@ std::vector<ClientReply> Device::HandleClientMessage(const std::string& message)
 	}
 }
 
-static std::vector<ClientReply> HandleClientMessageImpl(const std::string& message, OpContext& ctx)
+static std::vector<ClientReply> HandleClientMessageImpl(const json& j, OpContext& ctx)
 {
 	// Runs on the device-I/O thread, so any device mutation triggered here is
 	// single-threaded and safe. Parsing is fully defensive: a malformed or
@@ -868,14 +931,9 @@ static std::vector<ClientReply> HandleClientMessageImpl(const std::string& messa
 	// replies: a profile list for the asker, or for everyone after a change,
 	// and a result (msgType 8) for the asker after every op.
 	std::vector<ClientReply> replies;
-	json j;
-	try
+	if (j.is_discarded())
 	{
-		j = json::parse(message);
-	}
-	catch (const std::exception& e)
-	{
-		std::printf("HandleClientMessage :: invalid JSON ignored (%s)\n", e.what());
+		std::printf("HandleClientMessage :: invalid JSON ignored\n");
 		return replies;
 	}
 
@@ -1128,7 +1186,7 @@ static std::vector<ClientReply> HandleClientMessageImpl(const std::string& messa
 		return replies;
 	}
 
-	std::printf("HandleClientMessage :: unhandled message: %s\n", message.c_str());
+	std::printf("HandleClientMessage :: unhandled message: %s\n", j.dump().c_str());
 	return replies;
 }
 

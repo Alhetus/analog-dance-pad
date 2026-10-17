@@ -300,3 +300,53 @@ TEST_CASE("SaveChanges keeps the change unsaved when the save fails", "[paddevic
 	CHECK_FALSE(pad.HasUnsavedChanges());
 	CHECK_FALSE(pad.SaveFailed());
 }
+
+TEST_CASE("PadDevice treats any negative button mapping as unmapped", "[paddevice]")
+{
+	RecordingBackend* raw = nullptr;
+	auto rep = makeReporter(raw);
+	PadDevice pad(rep, "t", makeName("x"), makeIdent(1, 3, 8, 2), {}, {},
+	              {makeSensor(0, 425, -5), makeSensor(1, 425, -1)});
+	CHECK(pad.Sensor(0)->button == 0);
+	CHECK(pad.Sensor(1)->button == 0);
+	// Still editable (a negative button used to make every edit fail).
+	CHECK(SetThreshold(pad, 0, 0.6, 0.3));
+}
+
+TEST_CASE("PadDevice treats an unknown release mode as per-sensor", "[paddevice]")
+{
+	for (const uint32_t reported : {0u, 1u, 2u, 7u})
+	{
+		RecordingBackend* raw = nullptr;
+		auto rep = makeReporter(raw);
+		SetPropertyReport mode;
+		mode.propertyId = WriteU32LE(SetPropertyReport::SPID_RELEASE_MODE);
+		mode.propertyValue = WriteU32LE(reported);
+		raw->QueueGet(mode);
+		PadDevice pad(rep, "t", makeName("x"), makeIdent(1, 3, 8, 1), {}, {}, {makeSensor(0, 425, 0)});
+		CHECK(pad.State().releaseMode == (reported == 0 ? RELEASE_NONE : RELEASE_INDIVIDUAL));
+	}
+}
+
+TEST_CASE("The release threshold never goes below the noise floor", "[paddevice]")
+{
+	RecordingBackend* raw = nullptr;
+	auto rep = makeReporter(raw);
+	PadDevice pad(rep, "t", makeName("x"), makeIdent(1, 3, 8, 1), {}, {}, {makeSensor(0, 425, 0)});
+	REQUIRE(pad.SetReleaseMode(RELEASE_INDIVIDUAL));
+
+	CHECK(SetThreshold(pad, 0, 0.5, 0.0));
+	CHECK(ToDeviceSensorValue(pad.Sensor(0)->releaseThreshold) == ToDeviceSensorValue(MIN_RELEASE_THRESHOLD));
+	// A threshold below the floor takes the release down with it, never above.
+	CHECK(SetThreshold(pad, 0, 0.005, 0.0));
+	CHECK(pad.Sensor(0)->releaseThreshold <= pad.Sensor(0)->threshold);
+}
+
+TEST_CASE("A pad name that isn't UTF-8 still serializes", "[paddevice]")
+{
+	RecordingBackend* raw = nullptr;
+	auto rep = makeReporter(raw);
+	PadDevice pad(rep, "t", makeName("\xC5sa\xFF"), makeIdent(1, 3, 8, 1), {}, {}, {makeSensor(0, 425, 0)});
+	CHECK(pad.State().name == "\xEF\xBF\xBDsa\xEF\xBF\xBD");
+	CHECK_NOTHROW(json(pad.State().name).dump());
+}

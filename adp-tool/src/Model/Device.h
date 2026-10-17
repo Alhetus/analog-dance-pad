@@ -20,7 +20,6 @@ class PadDevice;
 enum DeviceChangeFlags
 {
 	DCF_DEVICE = 1 << 0,
-	DCF_BUTTON_MAPPING = 1 << 1,
 	DCF_NAME = 1 << 2,
 	DCF_LIGHTS = 1 << 3
 };
@@ -97,11 +96,10 @@ struct LightsState
 
 // An immutable, self-contained copy of everything the WebSocket clients need to
 // see about one connected pad. Built on the device-I/O thread each
-// tick and published via an atomic shared_ptr, so readers never touch live
-// device state (no locks, no torn reads, no TOCTOU null-deref).
+// tick and published as a shared_ptr swapped under a short mutex, so readers
+// never touch live device state (no torn reads, no TOCTOU null-deref).
 struct SensorSnapshot
 {
-	bool connected = false;
 	std::string path; // HID path: how clients address this pad in messages
 	std::string name;
 	int pollingRate = 0;
@@ -123,7 +121,6 @@ struct VersionType
 struct PadState
 {
 	std::string name;
-	int maxNameLength = 0;
 	int numButtons = 0;
 	int numSensors = 0;
 	std::string boardType; // e.g. "avr_fsrio1", as the firmware reports it
@@ -182,6 +179,22 @@ class Device
 	// device-I/O thread so device access stays single-threaded. Returns the
 	// replies to send.
 	static std::vector<ClientReply> HandleClientMessage(const std::string& message);
+
+	// The same for an already parsed message (a discarded value is invalid JSON).
+	static std::vector<ClientReply> HandleParsedMessage(const json& message);
+
+	// True for a sensor/lights edit ({pad, sensors|lightRules|ledMappings}).
+	static bool IsConfigure(const json& message);
+
+	// Folds configure message `next` into `into` (both IsConfigure, same pad),
+	// as if both were applied in order: per sensor the later fields win, and a
+	// later lights array replaces the earlier one. False (nothing changed) if
+	// they can't be folded: sensor arrays of different lengths.
+	static bool MergeConfigure(json& into, const json& next);
+
+	// The failure answer (msgType 8) to an op that was not handled, or nothing
+	// if the message isn't an answered op.
+	static std::vector<ClientReply> Refuse(const json& message, const std::string& error);
 
 	// Serializes each pad's server-owned selection (msgType 5): current player
 	// and profile plus recent players, keyed by pad path.

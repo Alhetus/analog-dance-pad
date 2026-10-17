@@ -26,6 +26,13 @@ void ModulePad::UpdateStatus()
         sensorValues[i] = HAL_ADC_ReadSensor(i);
     }
 
+    // Every mapped sensor's own state (for the lights), before the button loop
+    // below stops at the first sensor that holds a button.
+    for (int j = 0; j < SENSOR_COUNT; j++) {
+        const SensorConfig& s = ModuleConfigInstance.GetSensorConfig(j);
+        sensorStates[j] = s.buttonMapping >= 0 && s.buttonMapping < BUTTON_COUNT && sensorValues[j] > s.threshold;
+    }
+
     for (int i = 0; i < BUTTON_COUNT; i++) {
         bool newButtonPressedState = false;
 
@@ -36,7 +43,6 @@ void ModulePad::UpdateStatus()
             }
 
             uint16_t sensorVal = sensorValues[j];
-            sensorStates[j] = sensorVal > s.threshold;
 
             if (buttonsPressed[i]) {
                 if (sensorVal > s.releaseThreshold) {

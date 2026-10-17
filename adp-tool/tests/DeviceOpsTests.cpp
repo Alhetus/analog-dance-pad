@@ -247,3 +247,58 @@ TEST_CASE("Snapshots say when edits aren't saved to the pad yet", "[deviceops]")
 	CHECK(j["unsaved"] == true);
 	CHECK(j["saveFailed"] == false);
 }
+
+TEST_CASE("A pad dropped after a failed read saves its unsaved edits first", "[deviceops]")
+{
+	Server server;
+	// Built here so the backend outlives the dropped pad.
+	RecordingBackend* raw = nullptr;
+	const auto rep = makeReporter(raw);
+	Device::AddPadForTest(std::make_unique<PadDevice>(rep, "p1", makeName("Cab1 P1"), makeIdent(1, 3, 8, 1),
+	                                                  std::vector<LightRuleReport>{}, std::vector<LedMappingReport>{},
+	                                                  std::vector<SensorReport>{makeSensor(0, 425, 0)}));
+	REQUIRE(Server::Send({{"pad", "p1"}, {"releaseMode", 0}})["ok"] == true); // now unsaved
+	raw->sent.clear();
+	raw->QueueReadCount(-1); // the next poll's HID read fails
+
+	Device::Update();
+
+	REQUIRE_FALSE(raw->sent.empty());
+	CHECK(raw->sent.back()[0] == REPORT_SAVE_CONFIGURATION);
+	CHECK(Server::Send({{"pad", "p1"}, {"releaseMode", 0}})["error"] == "pad not connected");
+}
+
+TEST_CASE("Queued sensor edits of one pad fold into one", "[deviceops]")
+{
+	json a = {{"pad", "p1"}, {"sensors", {{{"threshold", 0.5}}, json::object()}}};
+	const json b = {
+	    {"pad", "p1"}, {"sensors", {{{"releaseThreshold", 0.2}}, {{"threshold", 0.3}}}}, {"lightRules", json::array()}};
+	REQUIRE(Device::IsConfigure(a));
+	REQUIRE(Device::IsConfigure(b));
+	REQUIRE(Device::MergeConfigure(a, b));
+	CHECK(a["sensors"][0] == json{{"threshold", 0.5}, {"releaseThreshold", 0.2}});
+	CHECK(a["sensors"][1] == json{{"threshold", 0.3}});
+	CHECK(a["lightRules"] == json::array());
+
+	// Arrays of different lengths can't be folded; neither is changed.
+	json c = {{"pad", "p1"}, {"sensors", {json::object()}}};
+	CHECK_FALSE(Device::MergeConfigure(c, b));
+	CHECK(c["sensors"].size() == 1);
+
+	CHECK_FALSE(Device::IsConfigure({{"sensors", json::array()}}));                    // no pad
+	CHECK_FALSE(Device::IsConfigure({{"pad", "p1"}, {"releaseMode", 0}}));             // another op
+	CHECK_FALSE(Device::IsConfigure(json::parse("not json", nullptr, false)));         // invalid
+	CHECK_FALSE(Device::IsConfigure({{"pad", "p1"}, {"name", "x"}, {"sensors", {}}})); // a rename
+}
+
+TEST_CASE("A refused op is answered, anything else is not", "[deviceops]")
+{
+	const auto replies = Device::Refuse({{"pad", "p1"}, {"loadProfile", json::object()}}, "busy");
+	REQUIRE(replies.size() == 1);
+	CHECK(replies[0].message["op"] == "loadProfile");
+	CHECK(replies[0].message["pad"] == "p1");
+	CHECK(replies[0].message["ok"] == false);
+	CHECK(replies[0].message["error"] == "busy");
+	CHECK(Device::Refuse({{"rescanPlayers", true}}, "busy").empty());
+	CHECK(Device::Refuse(json::parse("{", nullptr, false), "busy").empty());
+}

@@ -2,6 +2,7 @@
 
 #include "stdint.h"
 #include "hidapi.h"
+#include <chrono>
 #include <memory>
 
 // Potentially defined by WinSock2.h
@@ -21,6 +22,9 @@ constexpr int MAX_SENSOR_VALUE = 850;
 constexpr int MAX_LIGHT_RULES = 16;
 constexpr int MAX_LED_MAPPINGS = 16;
 constexpr int BOARD_TYPE_LENGTH = 32;
+// Lowest release threshold written to a pad (normalized), ~10 device counts:
+// above the ADC noise of a sensor at rest. Tune it if a quiet pad wants lower.
+constexpr double MIN_RELEASE_THRESHOLD = 10.0 / MAX_SENSOR_VALUE;
 
 constexpr size_t MAX_REPORT_SIZE = 512;
 
@@ -215,6 +219,15 @@ class Reporter
 	template <typename T> ReadDataResult ReadData(T& report, const char* name, int expectedSize);
 
 	bool WriteData(uint8_t reportId, const char* name);
+
+	// The controller needs a moment after one feature report before the next
+	// (a send, or a get after a send). Instead of sleeping that long before
+	// every send, wait only for what is left of it since the last transfer.
+	// Tune it if a board needs longer.
+	static constexpr auto FEATURE_REPORT_GAP = std::chrono::milliseconds(2);
+	std::chrono::steady_clock::time_point readyAt{};
+	void WaitReady();
+	void MarkBusy();
 };
 
 } // namespace adp

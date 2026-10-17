@@ -66,6 +66,11 @@ class WebsocketServer
 	// the socket still open) is skipped instead of buffering without bound.
 	void SendSnapshot(const std::string& pad, const std::string& message);
 
+	// True (and cleared) if a client connected or changed its subscription
+	// since the last call, so snapshots are resent now rather than at the next
+	// heartbeat. Thread-safe.
+	bool TakeSnapshotResend();
+
 	// Requests shutdown, unblocking Init(). Thread-safe, idempotent, and safe
 	// to call before Init() has published the server.
 	void Stop();
@@ -81,6 +86,7 @@ class WebsocketServer
 	bool stopRequested = false;
 	std::unique_ptr<ix::WebSocketServer> server;
 	std::atomic<bool> failed{false};
+	std::atomic<bool> snapshotResend{false};
 
 	// Latest Publish()ed messages, replayed to each new client. Held across
 	// the broadcast so a new client never receives an older copy after a newer one.

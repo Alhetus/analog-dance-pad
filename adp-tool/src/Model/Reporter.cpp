@@ -29,6 +29,7 @@ template <typename T> bool Reporter::GetFeatureReport(T& report, const char* nam
 #endif
 
 	int bytesRead = backend->get_feature_report(buffer, sizeof(buffer));
+	MarkBusy();
 	if (bytesRead >= 0 && (size_t)bytesRead == (size_t)expectedSize)
 	{
 		memcpy(&report, buffer, size);
@@ -44,12 +45,9 @@ template <typename T> bool Reporter::GetFeatureReport(T& report, const char* nam
 
 template <typename T> bool Reporter::SendFeatureReport(const T& report, const char* name)
 {
-	using namespace std::chrono_literals;
-
-	// Wait for the controller to get into a ready state
-	std::this_thread::sleep_for(2ms);
-
+	WaitReady();
 	int bytesWritten = backend->send_feature_report((const unsigned char*)&report, sizeof(T));
+	MarkBusy();
 	// Successes are not logged: slider drags send dozens of these a second.
 	if (bytesWritten == sizeof(T))
 		return true;
@@ -83,6 +81,16 @@ template <typename T> ReadDataResult Reporter::ReadData(T& report, const char* n
 
 	memcpy(&report, buffer, expectedSize);
 	return ReadDataResult::SUCCESS;
+}
+
+void Reporter::WaitReady()
+{
+	std::this_thread::sleep_until(readyAt);
+}
+
+void Reporter::MarkBusy()
+{
+	readyAt = std::chrono::steady_clock::now() + FEATURE_REPORT_GAP;
 }
 
 bool Reporter::WriteData(uint8_t reportId, const char* name)
@@ -216,9 +224,7 @@ bool Reporter::SendAndGet(NameReport& report)
 	if (!Send(report))
 		return false;
 
-	// Wait for the controller to get into a ready state
-	std::this_thread::sleep_for(2ms);
-
+	WaitReady();
 	if (!Get(report))
 		return false;
 
@@ -230,9 +236,7 @@ bool Reporter::SendAndGet(SetPropertyReport& report)
 	if (!Send(report))
 		return false;
 
-	// Wait for the controller to get into a ready state
-	std::this_thread::sleep_for(2ms);
-
+	WaitReady();
 	if (!Get(report))
 		return false;
 

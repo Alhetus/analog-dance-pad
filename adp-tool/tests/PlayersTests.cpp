@@ -2,6 +2,7 @@
 
 #include <filesystem>
 #include <fstream>
+#include <thread>
 
 #include <Model/Players.h>
 #include <Model/Profiles.h>
@@ -45,6 +46,8 @@ TEST_CASE("ParseDisplayName reads Editable.ini", "[players]")
 	CHECK(Players::ParseDisplayName("\xEF\xBB\xBF[Editable]\nDisplayName= " + kAsa + " \n") == kAsa);
 	CHECK(Players::ParseDisplayName("[Editable]\nDisplayName=\n") == "");
 	CHECK(Players::ParseDisplayName("[Editable]\nLastUsedHighScoreName=X\n") == "");
+	// A Latin-1 file edited by hand: still a name json can serialize.
+	CHECK(Players::ParseDisplayName("DisplayName=\xC5sa\n") == "\xEF\xBF\xBDsa");
 }
 
 TEST_CASE("AvatarMime matches avatar.<ext> in any case", "[players]")
@@ -205,4 +208,28 @@ TEST_CASE("Profiles store under a UTF-8 player dir", "[profiles]")
 	REQUIRE(Profiles::Write(dir, "a", {{"id", "a"}}));
 	CHECK(Profiles::List(dir).size() == 1);
 	CHECK(Profiles::PathU8(dir.parent_path().filename()) == kAsa);
+}
+
+TEST_CASE("Recounts don't hold back the next full scan", "[players]")
+{
+	TempDir local("adp-players-starve-local"), store("adp-players-starve-store");
+	WriteFile(local.path / "00000001" / "Editable.ini", "DisplayName=Mike\n");
+
+	const auto waitFor = [](const char* name, bool recount) {
+		const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+		while (std::chrono::steady_clock::now() < until && !Players::Has(name))
+		{
+			if (recount)
+				Players::RequestRecount(); // a profile op, faster than the scan interval
+			std::this_thread::sleep_for(std::chrono::milliseconds(100));
+		}
+		return Players::Has(name);
+	};
+
+	Players::Start(local.path, store.path, std::chrono::seconds(1));
+	CHECK(waitFor("Mike", false));
+	WriteFile(local.path / "00000002" / "Editable.ini", "DisplayName=Anna\n");
+	CHECK(waitFor("Anna", true));
+	Players::Stop();
+	Players::SetForTest({});
 }

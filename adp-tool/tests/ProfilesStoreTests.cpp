@@ -117,3 +117,17 @@ TEST_CASE("A profile's id is its filename, whatever the file says", "[profiles]"
 		CHECK((listed["id"] == "real" || listed["id"] == "noid"));
 	CHECK(Profiles::List(dir.path).size() == 2);
 }
+
+TEST_CASE("ValidUtf8 keeps UTF-8 and replaces anything else", "[profiles]")
+{
+	const std::string bad = "\xEF\xBF\xBD";
+	CHECK(Profiles::ValidUtf8("") == "");
+	CHECK(Profiles::ValidUtf8("Cab1 P1") == "Cab1 P1");
+	CHECK(Profiles::ValidUtf8("\xC3\x85sa \xF0\x9F\x95\xBA") == "\xC3\x85sa \xF0\x9F\x95\xBA"); // Åsa 🕺
+	CHECK(Profiles::ValidUtf8("\xC5sa") == bad + "sa");                                         // Latin-1 Å
+	CHECK(Profiles::ValidUtf8("a\xC3") == "a" + bad);                                           // truncated
+	CHECK(Profiles::ValidUtf8("\xC0\xAF") == bad + bad);                                        // overlong '/'
+	CHECK(Profiles::ValidUtf8("\xED\xA0\x80") == bad + bad + bad);                              // surrogate
+	CHECK(Profiles::ValidUtf8("\xF4\x90\x80\x80") == bad + bad + bad + bad);                    // past U+10FFFF
+	CHECK_NOTHROW(json(Profiles::ValidUtf8("\xFF\xFE")).dump());
+}

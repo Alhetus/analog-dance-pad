@@ -120,6 +120,52 @@ std::string UnescapeName(const std::string& escaped)
 	return out;
 }
 
+std::string ValidUtf8(const std::string& s)
+{
+	std::string out;
+	for (size_t i = 0; i < s.size();)
+	{
+		const unsigned char c = (unsigned char)s[i];
+		// Sequence length and the allowed range of its second byte (which rules
+		// out overlongs, surrogates and code points past U+10FFFF).
+		size_t n = 0;
+		unsigned char lo = 0x80, hi = 0xBF;
+		if (c < 0x80)
+			n = 1;
+		else if (c >= 0xC2 && c <= 0xDF)
+			n = 2;
+		else if (c >= 0xE0 && c <= 0xEF)
+		{
+			n = 3;
+			lo = c == 0xE0 ? 0xA0 : 0x80;
+			hi = c == 0xED ? 0x9F : 0xBF;
+		}
+		else if (c >= 0xF0 && c <= 0xF4)
+		{
+			n = 4;
+			lo = c == 0xF0 ? 0x90 : 0x80;
+			hi = c == 0xF4 ? 0x8F : 0xBF;
+		}
+		bool ok = n > 0 && i + n <= s.size();
+		for (size_t k = 1; ok && k < n; ++k)
+		{
+			const unsigned char b = (unsigned char)s[i + k];
+			ok = k == 1 ? (b >= lo && b <= hi) : (b >= 0x80 && b <= 0xBF);
+		}
+		if (ok)
+		{
+			out.append(s, i, n);
+			i += n;
+		}
+		else
+		{
+			out += "\xEF\xBF\xBD";
+			++i;
+		}
+	}
+	return out;
+}
+
 Path PlayerPadDir(const Path& profilesDir, const std::string& player, const std::string& pad)
 {
 	return profilesDir / "players" / U8Path(EscapeName(player)) / U8Path(EscapeName(pad));

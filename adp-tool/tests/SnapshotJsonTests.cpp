@@ -8,7 +8,6 @@ using namespace adp;
 TEST_CASE("SnapshotToJson emits the WebSocket contract fields", "[snapshot]")
 {
 	SensorSnapshot snap;
-	snap.connected = true;
 	snap.path = "hid#1";
 	snap.name = "MyPad";
 	snap.pollingRate = 1000;

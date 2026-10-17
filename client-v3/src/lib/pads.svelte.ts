@@ -155,9 +155,11 @@ const SEND_THROTTLE_MS = 40;
 // An optimistic edit the pad hasn't echoed back by then was refused or clamped
 // by the server; drop it so the UI shows the pad's real value again.
 const PENDING_TTL_MS = 1000;
-const STALE_MS = 1000;
+const STALE_MS = 1000; // no snapshot for this long while open => pad considered gone
 /** The adp-tool protocol this client speaks (WebsocketServer.h PROTOCOL_VERSION). */
-const PROTOCOL_VERSION = 1; // no snapshot for this long while open => pad considered gone
+const PROTOCOL_VERSION = 1;
+/** Lowest release threshold the server stores (Reporter.h MIN_RELEASE_THRESHOLD). */
+const MIN_RELEASE = 10 / 850;
 const MAX_BACKOFF_MS = 5000;
 const NOTICE_MS = 4000;
 
@@ -608,11 +610,13 @@ class PadsStore {
 				return true;
 		}
 		// Lights arrive in their own (gated) message; only compare once we've got
-		// them, so we don't flag drift before the first lights message lands.
+		// them, so we don't flag drift before the first lights message lands. A
+		// profile without lights (saved on a pad that has none) leaves them as
+		// they were when loaded, so there is nothing to compare.
 		const lights = this.pad && snap.featureLights ? this.conn?.lights[this.pad] : undefined;
 		if (lights) {
-			if (canon(p.lightRules ?? []) !== canon(lights.lightRules)) return true;
-			if (canon(p.ledMappings ?? []) !== canon(lights.ledMappings)) return true;
+			if (p.lightRules && canon(p.lightRules) !== canon(lights.lightRules)) return true;
+			if (p.ledMappings && canon(p.ledMappings) !== canon(lights.ledMappings)) return true;
 		}
 		return false;
 	}
@@ -728,8 +732,11 @@ class PadsStore {
 		// Release can never exceed the press threshold (hysteresis would break); the
 		// server enforces this too. Cap against the most current threshold we have.
 		const s = this.activeSnapshot?.sensors[sensorIndex];
+		// Nor go below the server's floor (a release near 0 can leave a button stuck).
 		const cap = this.pending[sensorIndex]?.threshold ?? s?.threshold ?? 1;
-		this.#patch(sensorIndex, { releaseThreshold: clamp01(Math.min(value, cap)) });
+		this.#patch(sensorIndex, {
+			releaseThreshold: clamp01(Math.min(Math.max(value, MIN_RELEASE), cap))
+		});
 	}
 
 	/** Set the raw digipot gain byte (0..255). */

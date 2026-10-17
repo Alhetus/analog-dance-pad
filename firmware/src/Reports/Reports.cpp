@@ -51,8 +51,8 @@ bool WriteReport(const uint8_t reqReportID, uint8_t* ReportData, uint16_t* const
     }
 
     if(ReportID >= 18) {
-        return false;
         ModuleDebugInstance.Write("Write ReportID >= 18\n");
+        return false;
     }
 
     if(registrations[ReportID].Write == nullptr) {
