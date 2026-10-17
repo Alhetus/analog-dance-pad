@@ -1,3 +1,4 @@
+#include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
 #include <filesystem>
@@ -44,16 +45,17 @@ struct Server
 	}
 
 	// Adds a pad named `name` at HID path `path`; `raw` is its fake backend.
-	RecordingBackend* AddPad(const std::string& path, const char* name, int sensors = 2)
+	RecordingBackend* AddPad(const std::string& path, const char* name, int sensors = 2,
+	                         int maxSensorValue = TEST_MAX_SENSOR_VALUE)
 	{
 		RecordingBackend* raw = nullptr;
 		auto rep = makeReporter(raw);
 		std::vector<SensorReport> reports;
 		for (int i = 0; i < sensors; ++i)
 			reports.push_back(makeSensor(i, 425, i));
-		Device::AddPadForTest(std::make_unique<PadDevice>(rep, path.c_str(), makeName(name),
-		                                                  makeIdent(1, 3, 8, sensors), std::vector<LightRuleReport>{},
-		                                                  std::vector<LedMappingReport>{}, reports));
+		Device::AddPadForTest(std::make_unique<PadDevice>(
+		    rep, path.c_str(), makeName(name), makeIdent(1, 3, 8, sensors, 0, maxSensorValue),
+		    std::vector<LightRuleReport>{}, std::vector<LedMappingReport>{}, reports));
 		raw->sent.clear();
 		return raw;
 	}
@@ -301,4 +303,35 @@ TEST_CASE("A refused op is answered, anything else is not", "[deviceops]")
 	CHECK(replies[0].message["error"] == "busy");
 	CHECK(Device::Refuse({{"rescanPlayers", true}}, "busy").empty());
 	CHECK(Device::Refuse(json::parse("{", nullptr, false), "busy").empty());
+}
+
+TEST_CASE("A message asking for two ops is refused, not half applied", "[deviceops]")
+{
+	Server server;
+	RecordingBackend* raw = server.AddPad("p1", "Cab1 P1");
+	// Used to become a rename that silently dropped the sensors.
+	const json r = Server::Send(
+	    {{"pad", "p1"}, {"name", "Other"}, {"sensors", json::array({{{"threshold", 0.9}}, json::object()})}});
+	CHECK(r["ok"] == false);
+	CHECK(raw->sent.empty());
+}
+
+TEST_CASE("Op results echo the client's requestId", "[deviceops]")
+{
+	Server server;
+	server.AddPad("p1", "Cab1 P1");
+	CHECK(Server::Send({{"pad", "p1"}, {"releaseMode", 0}, {"requestId", 7}})["requestId"] == 7);
+	CHECK_FALSE(Server::Send({{"pad", "p1"}, {"releaseMode", 0}}).contains("requestId"));
+	CHECK(Device::Refuse({{"pad", "p1"}, {"releaseMode", 0}, {"requestId", "a"}}, "busy")[0].message["requestId"] ==
+	      "a");
+}
+
+TEST_CASE("The device list carries each pad's firmware and sensor scale", "[deviceops]")
+{
+	Server server;
+	server.AddPad("p1", "Cab1 P1", 2, 1024);
+	json list;
+	Device::DeviceListToJson(list);
+	CHECK(list["devices"][0]["maxSensorValue"] == 1024);
+	CHECK(list["devices"][0]["firmware"] == "1.3");
 }

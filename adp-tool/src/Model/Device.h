@@ -20,8 +20,8 @@ class PadDevice;
 enum DeviceChangeFlags
 {
 	DCF_DEVICE = 1 << 0,
-	DCF_NAME = 1 << 2,
-	DCF_LIGHTS = 1 << 3
+	DCF_NAME = 1 << 1,
+	DCF_LIGHTS = 1 << 2
 };
 
 typedef int32_t DeviceChanges;
@@ -34,7 +34,7 @@ enum DeviceProfileGroupFlags
 	DPG_LIGHTS = 1 << 3,
 	DPG_GAIN = 1 << 4, // per-sensor digipot gain (resistorValue), split out of DPG_MAPPING
 
-	DGP_ALL = 0b1111111111111111
+	DPG_ALL = 0b1111111111111111
 };
 
 typedef int32_t DeviceProfileGroups;
@@ -63,7 +63,9 @@ struct SensorState
 	bool pressed = false;
 	int flags = 0; // SensorReport flags (e.g. ADC_DISABLED): device-owned, written back unchanged
 
-	SensorReport ToReport(int index);
+	// `max`: the pad's sensor scale (SensorScale).
+	SensorReport ToReport(int index, int max) const;
+	bool operator==(const SensorState&) const = default;
 };
 
 struct LedMapping
@@ -105,11 +107,14 @@ struct SensorSnapshot
 	int pollingRate = 0;
 	int releaseMode = 0;
 	int numButtons = 0;
+	int maxSensorValue = DEFAULT_MAX_SENSOR_VALUE; // the scale values are normalized against
 	bool featureDigipot = false;
 	bool featureLights = false;
 	bool unsaved = false;    // edits not yet in the pad's EEPROM (saved ~2s after the last one)
 	bool saveFailed = false; // the last save attempt failed; retried every 2s
 	std::vector<SensorState> sensors;
+
+	bool operator==(const SensorSnapshot&) const = default;
 };
 
 struct VersionType
@@ -123,7 +128,9 @@ struct PadState
 	std::string name;
 	int numButtons = 0;
 	int numSensors = 0;
-	std::string boardType; // e.g. "avr_fsrio1", as the firmware reports it
+	int ledCount = 0;
+	int maxSensorValue = DEFAULT_MAX_SENSOR_VALUE; // SensorScale of the reported value
+	std::string boardType;                         // e.g. "avr_fsrio1", as the firmware reports it
 	bool featureDigipot = false;
 	bool featureLights = false;
 	VersionType firmwareVersion;
@@ -189,7 +196,8 @@ class Device
 	// Folds configure message `next` into `into` (both IsConfigure, same pad),
 	// as if both were applied in order: per sensor the later fields win, and a
 	// later lights array replaces the earlier one. False (nothing changed) if
-	// they can't be folded: sensor arrays of different lengths.
+	// they can't be folded: sensor arrays of different lengths. The folded
+	// message is answered once, under the later one's requestId.
 	static bool MergeConfigure(json& into, const json& next);
 
 	// The failure answer (msgType 8) to an op that was not handled, or nothing

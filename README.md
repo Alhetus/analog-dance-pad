@@ -98,6 +98,8 @@ journalctl --user -u adp-server -f   # logs
 
 - `iocharset=utf8` keeps names like "Åsa" intact; `uid`/`gid` must be the cab user.
 - Back up `~/.local/share/adp-tool/profiles` if the profiles matter: it is the only copy.
+- Player and pad names that differ only in case ("Bob"/"BOB") share one
+  profile directory on case-insensitive filesystems (Windows, macOS).
 - If `ufw` is enabled: `sudo ufw allow 8008/tcp` so phones/tablets can connect.
 - While the share is unmounted everything keeps working with the last known
   player list, and it refreshes automatically within a few seconds of the share

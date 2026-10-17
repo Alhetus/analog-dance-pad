@@ -43,7 +43,7 @@ TEST_CASE("LoadProfile applies sensor thresholds, buttons and name", "[profile]"
 	j["sensors"].push_back(s1);
 	j["name"] = "NewName";
 
-	pad.LoadProfile(j, DGP_ALL);
+	pad.LoadProfile(j, DPG_ALL);
 
 	CHECK(pad.Sensor(0)->threshold == Approx(0.5));
 	CHECK(pad.Sensor(0)->button == 3);
@@ -279,6 +279,22 @@ TEST_CASE("LoadProfile refuses malformed lights without sending any", "[profile]
 	{
 		bad = nullptr;
 	}
+	SECTION("a sensor the pad doesn't have")
+	{
+		bad["sensorIndex"] = 1;
+	}
+	SECTION("LEDs past the pad's last")
+	{
+		bad["ledIndexEnd"] = 17;
+	}
+	SECTION("a reversed LED range")
+	{
+		bad["ledIndexBegin"] = 5;
+	}
+	SECTION("a rule slot past the last")
+	{
+		bad["lightRuleIndex"] = MAX_LIGHT_RULES;
+	}
 	json j;
 	j["ledMappings"] = bad.is_null() ? json(std::vector<json>(MAX_LED_MAPPINGS + 1, good)) : json::array({good, bad});
 	CHECK_FALSE(pad.LoadProfile(j, DPG_LIGHTS));
@@ -298,7 +314,7 @@ TEST_CASE("A pad can't be renamed to an empty name", "[profile]")
 	CHECK_FALSE(pad.SendName(""));
 	CHECK_FALSE(pad.SendName("  "));
 	json j = {{"name", ""}};
-	pad.LoadProfile(j, DGP_ALL);
+	pad.LoadProfile(j, DPG_ALL);
 
 	CHECK(pad.State().name == "Left");
 	CHECK(raw->sent.empty());

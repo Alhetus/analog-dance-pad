@@ -4,6 +4,7 @@
 #include <format>
 #include <iostream>
 #include <map>
+#include <set>
 #include <string>
 #include <thread>
 #include "Adp.h"
@@ -12,6 +13,7 @@
 #include "WebsocketServer.h"
 #include "Model/Device.h"
 #include "Model/Players.h"
+#include "Model/Profiles.h"
 
 namespace adp
 {
@@ -37,6 +39,7 @@ void Application::UpdateLoop(MSGQ<QueueMessage>& queue, WebsocketServer& websock
 
 	// Inbound messages taken off the queue but not handled yet.
 	std::deque<Inbound> backlog;
+	std::map<std::string, Clock::time_point> lastConfigure; // per pad
 
 	while (running.load())
 	{
@@ -45,7 +48,7 @@ void Application::UpdateLoop(MSGQ<QueueMessage>& queue, WebsocketServer& websock
 		// logged, not fatal: the other pads and clients keep being served.
 		try
 		{
-			RunTick(queue, websocketServer, playersVersion, lastSnapshot, backlog);
+			RunTick(queue, websocketServer, playersVersion, lastSnapshot, backlog, lastConfigure);
 		}
 		catch (const std::exception& e)
 		{
@@ -61,8 +64,38 @@ void Application::UpdateLoop(MSGQ<QueueMessage>& queue, WebsocketServer& websock
 	std::cout << "Application update loop stopped" << std::endl;
 }
 
+// The pad a message is for, or "".
+static std::string PadOf(const nlohmann::json& m)
+{
+	return m.is_object() && m.contains("pad") && m["pad"].is_string() ? m["pad"].get<std::string>() : "";
+}
+
+size_t Application::NextDue(const std::deque<Inbound>& backlog,
+                            const std::map<std::string, Clock::time_point>& lastConfigure, Clock::time_point now)
+{
+	std::set<std::string> held; // pads with an earlier message still waiting
+	for (size_t i = 0; i < backlog.size(); ++i)
+	{
+		const std::string pad = PadOf(backlog[i].message);
+		if (pad.empty())
+			return i;
+		if (held.contains(pad))
+			continue;
+		const auto last = lastConfigure.find(pad);
+		if (Device::IsConfigure(backlog[i].message) && last != lastConfigure.end() &&
+		    now - last->second < CONFIGURE_INTERVAL)
+		{
+			held.insert(pad);
+			continue;
+		}
+		return i;
+	}
+	return std::string::npos;
+}
+
 void Application::RunTick(MSGQ<QueueMessage>& queue, WebsocketServer& websocketServer, uint64_t& playersVersion,
-                          std::map<std::string, Sent>& lastSnapshot, std::deque<Inbound>& backlog)
+                          std::map<std::string, Sent>& lastSnapshot, std::deque<Inbound>& backlog,
+                          std::map<std::string, Clock::time_point>& lastConfigure)
 {
 	// An unchanged snapshot is skipped, but still resent at least this often:
 	// clients treat a pad silent for 1s as gone.
@@ -84,14 +117,21 @@ void Application::RunTick(MSGQ<QueueMessage>& queue, WebsocketServer& websocketS
 		const auto now = std::chrono::steady_clock::now();
 		for (const auto& snapshot : *snapshots)
 		{
+			Sent& last = lastSnapshot[snapshot.path];
+			const bool heartbeatDue = now - last.at >= snapshotHeartbeat;
+			if (!heartbeatDue && snapshot == last.snapshot)
+				continue;
 			json sensorJson;
 			Device::SnapshotToJson(snapshot, sensorJson);
-			std::string message = sensorJson.dump();
-			Sent& last = lastSnapshot[snapshot.path];
-			if (message == last.json && now - last.at < snapshotHeartbeat)
+			std::string message = Profiles::Dump(sensorJson);
+			// Raw averages differ more often than their quantized JSON does.
+			if (!heartbeatDue && message == last.json)
+			{
+				last.snapshot = snapshot;
 				continue;
+			}
 			websocketServer.SendSnapshot(snapshot.path, message);
-			last = {std::move(message), now};
+			last = {std::move(message), now, snapshot};
 		}
 		// Forget pads that are gone (a replug gets a fresh path).
 		std::erase_if(lastSnapshot, [&](const auto& entry) {
@@ -110,7 +150,7 @@ void Application::RunTick(MSGQ<QueueMessage>& queue, WebsocketServer& websocketS
 		json deviceListJson, padStatesJson;
 		Device::DeviceListToJson(deviceListJson);
 		Device::PadStatesToJson(padStatesJson);
-		websocketServer.Publish("pads", {deviceListJson.dump(), padStatesJson.dump()});
+		websocketServer.Publish("pads", {Profiles::Dump(deviceListJson), Profiles::Dump(padStatesJson)});
 	}
 
 	// Player list (msgType 3): after every completed background scan (every
@@ -118,7 +158,7 @@ void Application::RunTick(MSGQ<QueueMessage>& queue, WebsocketServer& websocketS
 	if (const auto version = Players::Version(); version != playersVersion)
 	{
 		playersVersion = version;
-		websocketServer.Publish("players", {Players::ToJson(*Players::Get()).dump()});
+		websocketServer.Publish("players", {Profiles::Dump(Players::ToJson(*Players::Get()))});
 	}
 
 	// Lights (msgType 4), one message per pad, ~1KB each.
@@ -146,7 +186,7 @@ void Application::RunTick(MSGQ<QueueMessage>& queue, WebsocketServer& websocketS
 		{
 			std::printf("UpdateLoop :: backlog full, message from %s dropped\n", item->sender.c_str());
 			for (const auto& reply : Device::Refuse(j, "the server is busy, try again"))
-				websocketServer.SendTo(item->sender, reply.message.dump());
+				websocketServer.SendTo(item->sender, Profiles::Dump(reply.message));
 			continue;
 		}
 		backlog.push_back({std::move(item->sender), std::move(j)});
@@ -156,21 +196,28 @@ void Application::RunTick(MSGQ<QueueMessage>& queue, WebsocketServer& websocketS
 	// single-threaded. Applying one can take several HID round-trips, so stop
 	// after a time budget and leave the rest for the next tick: polling and
 	// snapshots keep their cadence even when several clients drag sliders.
-	const auto drainUntil = std::chrono::steady_clock::now() + std::chrono::milliseconds(8);
-	while (!backlog.empty())
+	// ponytail: a message is never split, so a profile load with lights (up to
+	// ~45 reports, ~150ms) still overruns the budget; queue its HID writes per
+	// pad and drain them across ticks if that ever shows.
+	const auto drainUntil = Clock::now() + std::chrono::milliseconds(8);
+	for (size_t i; (i = NextDue(backlog, lastConfigure, Clock::now())) != std::string::npos;)
 	{
-		const Inbound in = std::move(backlog.front());
-		backlog.pop_front();
+		const Inbound in = std::move(backlog[i]);
+		backlog.erase(backlog.begin() + (std::ptrdiff_t)i);
+		if (Device::IsConfigure(in.message))
+			lastConfigure[PadOf(in.message)] = Clock::now();
 		for (const auto& reply : Device::HandleParsedMessage(in.message))
 		{
 			if (reply.toSender)
-				websocketServer.SendTo(in.sender, reply.message.dump());
+				websocketServer.SendTo(in.sender, Profiles::Dump(reply.message));
 			else
-				websocketServer.SendMessageToClients(reply.message.dump());
+				websocketServer.SendMessageToClients(Profiles::Dump(reply.message));
 		}
-		if (std::chrono::steady_clock::now() >= drainUntil)
+		if (Clock::now() >= drainUntil)
 			break;
 	}
+	std::erase_if(lastConfigure,
+	              [](const auto& entry) { return Clock::now() - entry.second > std::chrono::seconds(1); });
 }
 
 void Application::OnInit()

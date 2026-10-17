@@ -5,6 +5,8 @@
 
 #include <Model/Wire.h>
 
+#include "support/PadFixture.h"
+
 using namespace adp;
 
 TEST_CASE("little-endian 16-bit round-trips", "[wire]")
@@ -34,25 +36,25 @@ TEST_CASE("little-endian 32-bit round-trips", "[wire]")
 
 TEST_CASE("sensor value normalization clamps to [0,1]", "[wire]")
 {
-	CHECK(ToNormalizedSensorValue(0) == 0.0);
-	CHECK(ToNormalizedSensorValue(MAX_SENSOR_VALUE) == Catch::Approx(1.0));
+	CHECK(ToNormalizedSensorValue(0, TEST_MAX_SENSOR_VALUE) == 0.0);
+	CHECK(ToNormalizedSensorValue(TEST_MAX_SENSOR_VALUE, TEST_MAX_SENSOR_VALUE) == Catch::Approx(1.0));
 	// Out-of-range inputs are clamped, never negative or > 1.
-	CHECK(ToNormalizedSensorValue(-100) == 0.0);
-	CHECK(ToNormalizedSensorValue(MAX_SENSOR_VALUE * 2) == 1.0);
+	CHECK(ToNormalizedSensorValue(-100, TEST_MAX_SENSOR_VALUE) == 0.0);
+	CHECK(ToNormalizedSensorValue(TEST_MAX_SENSOR_VALUE * 2, TEST_MAX_SENSOR_VALUE) == 1.0);
 	// Never exceeds the [0,1] bounds regardless of input.
-	CHECK(ToNormalizedSensorValue(MAX_SENSOR_VALUE) <= 1.0);
+	CHECK(ToNormalizedSensorValue(TEST_MAX_SENSOR_VALUE, TEST_MAX_SENSOR_VALUE) <= 1.0);
 }
 
 TEST_CASE("device sensor value mapping clamps to [0,MAX]", "[wire]")
 {
-	CHECK(ToDeviceSensorValue(0.0) == 0);
-	CHECK(ToDeviceSensorValue(1.0) == MAX_SENSOR_VALUE);
-	CHECK(ToDeviceSensorValue(-1.0) == 0);
-	CHECK(ToDeviceSensorValue(2.0) == MAX_SENSOR_VALUE);
+	CHECK(ToDeviceSensorValue(0.0, TEST_MAX_SENSOR_VALUE) == 0);
+	CHECK(ToDeviceSensorValue(1.0, TEST_MAX_SENSOR_VALUE) == TEST_MAX_SENSOR_VALUE);
+	CHECK(ToDeviceSensorValue(-1.0, TEST_MAX_SENSOR_VALUE) == 0);
+	CHECK(ToDeviceSensorValue(2.0, TEST_MAX_SENSOR_VALUE) == TEST_MAX_SENSOR_VALUE);
 	// Values lround can't represent (from a hostile client) are clamped first.
-	CHECK(ToDeviceSensorValue(1e300) == MAX_SENSOR_VALUE);
-	CHECK(ToDeviceSensorValue(-1e300) == 0);
-	CHECK(ToDeviceSensorValue(std::nan("")) == 0);
+	CHECK(ToDeviceSensorValue(1e300, TEST_MAX_SENSOR_VALUE) == TEST_MAX_SENSOR_VALUE);
+	CHECK(ToDeviceSensorValue(-1e300, TEST_MAX_SENSOR_VALUE) == 0);
+	CHECK(ToDeviceSensorValue(std::nan(""), TEST_MAX_SENSOR_VALUE) == 0);
 }
 
 TEST_CASE("raw little-endian bytes decode with the right weights", "[wire]")
@@ -74,5 +76,5 @@ TEST_CASE("WriteU16LE truncates to the low 16 bits", "[wire]")
 TEST_CASE("ToDeviceSensorValue rounds half away from zero", "[wire]")
 {
 	// 0.25 * 850 == 212.5, which lround pushes up to 213.
-	CHECK(ToDeviceSensorValue(0.25) == 213);
+	CHECK(ToDeviceSensorValue(0.25, TEST_MAX_SENSOR_VALUE) == 213);
 }

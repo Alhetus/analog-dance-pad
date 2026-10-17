@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -67,7 +68,11 @@ std::string Base64(const std::string& bytes);
 // One full scan: reads LocalProfiles, follows renames, counts stored profiles.
 // An unreachable LocalProfiles falls back to `previous.players`.
 // May throw std::filesystem::filesystem_error if the share drops mid-scan.
-PlayerList Scan(const Path& localProfilesDir, const Path& profilesDir, const PlayerList& previous = {});
+// With `hold`, the store lock taken for the renames is handed over in it
+// instead of released, so the caller can publish the renamed list before any
+// profile op sees the old names gone (an op on an old name would recreate its dir).
+PlayerList Scan(const Path& localProfilesDir, const Path& profilesDir, const PlayerList& previous = {},
+                std::unique_lock<std::mutex>* hold = nullptr);
 
 // msgType 3 for clients.
 json ToJson(const PlayerList& list);
@@ -82,7 +87,7 @@ void RequestRescan();
 void RequestRecount();
 
 // `previous` with every player's profile counts read again from `profilesDir`.
-PlayerList Recount(const Path& profilesDir, const PlayerList& previous);
+PlayerList Recount(const Path& profilesDir, const PlayerList& previous, std::unique_lock<std::mutex>* hold = nullptr);
 
 // Renames followed since the last call, for the pad selections to follow
 // too. Thread-safe.

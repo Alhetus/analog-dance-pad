@@ -43,6 +43,7 @@ export interface Snapshot {
 	pollingRate: number;
 	releaseMode: number; // 0 none, 2 per-sensor (1 = legacy global, treated as per-sensor)
 	numButtons: number; // mappable buttons this pad exposes
+	maxSensorValue: number; // device counts that 1.0 stands for
 	featureDigipot: boolean; // pad supports per-sensor gain
 	featureLights: boolean; // pad has configurable lights
 	unsaved: boolean; // edits not yet in the pad's EEPROM (saved ~2s after the last one)
@@ -61,6 +62,8 @@ export interface DeviceInfo {
 	id: string; // HID path
 	name: string; // stable identity: profiles are stored per pad name
 	sensorCount: number;
+	firmware?: string; // e.g. "2.1"
+	maxSensorValue: number; // device counts that 1.0 stands for
 }
 
 /** A player from the shared LocalProfiles folder (msgType 3). */
@@ -146,7 +149,7 @@ export type Step = 'server' | 'pad' | 'player' | 'profile' | 'tune';
 export const MAX_PROFILES = 5; // per player per pad, enforced by the server too
 
 // Reconcile tolerance for float thresholds. Must sit between the device's
-// quantization noise (thresholds are stored /850 ~= 0.0012) and the smallest
+// quantization noise (thresholds are stored /maxSensorValue <= 0.0012) and the smallest
 // deliberate edit (the +/- fine-tune buttons nudge by 1% = 0.01). If EPS were
 // >= that step, reconcile() would treat the pre-update snapshot as already
 // converged and delete a single-percent nudge before the device applied it.
@@ -155,11 +158,13 @@ const SEND_THROTTLE_MS = 40;
 // An optimistic edit the pad hasn't echoed back by then was refused or clamped
 // by the server; drop it so the UI shows the pad's real value again.
 const PENDING_TTL_MS = 1000;
-const STALE_MS = 1000; // no snapshot for this long while open => pad considered gone
+// No snapshot for this long while open => pad considered gone. Above the up to
+// ~1s an EEPROM save on one pad can hold up the server's polling of all pads.
+const STALE_MS = 2000;
 /** The adp-tool protocol this client speaks (WebsocketServer.h PROTOCOL_VERSION). */
 const PROTOCOL_VERSION = 1;
-/** Lowest release threshold the server stores (Reporter.h MIN_RELEASE_THRESHOLD). */
-const MIN_RELEASE = 10 / 850;
+/** Lowest release threshold the server stores, in device counts (Reporter.h MIN_RELEASE_COUNTS). */
+const MIN_RELEASE_COUNTS = 10;
 const MAX_BACKOFF_MS = 5000;
 const NOTICE_MS = 4000;
 
@@ -734,8 +739,9 @@ class PadsStore {
 		const s = this.activeSnapshot?.sensors[sensorIndex];
 		// Nor go below the server's floor (a release near 0 can leave a button stuck).
 		const cap = this.pending[sensorIndex]?.threshold ?? s?.threshold ?? 1;
+		const minRelease = MIN_RELEASE_COUNTS / (this.activeSnapshot?.maxSensorValue ?? 1024);
 		this.#patch(sensorIndex, {
-			releaseThreshold: clamp01(Math.min(Math.max(value, MIN_RELEASE), cap))
+			releaseThreshold: clamp01(Math.min(Math.max(value, minRelease), cap))
 		});
 	}
 

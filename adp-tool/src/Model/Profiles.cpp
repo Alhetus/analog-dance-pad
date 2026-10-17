@@ -218,6 +218,13 @@ json List(const Path& dir)
 			continue;
 		}
 	}
+	// Directory order differs between platforms and filesystems.
+	const auto savedAt = [](const json& p) {
+		return p.contains("savedAt") && p["savedAt"].is_number() ? p["savedAt"].get<double>() : 0.0;
+	};
+	std::sort(arr.begin(), arr.end(), [&](const json& a, const json& b) {
+		return std::pair(savedAt(a), a["id"].get<std::string>()) < std::pair(savedAt(b), b["id"].get<std::string>());
+	});
 	return arr;
 }
 
@@ -369,8 +376,8 @@ json Sanitize(const json& profile)
 
 	// One entry per sensor (a short array would load only partly), and no
 	// more slots than a pad has, so nothing unbounded reaches the disk.
-	const int sensorCount = profile["sensorCount"].get<int>();
-	if (sensorCount < 0 || sensorCount > SENSOR_COUNT_MAX || (int)profile["sensors"].size() != sensorCount)
+	const int64_t sensorCount = profile["sensorCount"].get<int64_t>();
+	if (sensorCount < 0 || sensorCount > SENSOR_COUNT_MAX || (int64_t)profile["sensors"].size() != sensorCount)
 		return nullptr;
 
 	json out = json::object();

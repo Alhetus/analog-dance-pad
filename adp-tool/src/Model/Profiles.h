@@ -46,6 +46,14 @@ std::string UnescapeName(const std::string& escaped);
 // refuses to serialize invalid UTF-8 (it throws), so they pass through this.
 std::string ValidUtf8(const std::string& s);
 
+// json::dump() that replaces invalid UTF-8 with U+FFFD instead of throwing, for
+// everything sent to clients: one odd name (a hand-made dir) must not stop a
+// message from going out.
+inline std::string Dump(const json& j)
+{
+	return j.dump(-1, ' ', false, json::error_handler_t::replace);
+}
+
 // <profilesDir>/players/<esc(player)>/<esc(pad)>
 Path PlayerPadDir(const Path& profilesDir, const std::string& player, const std::string& pad);
 
@@ -58,8 +66,9 @@ std::string SlugifyId(const std::string& name);
 // True if <dir>/<id>.json exists (false for an invalid id).
 bool Exists(const Path& dir, const std::string& id);
 
-// Every stored profile as a JSON array (unparseable files are skipped). Each
-// profile's "id" is its filename stem, whatever the file itself says.
+// Every stored profile as a JSON array (unparseable files are skipped), oldest
+// first (by savedAt, then id). Each profile's "id" is its filename stem,
+// whatever the file itself says.
 json List(const Path& dir);
 
 // Reads one JSON file into `out`; false if missing, invalid id, or bad JSON.

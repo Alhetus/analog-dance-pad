@@ -180,16 +180,16 @@ static std::map<std::string, int> CountProfiles(const Path& playerDir)
 	{
 		if (!pad.is_directory(ec))
 			continue;
-		int n = 0;
-		for (const auto& f : fs::directory_iterator(pad.path(), ec))
-			n += f.path().extension() == ".json";
+		// What a profile list shows (and MAX_PER_PAD counts), not every *.json.
+		const int n = (int)Profiles::List(pad.path()).size();
 		if (n > 0)
 			counts[Profiles::UnescapeName(Profiles::PathU8(pad.path().filename()))] = n;
 	}
 	return counts;
 }
 
-PlayerList Scan(const Path& localProfilesDir, const Path& profilesDir, const PlayerList& previous)
+PlayerList Scan(const Path& localProfilesDir, const Path& profilesDir, const PlayerList& previous,
+                std::unique_lock<std::mutex>* hold)
 {
 	PlayerList list;
 	std::error_code ec;
@@ -270,10 +270,12 @@ PlayerList Scan(const Path& localProfilesDir, const Path& profilesDir, const Pla
 	if (!profilesDir.empty())
 	{
 		// Local disk only (the share was read above), so this is held briefly.
-		std::lock_guard<std::mutex> lock(Profiles::StoreMutex());
+		std::unique_lock lock(Profiles::StoreMutex());
 		list.renamed = FollowRenames(profilesDir, folderNames);
 		for (auto& [name, p] : byName)
 			p.profileCounts = CountProfiles(profilesDir / "players" / Profiles::U8Path(Profiles::EscapeName(name)));
+		if (hold)
+			*hold = std::move(lock);
 	}
 
 	for (auto& [name, p] : byName)
@@ -281,15 +283,17 @@ PlayerList Scan(const Path& localProfilesDir, const Path& profilesDir, const Pla
 	return list;
 }
 
-PlayerList Recount(const Path& profilesDir, const PlayerList& previous)
+PlayerList Recount(const Path& profilesDir, const PlayerList& previous, std::unique_lock<std::mutex>* hold)
 {
 	PlayerList list = previous;
 	list.renamed.clear();
 	if (profilesDir.empty())
 		return list;
-	std::lock_guard<std::mutex> lock(Profiles::StoreMutex());
+	std::unique_lock lock(Profiles::StoreMutex());
 	for (auto& p : list.players)
 		p.profileCounts = CountProfiles(profilesDir / "players" / Profiles::U8Path(Profiles::EscapeName(p.name)));
+	if (hold)
+		*hold = std::move(lock);
 	return list;
 }
 
@@ -341,9 +345,12 @@ void Start(const Path& localProfilesDir, const Path& profilesDir, std::chrono::s
 			const auto prev = gList;
 			lock.unlock();
 			PlayerList next;
+			// Lock order: store, then gMutex (as on the device thread).
+			std::unique_lock<std::mutex> store;
 			try
 			{
-				next = recountOnly ? Recount(profilesDir, *prev) : Scan(localProfilesDir, profilesDir, *prev);
+				next = recountOnly ? Recount(profilesDir, *prev, &store)
+				                   : Scan(localProfilesDir, profilesDir, *prev, &store);
 			}
 			catch (const std::exception& e)
 			{
@@ -366,6 +373,8 @@ void Start(const Path& localProfilesDir, const Path& profilesDir, std::chrono::s
 			if (changed)
 				gVersion++;
 			gRenames.insert(gRenames.end(), renamed.begin(), renamed.end());
+			if (store.owns_lock())
+				store.unlock();
 			gCv.wait_until(lock, nextScan, [] { return gStop || gRescan || gRecount; });
 			// A full scan recounts too, so a recount only runs alone before the
 			// next scan is due.

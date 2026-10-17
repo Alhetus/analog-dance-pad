@@ -3,6 +3,8 @@
 #include <Model/Device.h>
 #include <Model/Wire.h>
 
+#include "support/PadFixture.h"
+
 using namespace adp;
 
 TEST_CASE("SensorState::ToReport carries index, thresholds and resistor", "[sensor]")
@@ -13,11 +15,11 @@ TEST_CASE("SensorState::ToReport carries index, thresholds and resistor", "[sens
 	s.resistorValue = 42;
 	s.button = 3;
 
-	SensorReport r = s.ToReport(7);
+	SensorReport r = s.ToReport(7, TEST_MAX_SENSOR_VALUE);
 
 	CHECK(r.index == 7);
-	CHECK(ReadU16LE(r.threshold) == ToDeviceSensorValue(0.5));
-	CHECK(ReadU16LE(r.releaseThreshold) == ToDeviceSensorValue(0.25));
+	CHECK(ReadU16LE(r.threshold) == ToDeviceSensorValue(0.5, TEST_MAX_SENSOR_VALUE));
+	CHECK(ReadU16LE(r.releaseThreshold) == ToDeviceSensorValue(0.25, TEST_MAX_SENSOR_VALUE));
 	CHECK(r.resistorValue == 42);
 	// button is 1-based; the wire mapping is button-1.
 	CHECK(r.buttonMapping == 2);
@@ -28,7 +30,7 @@ TEST_CASE("SensorState::ToReport maps unmapped button (0) to 0xFF", "[sensor]")
 	SensorState s;
 	s.button = 0; // zero means unmapped.
 
-	SensorReport r = s.ToReport(0);
+	SensorReport r = s.ToReport(0, TEST_MAX_SENSOR_VALUE);
 
 	// buttonMapping is int8_t; the code writes 0xFF, which stores as -1.
 	CHECK(r.buttonMapping == -1);

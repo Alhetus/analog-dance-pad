@@ -41,21 +41,28 @@ inline uint32_le WriteU32LE(uint32_t value)
 	return u32;
 }
 
-template <typename T> inline double ToNormalizedSensorValue(T deviceValue)
+// `max` is the pad's own maxSensorValue (see SensorScale).
+template <typename T> inline double ToNormalizedSensorValue(T deviceValue, int max)
 {
-	constexpr double scalar = 1.0 / static_cast<double>(MAX_SENSOR_VALUE);
-	return std::clamp(deviceValue * scalar, 0.0, 1.0);
+	return std::clamp(deviceValue / static_cast<double>(max), 0.0, 1.0);
 }
 
-inline int ToDeviceSensorValue(double normalizedValue)
+inline int ToDeviceSensorValue(double normalizedValue, int max)
 {
 	// Clamp before rounding: lround of a huge client value (or NaN) is
 	// unspecified. !(v > 0) also catches NaN.
 	if (!(normalizedValue > 0.0))
 		return 0;
 	if (normalizedValue >= 1.0)
-		return MAX_SENSOR_VALUE;
-	return static_cast<int>(std::lround(normalizedValue * MAX_SENSOR_VALUE));
+		return max;
+	return static_cast<int>(std::lround(normalizedValue * max));
+}
+
+// The scale a pad's values are normalized against: its reported
+// maxSensorValue, or the default if that is out of range.
+inline int SensorScale(int64_t reportedMax)
+{
+	return reportedMax >= 1 && reportedMax <= MAX_REPORTED_SENSOR_VALUE ? (int)reportedMax : DEFAULT_MAX_SENSOR_VALUE;
 }
 
 } // namespace adp

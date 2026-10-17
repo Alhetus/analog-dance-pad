@@ -153,6 +153,8 @@ int main(int argc, char** argv)
 		failed = websocketServer.Failed();
 		// application's destructor runs here, saving/closing the pads (Device::Shutdown).
 	}
+	// The pads are saved: a Windows logoff/shutdown may go ahead now.
+	g_shutdownDone = true;
 
 	// Last: joining the scanner can block for a long time on a dead network
 	// share, and the pads must be saved before a supervisor gives up on us.
@@ -160,6 +162,5 @@ int main(int argc, char** argv)
 
 	// Required on Windows
 	ix::uninitNetSystem();
-	g_shutdownDone = true;
 	return failed ? 1 : 0;
 }

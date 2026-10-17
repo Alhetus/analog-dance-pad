@@ -3,11 +3,14 @@
 
 #include <Model/Device.h>
 
+#include "support/PadFixture.h"
+
 using namespace adp;
 
 TEST_CASE("SnapshotToJson emits the WebSocket contract fields", "[snapshot]")
 {
 	SensorSnapshot snap;
+	snap.maxSensorValue = TEST_MAX_SENSOR_VALUE;
 	snap.path = "hid#1";
 	snap.name = "MyPad";
 	snap.pollingRate = 1000;
@@ -88,19 +91,20 @@ TEST_CASE("SnapshotToJson emits an empty array when there are no sensors", "[sna
 TEST_CASE("SnapshotToJson quantizes values so a resting pad serializes identically", "[snapshot]")
 {
 	SensorSnapshot snap;
+	snap.maxSensorValue = TEST_MAX_SENSOR_VALUE;
 	SensorState s;
-	s.threshold = 425.0 / MAX_SENSOR_VALUE;
-	s.value = 100.2 / MAX_SENSOR_VALUE; // an average over the tick
+	s.threshold = 425.0 / TEST_MAX_SENSOR_VALUE;
+	s.value = 100.2 / TEST_MAX_SENSOR_VALUE; // an average over the tick
 	snap.sensors.push_back(s);
 	json a;
 	Device::SnapshotToJson(snap, a);
 
-	snap.sensors[0].value = 99.9 / MAX_SENSOR_VALUE; // the same device value, rounded
+	snap.sensors[0].value = 99.9 / TEST_MAX_SENSOR_VALUE; // the same device value, rounded
 	json b;
 	Device::SnapshotToJson(snap, b);
 
 	CHECK(a.dump() == b.dump());
 	CHECK(a["sensors"][0]["value"] == 0.1176); // 100/850, 4 decimals
 	// 4 decimals still map back to the exact device threshold.
-	CHECK(std::lround(a["sensors"][0]["threshold"].get<double>() * MAX_SENSOR_VALUE) == 425);
+	CHECK(std::lround(a["sensors"][0]["threshold"].get<double>() * TEST_MAX_SENSOR_VALUE) == 425);
 }

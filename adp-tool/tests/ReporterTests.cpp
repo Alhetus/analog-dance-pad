@@ -175,3 +175,20 @@ TEST_CASE("SendSaveConfiguration reports write failures", "[reporter]")
 		CHECK(rep.SendSaveConfiguration());
 	}
 }
+
+TEST_CASE("Every feature-report transfer waits out the gap after the last one", "[reporter]")
+{
+	RecordingBackend* raw = nullptr;
+	auto be = makeBackend(raw);
+	SensorReport sensor;
+	raw->QueueGet(sensor);
+	Reporter rep(std::move(be));
+
+	SetPropertyReport select;
+	REQUIRE(rep.Send(select));
+	REQUIRE(rep.Get(sensor));             // a get right after a send, as when reading a slot
+	REQUIRE(rep.SendSaveConfiguration()); // and a write
+	REQUIRE(raw->transfers.size() == 3);
+	CHECK(raw->transfers[1] - raw->transfers[0] >= std::chrono::milliseconds(2));
+	CHECK(raw->transfers[2] - raw->transfers[1] >= std::chrono::milliseconds(2));
+}

@@ -77,14 +77,14 @@ std::string RgbColor::ToString() const
 // Helper functions.
 // ====================================================================================================================
 
-SensorReport SensorState::ToReport(int index)
+SensorReport SensorState::ToReport(int index, int max) const
 {
 	SensorReport report{}; // nothing left uninitialized goes to the device
 
 	report.index = index;
 	report.flags = WriteU16LE(flags);
-	report.threshold = WriteU16LE(ToDeviceSensorValue(threshold));
-	report.releaseThreshold = WriteU16LE(ToDeviceSensorValue(releaseThreshold));
+	report.threshold = WriteU16LE(ToDeviceSensorValue(threshold, max));
+	report.releaseThreshold = WriteU16LE(ToDeviceSensorValue(releaseThreshold, max));
 	report.resistorValue = resistorValue;
 	report.buttonMapping = button == 0 ? 0xFF : (button - 1);
 
@@ -463,6 +463,15 @@ void Device::Update()
 		changes |= padChanges;
 	}
 
+	// At most one save per tick: the firmware writes its EEPROM inside the
+	// request, which can block this thread (and so every pad) for up to a second.
+	for (PadDevice* device : connectionManager->Pads())
+		if (device->SaveDue())
+		{
+			device->SaveChanges();
+			break;
+		}
+
 	FollowPlayerRenames(Players::TakeRenames());
 
 	// A lights change (or pads coming/going) means the gated messages are stale.
@@ -488,6 +497,7 @@ void Device::PublishSnapshot()
 		snapshot.pollingRate = device->PollingRate();
 		snapshot.releaseMode = (int)pad.releaseMode;
 		snapshot.numButtons = pad.numButtons;
+		snapshot.maxSensorValue = pad.maxSensorValue;
 		snapshot.featureDigipot = pad.featureDigipot;
 		snapshot.featureLights = pad.featureLights;
 		snapshot.unsaved = device->HasUnsavedChanges();
@@ -548,6 +558,7 @@ void Device::SnapshotToJson(const SensorSnapshot& snapshot, json& j)
 	j["pollingRate"] = snapshot.pollingRate;
 	j["releaseMode"] = snapshot.releaseMode;
 	j["numButtons"] = snapshot.numButtons;
+	j["maxSensorValue"] = snapshot.maxSensorValue;
 	j["featureDigipot"] = snapshot.featureDigipot;
 	j["featureLights"] = snapshot.featureLights;
 	j["unsaved"] = snapshot.unsaved;
@@ -555,11 +566,13 @@ void Device::SnapshotToJson(const SensorSnapshot& snapshot, json& j)
 	j["sensors"] = json::array();
 
 	// Values are averages over the tick, so quantize them to the device's own
-	// resolution (1/MAX_SENSOR_VALUE): a pad at rest then serializes identically
+	// resolution (1/maxSensorValue): a pad at rest then serializes identically
 	// tick to tick (letting the loop skip unchanged snapshots), and 4 decimals
-	// replace 17 digits. 4 decimals still round-trip every device value exactly.
+	// replace 17 digits. 4 decimals still round-trip every device value exactly
+	// (up to MAX_REPORTED_SENSOR_VALUE: 0.00005 * 4095 < 0.5).
 	const auto q = [](double v) { return std::round(v * 1e4) / 1e4; };
-	const auto device = [](double v) { return std::round(v * MAX_SENSOR_VALUE) / MAX_SENSOR_VALUE; };
+	const double max = snapshot.maxSensorValue;
+	const auto device = [&](double v) { return std::round(v * max) / max; };
 	for (const SensorState& s : snapshot.sensors)
 	{
 		json sensor;
@@ -591,7 +604,7 @@ std::vector<std::string> Device::LightsMessages()
 	{
 		json j;
 		LightsToJson(device->Path(), device->State().featureLights ? device->Lights() : LightsState{}, j);
-		out.push_back(j.dump());
+		out.push_back(Profiles::Dump(j));
 	}
 	return out;
 }
@@ -817,7 +830,22 @@ static std::string TooLong(const json& op)
 static constexpr const char* PROFILE_OPS[] = {"loadProfile", "saveProfile", "importProfile", "updateProfile",
                                               "deleteProfile"};
 
+// How many different ops a message asks for. More than one is refused rather
+// than one picked by priority: a configure that also carries a name must not
+// turn into a rename and silently drop its sensors.
+static int OpCount(const json& j)
+{
+	int n = 0;
+	for (const char* key : PROFILE_OPS)
+		n += j.contains(key);
+	n += j.contains("releaseMode");
+	n += j.contains("name");
+	n += j.contains("sensors") || j.contains("lightRules") || j.contains("ledMappings");
+	return n;
+}
+
 // The op a pad message asks for, as named in its result (msgType 8), or "".
+// Meaningful only if OpCount(j) == 1.
 static std::string OpNameOf(const json& j)
 {
 	for (const char* key : PROFILE_OPS)
@@ -848,12 +876,28 @@ struct OpContext
 {
 	std::string op;
 	json pad;
+	json requestId; // echoed back if the client sent one
 };
+
+// The op being answered, read from the message itself.
+static OpContext ContextOf(const json& j)
+{
+	OpContext ctx;
+	ctx.op = OpNameOf(j);
+	if (HasString(j, "pad"))
+		ctx.pad = j["pad"];
+	if (j.contains("requestId"))
+		ctx.requestId = j["requestId"];
+	return ctx;
+}
 
 // The answer to an op, for its sender (msgType 8).
 static ClientReply OpResult(const OpContext& ctx, bool ok, const std::string& error, const std::string& name = "")
 {
-	return {{{"msgType", 8}, {"op", ctx.op}, {"pad", ctx.pad}, {"ok", ok}, {"error", error}, {"name", name}}, true};
+	json result = {{"msgType", 8}, {"op", ctx.op}, {"pad", ctx.pad}, {"ok", ok}, {"error", error}, {"name", name}};
+	if (!ctx.requestId.is_null())
+		result["requestId"] = ctx.requestId;
+	return {std::move(result), true};
 }
 
 static std::vector<ClientReply> HandleClientMessageImpl(const json& j, OpContext& ctx);
@@ -865,7 +909,7 @@ std::vector<ClientReply> Device::HandleClientMessage(const std::string& message)
 
 bool Device::IsConfigure(const json& j)
 {
-	return j.is_object() && HasString(j, "pad") && OpNameOf(j) == "configure";
+	return j.is_object() && HasString(j, "pad") && OpCount(j) == 1 && OpNameOf(j) == "configure";
 }
 
 bool Device::MergeConfigure(json& into, const json& next)
@@ -894,11 +938,11 @@ bool Device::MergeConfigure(json& into, const json& next)
 
 std::vector<ClientReply> Device::Refuse(const json& j, const std::string& error)
 {
-	OpContext ctx;
-	if (!j.is_object() || (ctx.op = OpNameOf(j)).empty())
+	if (!j.is_object())
 		return {};
-	if (HasString(j, "pad"))
-		ctx.pad = j["pad"];
+	const OpContext ctx = ContextOf(j);
+	if (ctx.op.empty())
+		return {};
 	return {OpResult(ctx, false, error)};
 }
 
@@ -966,16 +1010,16 @@ static std::vector<ClientReply> HandleClientMessageImpl(const json& j, OpContext
 
 	// Everything else acts on one pad, named by its HID path in `pad`, and is
 	// answered with {msgType 8, op, pad, ok, error, name}.
-	std::string& opName = ctx.op;
-	opName = OpNameOf(j);
-	if (HasString(j, "pad"))
-		ctx.pad = j["pad"];
+	ctx = ContextOf(j);
+	const std::string& opName = ctx.op;
 	auto done = [&](bool ok, const std::string& error, const std::string& name = "") {
 		if (!ok)
 			std::printf("%s :: %s\n", opName.c_str(), error.c_str());
 		replies.push_back(OpResult(ctx, ok, error, name));
 		return replies;
 	};
+	if (OpCount(j) > 1)
+		return done(false, "the message asks for more than one op");
 
 	PadDevice* device = nullptr;
 	if (connectionManager && HasString(j, "pad"))
@@ -1181,7 +1225,7 @@ static std::vector<ClientReply> HandleClientMessageImpl(const json& j, OpContext
 	{
 		if (j.contains("sensors") && (!j["sensors"].is_array() || (int)j["sensors"].size() != numSensors))
 			return done(false, fmt::format("expected {} sensors", numSensors));
-		if (!device->LoadProfile(j, (DeviceProfileGroups)(DGP_ALL & ~DPG_DEVICE)))
+		if (!device->LoadProfile(j, (DeviceProfileGroups)(DPG_ALL & ~DPG_DEVICE)))
 			return done(false, "not every setting reached the pad");
 		return replies;
 	}
@@ -1302,6 +1346,9 @@ void Device::DeviceListToJson(json& j)
 		d["id"] = device->Path();
 		d["name"] = device->State().name;
 		d["sensorCount"] = device->State().numSensors;
+		d["firmware"] =
+		    fmt::format("{}.{}", device->State().firmwareVersion.major, device->State().firmwareVersion.minor);
+		d["maxSensorValue"] = device->State().maxSensorValue;
 		j["devices"].push_back(std::move(d));
 	}
 }
@@ -1337,6 +1384,12 @@ bool PadDevice::LoadProfile(const json& j, DeviceProfileGroups groups)
 		    (hasRules && !ParseSlots(j["lightRules"], MAX_LIGHT_RULES, rules, ParseLightRule)))
 		{
 			std::printf("LoadProfile :: malformed lights, none applied\n");
+			ok = false;
+		}
+		else if (!std::all_of(mappings.begin(), mappings.end(),
+		                      [&](const std::optional<LedMapping>& m) { return !m || ValidLedMapping(*m); }))
+		{
+			std::printf("LoadProfile :: LED mapping outside this pad's sensors, rules or LEDs, no lights applied\n");
 			ok = false;
 		}
 		else

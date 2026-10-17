@@ -253,8 +253,8 @@ TEST_CASE("PadDevice averages polled samples and derives pressed state", "[padde
 	CHECK(pad.PollSensors());
 
 	// Averaged: sensor0 = (100+300)/2 = 200, sensor1 = (200+400)/2 = 300.
-	CHECK(pad.Sensor(0)->value == Approx(200.0 / MAX_SENSOR_VALUE));
-	CHECK(pad.Sensor(1)->value == Approx(300.0 / MAX_SENSOR_VALUE));
+	CHECK(pad.Sensor(0)->value == Approx(200.0 / TEST_MAX_SENSOR_VALUE));
+	CHECK(pad.Sensor(1)->value == Approx(300.0 / TEST_MAX_SENSOR_VALUE));
 	// button 1 (bit 0) is pressed; button 2 (bit 1) is not.
 	CHECK(pad.Sensor(0)->pressed);
 	CHECK_FALSE(pad.Sensor(1)->pressed);
@@ -291,6 +291,10 @@ TEST_CASE("SaveChanges keeps the change unsaved when the save fails", "[paddevic
 	REQUIRE(pad.HasUnsavedChanges());
 
 	raw->writeReturn = -1;
+	pad.SaveChanges();
+	CHECK(pad.HasUnsavedChanges());
+	// One failure may be a big EEPROM write outlasting the HID timeout: not reported yet.
+	CHECK_FALSE(pad.SaveFailed());
 	pad.SaveChanges();
 	CHECK(pad.HasUnsavedChanges());
 	CHECK(pad.SaveFailed());
@@ -336,7 +340,8 @@ TEST_CASE("The release threshold never goes below the noise floor", "[paddevice]
 	REQUIRE(pad.SetReleaseMode(RELEASE_INDIVIDUAL));
 
 	CHECK(SetThreshold(pad, 0, 0.5, 0.0));
-	CHECK(ToDeviceSensorValue(pad.Sensor(0)->releaseThreshold) == ToDeviceSensorValue(MIN_RELEASE_THRESHOLD));
+	CHECK(ToDeviceSensorValue(pad.Sensor(0)->releaseThreshold, TEST_MAX_SENSOR_VALUE) ==
+	      ToDeviceSensorValue(pad.MinReleaseThreshold(), TEST_MAX_SENSOR_VALUE));
 	// A threshold below the floor takes the release down with it, never above.
 	CHECK(SetThreshold(pad, 0, 0.005, 0.0));
 	CHECK(pad.Sensor(0)->releaseThreshold <= pad.Sensor(0)->threshold);
@@ -349,4 +354,25 @@ TEST_CASE("A pad name that isn't UTF-8 still serializes", "[paddevice]")
 	PadDevice pad(rep, "t", makeName("\xC5sa\xFF"), makeIdent(1, 3, 8, 1), {}, {}, {makeSensor(0, 425, 0)});
 	CHECK(pad.State().name == "\xEF\xBF\xBDsa\xEF\xBF\xBD");
 	CHECK_NOTHROW(json(pad.State().name).dump());
+}
+
+TEST_CASE("A pad's values are normalized against its own maxSensorValue", "[paddevice]")
+{
+	RecordingBackend* raw = nullptr;
+	auto rep = makeReporter(raw);
+	PadDevice pad(rep, "t", makeName("x"), makeIdent(1, 3, 8, 1, 0, 1024), {}, {}, {makeSensor(0, 900, 0)});
+	CHECK(pad.State().maxSensorValue == 1024);
+	// 900 is past the 850 the server used to assume, and must not be clamped (it
+	// read as 1.0 and was written back as 850 by the next edit of any other field).
+	CHECK(pad.Sensor(0)->threshold == Approx(900.0 / 1024));
+	raw->sent.clear();
+	CHECK(SetGain(pad, 0, 5));
+	REQUIRE(raw->sent.size() == 1);
+	SensorReport sent;
+	std::memcpy(&sent, raw->sent[0].data(), sizeof(sent));
+	CHECK(ReadU16LE(sent.threshold) == 900);
+
+	// A nonsensical scale falls back to the default.
+	PadDevice bogus(rep, "t", makeName("x"), makeIdent(1, 3, 8, 1, 0, 0), {}, {}, {makeSensor(0, 425, 0)});
+	CHECK(bogus.State().maxSensorValue == DEFAULT_MAX_SENSOR_VALUE);
 }

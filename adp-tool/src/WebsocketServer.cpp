@@ -112,16 +112,18 @@ void WebsocketServer::Init(MSGQ<QueueMessage>& queue, std::string host, Websocke
 			webSocket.send(
 			    nlohmann::json{{"msgType", 0}, {"protocol", PROTOCOL_VERSION}, {"server", ADP_VERSION_STR}}.dump());
 
-			// Admit, then send the current device list, pad states, players and
-			// lights so the client doesn't wait for the next change to see them.
+			// Send the current device list, pad states, players and lights so the
+			// client doesn't wait for the next change to see them, then admit it.
+			// Admitting last keeps snapshots from arriving before the pad list;
+			// replayMutex keeps any Publish() from slipping in between.
 			std::lock_guard<std::mutex> lock(replayMutex);
+			for (const auto& [key, messages] : replay)
+				for (const auto& m : messages)
+					webSocket.send(m);
 			{
 				std::lock_guard<std::mutex> clientsLock(clientsMutex);
 				clients[&webSocket] = {connectionState->getId()};
 			}
-			for (const auto& [key, messages] : replay)
-				for (const auto& m : messages)
-					webSocket.send(m);
 			snapshotResend = true;
 		}
 		else if (msg->type == ix::WebSocketMessageType::Close)

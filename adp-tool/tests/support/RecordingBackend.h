@@ -6,6 +6,7 @@
 // logic without any real HID device.
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <deque>
@@ -22,6 +23,9 @@ class RecordingBackend : public ReporterBackend
   public:
 	// Every outgoing feature-report / write payload, in order.
 	std::vector<std::vector<uint8_t>> sent;
+
+	// When each feature-report get/send and write happened, in order.
+	std::vector<std::chrono::steady_clock::time_point> transfers;
 
 	// Canned responses served FIFO to get_feature_report()/read().
 	struct Response
@@ -55,18 +59,24 @@ class RecordingBackend : public ReporterBackend
 	// (e.g. 0 for NO_DATA, negative for a HID failure).
 	void QueueReadCount(int returnValue) { reads.push_back(Response{{}, returnValue}); }
 
-	int get_feature_report(unsigned char* data, size_t length) override { return ServeRead(data, length); }
+	int get_feature_report(unsigned char* data, size_t length) override
+	{
+		transfers.push_back(std::chrono::steady_clock::now());
+		return ServeRead(data, length);
+	}
 
 	int read(unsigned char* data, size_t length) override { return ServeRead(data, length); }
 
 	int send_feature_report(const unsigned char* data, size_t length) override
 	{
+		transfers.push_back(std::chrono::steady_clock::now());
 		sent.emplace_back(data, data + length);
 		return sendFeatureReturn.value_or((int)length);
 	}
 
 	int write(unsigned char* data, size_t length) override
 	{
+		transfers.push_back(std::chrono::steady_clock::now());
 		sent.emplace_back(data, data + length);
 		return writeReturn.value_or((int)length);
 	}

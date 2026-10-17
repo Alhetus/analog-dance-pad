@@ -85,6 +85,8 @@ class PadDevice
 
 		myPad.numButtons = identification.buttonCount;
 		myPad.numSensors = sensorCount;
+		myPad.ledCount = identification.ledCount;
+		myPad.maxSensorValue = SensorScale(ReadU16LE(identification.maxSensorValue));
 
 		// Board type is a fixed-width, not-necessarily-NUL-terminated field.
 		const char* board = identification.boardType;
@@ -233,7 +235,7 @@ class PadDevice
 				auto button = mySensors[i].button;
 				auto value = (double)aggregateValues[i] / (double)inputsRead;
 				mySensors[i].pressed = button > 0 && IsBitSet(pressedButtons, button - 1);
-				mySensors[i].value = ToNormalizedSensorValue(value);
+				mySensors[i].value = ToNormalizedSensorValue(value, myPad.maxSensorValue);
 			}
 			myPollingData.readsSinceLastUpdate += inputsRead;
 		}
@@ -247,14 +249,14 @@ class PadDevice
 			myPollingData.lastUpdate = now;
 		}
 
-		// Use the loop to save changes if needed
-		if (myHasUnsavedChanges &&
-		    std::chrono::duration_cast<std::chrono::milliseconds>(now - myLastPendingChange).count() > 2000)
-		{
-			SaveChanges();
-		}
-
 		return true;
+	}
+
+	// Edits are saved to the pad's EEPROM 2s after the last one (Device::Update
+	// saves at most one pad per tick: a save can block for up to a second).
+	bool SaveDue() const
+	{
+		return myHasUnsavedChanges && std::chrono::steady_clock::now() - myLastPendingChange > std::chrono::seconds(2);
 	}
 
 	// The releaseThreshold to store for a sensor with press threshold
@@ -268,7 +270,19 @@ class PadDevice
 		// breaks (the button would release the instant it presses). Clamp it down.
 		// Nor near 0: the pad releases only once the value drops to it, which ADC
 		// noise can keep from ever happening (a stuck button).
-		return std::clamp(requested, std::min(MIN_RELEASE_THRESHOLD, threshold), threshold);
+		return std::clamp(requested, std::min(MinReleaseThreshold(), threshold), threshold);
+	}
+
+	// MIN_RELEASE_COUNTS, normalized for this pad.
+	double MinReleaseThreshold() const { return (double)MIN_RELEASE_COUNTS / myPad.maxSensorValue; }
+
+	// True if the firmware would light this mapping: an existing sensor and rule
+	// slot and an LED range on the pad. It skips anything else silently, so such
+	// a mapping is refused instead of being shown as set.
+	bool ValidLedMapping(const LedMapping& m) const
+	{
+		return ValidSensorIndex(m.sensorIndex) && m.lightRuleIndex < MAX_LIGHT_RULES &&
+		       m.ledIndexBegin <= m.ledIndexEnd && m.ledIndexEnd <= myPad.ledCount;
 	}
 
 	bool ValidButton(int button) const { return button >= 0 && button <= myPad.numButtons; }
@@ -315,7 +329,7 @@ class PadDevice
 		want.resistorValue = std::clamp(want.resistorValue, 0, 255); // one digipot byte
 
 		SensorState& cur = mySensors[idx];
-		const auto dev = [](double v) { return ToDeviceSensorValue(v); };
+		const auto dev = [&](double v) { return ToDeviceSensorValue(v, myPad.maxSensorValue); };
 		if (dev(want.threshold) == dev(cur.threshold) && dev(want.releaseThreshold) == dev(cur.releaseThreshold) &&
 		    want.button == cur.button && want.resistorValue == cur.resistorValue)
 			return true;
@@ -339,8 +353,9 @@ class PadDevice
 			return;
 		}
 
-		mySensors[sensor.index].threshold = ToNormalizedSensorValue(ReadU16LE(sensor.threshold));
-		mySensors[sensor.index].releaseThreshold = ToNormalizedSensorValue(ReadU16LE(sensor.releaseThreshold));
+		const int max = myPad.maxSensorValue;
+		mySensors[sensor.index].threshold = ToNormalizedSensorValue(ReadU16LE(sensor.threshold), max);
+		mySensors[sensor.index].releaseThreshold = ToNormalizedSensorValue(ReadU16LE(sensor.releaseThreshold), max);
 		mySensors[sensor.index].resistorValue = sensor.resistorValue;
 		mySensors[sensor.index].flags = ReadU16LE(sensor.flags);
 		// Negative (0xFF is the firmware's "unmapped") or past the last button: unmapped.
@@ -353,7 +368,7 @@ class PadDevice
 		if (!ValidSensorIndex(sensorIndex))
 			return false;
 
-		SensorReport report = mySensors[sensorIndex].ToReport(sensorIndex);
+		SensorReport report = mySensors[sensorIndex].ToReport(sensorIndex, myPad.maxSensorValue);
 
 		bool success = myReporter->Send(report);
 
@@ -472,21 +487,26 @@ class PadDevice
 
 	bool HasUnsavedChanges() const { return myHasUnsavedChanges; }
 
-	// True while the last save attempt failed (it is retried every 2s).
-	bool SaveFailed() const { return mySaveFailed; }
+	// True while the last two save attempts failed (it is retried every 2s).
+	bool SaveFailed() const { return mySaveFailures >= 2; }
 
-	// Stays unsaved on failure, so the next poll (2s later) retries. True if
-	// nothing is left unsaved.
+	// Stays unsaved on failure, so it is retried 2s later. True if nothing is
+	// left unsaved. A single failure isn't reported: the firmware writes the
+	// EEPROM inside the request, so a big save can outlast hidapi's write
+	// timeout and still succeed; the retry then only rewrites what differs.
 	bool SaveChanges()
 	{
 		if (!myHasUnsavedChanges)
 			return true;
-		mySaveFailed = !myReporter->SendSaveConfiguration();
-		if (mySaveFailed)
+		if (!myReporter->SendSaveConfiguration())
+		{
+			++mySaveFailures;
 			myLastPendingChange = std::chrono::steady_clock::now();
-		else
-			myHasUnsavedChanges = false;
-		return !mySaveFailed;
+			return false;
+		}
+		mySaveFailures = 0;
+		myHasUnsavedChanges = false;
+		return true;
 	}
 
 	const DevicePath& Path() const { return myPath; }
@@ -532,7 +552,7 @@ class PadDevice
 	std::vector<SensorState> mySensors;
 	DeviceChanges myChanges = 0;
 	bool myHasUnsavedChanges = false;
-	bool mySaveFailed = false;
+	int mySaveFailures = 0; // consecutive
 	std::chrono::time_point<std::chrono::steady_clock> myLastPendingChange;
 	PollingData myPollingData;
 };

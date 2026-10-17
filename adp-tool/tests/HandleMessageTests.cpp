@@ -1,6 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <Model/Device.h>
+#include "Application.h"
 #include "WebsocketServer.h"
 
 using namespace adp;
@@ -65,4 +66,22 @@ TEST_CASE("AccessAllowed checks the Origin allowlist and the token", "[websocket
 	CHECK(AccessAllowed(encoded, "", "/?token=a%20b%26c%25"));
 	CHECK(AccessAllowed(encoded, "", "/?token=a+b%26c%25#frag"));
 	CHECK_FALSE(AccessAllowed(encoded, "", "/?token=a b&c%"));
+}
+
+TEST_CASE("Configure edits of one pad wait their turn without being overtaken", "[application]")
+{
+	using A = Application;
+	const auto now = A::Clock::now();
+	std::deque<A::Inbound> backlog = {
+	    {"c1", {{"pad", "p1"}, {"sensors", json::array()}}},
+	    {"c1", {{"pad", "p1"}, {"releaseMode", 0}}},
+	    {"c1", {{"pad", "p2"}, {"sensors", json::array()}}},
+	};
+	std::map<std::string, A::Clock::time_point> last;
+	CHECK(A::NextDue(backlog, last, now) == 0);
+	last["p1"] = now;
+	CHECK(A::NextDue(backlog, last, now) == 2); // p1's edit waits, and its releaseMode behind it
+	CHECK(A::NextDue(backlog, last, now + A::CONFIGURE_INTERVAL) == 0);
+	backlog.pop_back();
+	CHECK(A::NextDue(backlog, last, now) == std::string::npos);
 }

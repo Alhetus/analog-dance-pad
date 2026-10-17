@@ -18,13 +18,18 @@ namespace adp
 constexpr int SENSOR_COUNT_MAX = 32;
 constexpr int MAX_BUTTON_COUNT = 16;
 constexpr int MAX_NAME_LENGTH = 50;
-constexpr int MAX_SENSOR_VALUE = 850;
+// Sensor values are normalized (0..1) against each pad's own maxSensorValue
+// (IdentificationReport). This is what ADP firmware reports, and the fallback
+// for a pad that reports a nonsensical one.
+constexpr int DEFAULT_MAX_SENSOR_VALUE = 1024;
+// Largest maxSensorValue a pad may report (a 12-bit ADC); past it the default is used.
+constexpr int MAX_REPORTED_SENSOR_VALUE = 4095;
 constexpr int MAX_LIGHT_RULES = 16;
 constexpr int MAX_LED_MAPPINGS = 16;
 constexpr int BOARD_TYPE_LENGTH = 32;
-// Lowest release threshold written to a pad (normalized), ~10 device counts:
-// above the ADC noise of a sensor at rest. Tune it if a quiet pad wants lower.
-constexpr double MIN_RELEASE_THRESHOLD = 10.0 / MAX_SENSOR_VALUE;
+// Lowest release threshold written to a pad, in device counts: above the ADC
+// noise of a sensor at rest. Tune it if a quiet pad wants lower.
+constexpr int MIN_RELEASE_COUNTS = 10;
 
 constexpr size_t MAX_REPORT_SIZE = 512;
 
@@ -44,7 +49,6 @@ enum ReportId
 	REPORT_SENSOR = 0xC,
 	REPORT_DEBUG = 0xD,
 	REPORT_IDENTIFICATION_V2 = 0xE,
-	REPORT_SENSOR_V2 = 0x10,
 };
 
 enum class ReadDataResult

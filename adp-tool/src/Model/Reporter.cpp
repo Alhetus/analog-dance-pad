@@ -28,6 +28,7 @@ template <typename T> bool Reporter::GetFeatureReport(T& report, const char* nam
 	auto expectedSize = sizeof(T);
 #endif
 
+	WaitReady();
 	int bytesRead = backend->get_feature_report(buffer, sizeof(buffer));
 	MarkBusy();
 	if (bytesRead >= 0 && (size_t)bytesRead == (size_t)expectedSize)
@@ -98,7 +99,9 @@ bool Reporter::WriteData(uint8_t reportId, const char* name)
 	// Linux wants reports of at leats 2 bytes
 	uint8_t buf[2] = {reportId, 0};
 
+	WaitReady();
 	int bytesWritten = backend->write(buf, sizeof(buf));
+	MarkBusy();
 	if (bytesWritten > 0)
 	{
 		std::printf("%s :: done\n", name);
@@ -122,11 +125,7 @@ class BackendHid : public ReporterBackend
 		return hid_send_feature_report(myHid, data, length);
 	}
 
-	int read(unsigned char* data, size_t length)
-	{
-		return hid_read(myHid, data, length);
-		// return hid_read_timeout(myHid, data, length, 1);
-	}
+	int read(unsigned char* data, size_t length) { return hid_read(myHid, data, length); }
 
 	int write(unsigned char* data, size_t length) { return hid_write(myHid, data, length); }
 
@@ -221,26 +220,12 @@ bool Reporter::Send(const SetPropertyReport& report)
 
 bool Reporter::SendAndGet(NameReport& report)
 {
-	if (!Send(report))
-		return false;
-
-	WaitReady();
-	if (!Get(report))
-		return false;
-
-	return true;
+	return Send(report) && Get(report);
 }
 
 bool Reporter::SendAndGet(SetPropertyReport& report)
 {
-	if (!Send(report))
-		return false;
-
-	WaitReady();
-	if (!Get(report))
-		return false;
-
-	return true;
+	return Send(report) && Get(report);
 }
 
 } // namespace adp

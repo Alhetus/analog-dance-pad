@@ -169,7 +169,10 @@ TEST_CASE("Recount refreshes profile counts without reading LocalProfiles", "[pl
 	before.players.push_back({"Mike", "00000001", {}, {}});
 	REQUIRE(Profiles::Write(Profiles::PlayerPadDir(store.path, "Mike", "P1"), "a", {{"id", "a"}}));
 
-	const auto after = Players::Recount(store.path, before);
+	std::unique_lock<std::mutex> hold;
+	const auto after = Players::Recount(store.path, before, &hold);
+	CHECK(hold.owns_lock()); // handed over, so the caller publishes before any op runs
+	hold.unlock();
 	CHECK_FALSE(after.localOk);
 	REQUIRE(after.players.size() == 1);
 	CHECK(after.players[0].profileCounts.at("P1") == 1);

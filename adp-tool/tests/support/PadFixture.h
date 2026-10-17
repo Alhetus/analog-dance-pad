@@ -15,6 +15,10 @@
 namespace adp
 {
 
+// The sensor scale fake pads report by default; the tests' raw numbers (425 =
+// 0.5, 170 = 0.2...) are worked out at it.
+constexpr int TEST_MAX_SENSOR_VALUE = 850;
+
 // Wraps a fresh RecordingBackend in a real Reporter; `raw` stays valid for as
 // long as the returned Reporter lives.
 inline std::shared_ptr<Reporter> makeReporter(RecordingBackend*& raw)
@@ -33,15 +37,18 @@ inline NameReport makeName(const char* s)
 	return n;
 }
 
-inline IdentificationV2Report makeIdent(uint16_t major, uint16_t minor, int buttons, int sensors, uint16_t features = 0)
+// A pad with FEATURE_LIGHTS gets 16 LEDs. Its sensor scale defaults to
+// TEST_MAX_SENSOR_VALUE, the one the tests' numbers are worked out at.
+inline IdentificationV2Report makeIdent(uint16_t major, uint16_t minor, int buttons, int sensors, uint16_t features = 0,
+                                        int maxSensorValue = TEST_MAX_SENSOR_VALUE)
 {
 	IdentificationV2Report id;
 	id.firmwareMajor = WriteU16LE(major);
 	id.firmwareMinor = WriteU16LE(minor);
 	id.buttonCount = (uint8_t)buttons;
 	id.sensorCount = (uint8_t)sensors;
-	id.ledCount = 0;
-	id.maxSensorValue = WriteU16LE(MAX_SENSOR_VALUE);
+	id.ledCount = (features & IdentificationV2Report::FEATURE_LIGHTS) ? 16 : 0;
+	id.maxSensorValue = WriteU16LE(maxSensorValue);
 	std::memset(id.boardType, 0, BOARD_TYPE_LENGTH);
 	std::memcpy(id.boardType, "avr_fsrio1", 10);
 	id.features = WriteU16LE(features);

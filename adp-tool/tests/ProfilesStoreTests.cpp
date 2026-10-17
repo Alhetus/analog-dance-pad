@@ -131,3 +131,30 @@ TEST_CASE("ValidUtf8 keeps UTF-8 and replaces anything else", "[profiles]")
 	CHECK(Profiles::ValidUtf8("\xF4\x90\x80\x80") == bad + bad + bad + bad);                    // past U+10FFFF
 	CHECK_NOTHROW(json(Profiles::ValidUtf8("\xFF\xFE")).dump());
 }
+
+TEST_CASE("List returns profiles oldest first", "[profiles]")
+{
+	TempDir dir("adp-profiles-order");
+	REQUIRE(Profiles::Write(dir.str(), "b", {{"savedAt", 100}}));
+	REQUIRE(Profiles::Write(dir.str(), "a", {{"savedAt", 200}}));
+	REQUIRE(Profiles::Write(dir.str(), "c", {{"savedAt", 100}}));
+	const json list = Profiles::List(dir.str());
+	REQUIRE(list.size() == 3);
+	CHECK(list[0]["id"] == "b");
+	CHECK(list[1]["id"] == "c");
+	CHECK(list[2]["id"] == "a");
+}
+
+TEST_CASE("Sanitize range-checks the sensor count before narrowing it", "[profiles]")
+{
+	const json base = {{"sensorCount", 0}, {"sensors", json::array()}};
+	CHECK_FALSE(Profiles::Sanitize(base).is_null());
+	json huge = base;
+	huge["sensorCount"] = 4294967296LL; // an int would truncate it to 0
+	CHECK(Profiles::Sanitize(huge).is_null());
+}
+
+TEST_CASE("Dump replaces invalid UTF-8 instead of throwing", "[profiles]")
+{
+	CHECK(Profiles::Dump(json("a\xFF")) == "\"a\xEF\xBF\xBD\"");
+}
