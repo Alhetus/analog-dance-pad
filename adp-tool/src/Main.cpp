@@ -31,7 +31,12 @@ int main(int argc, char** argv)
 {
 	// Line-buffer the log: under systemd/journald stdout is a pipe, which is
 	// otherwise fully buffered and shows log lines late (or never, on a kill).
+#ifdef _WIN32
+	// MSVC has no line buffering (_IOLBF means full) and aborts on size 0.
+	std::setvbuf(stdout, nullptr, _IONBF, 0);
+#else
 	std::setvbuf(stdout, nullptr, _IOLBF, 0);
+#endif
 
 	// --profiles-dir <path>: root of this server's local profile store.
 	// --local-profiles-dir <path>: ITGmania's LocalProfiles folder (usually on
@@ -69,13 +74,15 @@ int main(int argc, char** argv)
 	                                     std::ref(websocketServer), std::ref(g_running));
 
 	// Start the websocket server thread.
-	std::thread websocketServerThread(&adp::WebsocketServer::Init, &websocketServer, std::ref(queue), host);
+	std::thread websocketServerThread(&adp::WebsocketServer::Init, &websocketServer, std::ref(queue), host,
+	                                  std::ref(g_running));
 
-	// The application loop exits when g_running is cleared by the signal handler.
+	// The application loop exits when g_running is cleared by the signal handler
+	// (or by the WebSocket server when it can't listen).
 	applicationThread.join();
 
-	// Tear down the websocket side: stop the server (unblocks Init's wait()) and
-	// wake any queue waiters, then join.
+	// Tear down the websocket side: stop the server (unblocks Init) and wake any
+	// queue waiters, then join.
 	std::cout << "Shutting down..." << std::endl;
 	websocketServer.Stop();
 	queue.stop();
@@ -86,5 +93,5 @@ int main(int argc, char** argv)
 
 	// Required on Windows
 	ix::uninitNetSystem();
-	return 0;
+	return websocketServer.Failed() ? 1 : 0;
 }

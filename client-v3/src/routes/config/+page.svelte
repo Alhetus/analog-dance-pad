@@ -42,8 +42,17 @@
 
 	const str = (e: Event) => (e.currentTarget as HTMLInputElement).value;
 
+	// The pad stores at most 50 UTF-8 bytes (maxlength counts UTF-16 units).
+	const MAX_NAME_BYTES = 50;
+	const utf8 = new TextEncoder();
+	function clipName(s: string) {
+		const chars = Array.from(s); // code points, so a pair is never split
+		while (utf8.encode(chars.join('')).length > MAX_NAME_BYTES) chars.pop();
+		return chars.join('');
+	}
+
 	function commitName() {
-		if (nameDraft !== null && nameDraft !== snap?.name) pads.setName(nameDraft.slice(0, 50));
+		if (nameDraft !== null && nameDraft !== snap?.name) pads.setName(clipName(nameDraft));
 		nameDraft = null;
 	}
 
@@ -106,8 +115,8 @@
 				<div class="flex flex-col gap-1.5">
 					<Label for="pad-name">Name</Label>
 					<p class="text-muted-foreground text-sm">
-						Profiles are stored per pad name and move along on rename. Keep names unique across all
-						machines.
+						Profiles are stored per pad name and move along on rename. Each pad on this machine
+						needs its own name.
 					</p>
 					<Input
 						id="pad-name"

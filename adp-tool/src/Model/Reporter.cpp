@@ -32,7 +32,6 @@ template <typename T> bool Reporter::GetFeatureReport(T& report, const char* nam
 	if (bytesRead >= 0 && (size_t)bytesRead == (size_t)expectedSize)
 	{
 		memcpy(&report, buffer, size);
-		std::printf("%s :: done\n", name);
 		return true;
 	}
 
@@ -51,11 +50,9 @@ template <typename T> bool Reporter::SendFeatureReport(const T& report, const ch
 	std::this_thread::sleep_for(2ms);
 
 	int bytesWritten = backend->send_feature_report((const unsigned char*)&report, sizeof(T));
+	// Successes are not logged: slider drags send dozens of these a second.
 	if (bytesWritten == sizeof(T))
-	{
-		std::printf("%s :: done\n", name);
 		return true;
-	}
 
 	if (bytesWritten < 0)
 		std::printf("%s :: hid_send_feature_report failed (%ls)\n", name, backend->error());

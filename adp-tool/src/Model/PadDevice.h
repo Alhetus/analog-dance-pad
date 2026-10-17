@@ -56,7 +56,7 @@ struct PollingData
 {
 	int readsSinceLastUpdate = 0;
 	int pollingRate = 0;
-	std::chrono::time_point<std::chrono::system_clock> lastUpdate;
+	std::chrono::time_point<std::chrono::steady_clock> lastUpdate;
 };
 
 class PadDevice
@@ -101,7 +101,8 @@ class PadDevice
 
 		if (myPad.firmwareVersion.IsNewer({1, 2}))
 		{
-			myPad.releaseThreshold = mySensors[0].releaseThreshold / mySensors[0].threshold;
+			if (sensorCount > 0 && mySensors[0].threshold > 0)
+				myPad.releaseThreshold = mySensors[0].releaseThreshold / mySensors[0].threshold;
 		}
 		else if (myPad.firmwareVersion.IsNewer({1, 1}))
 		{
@@ -138,7 +139,7 @@ class PadDevice
 		}
 
 		UpdateLightsConfiguration(lightRules, ledMappings);
-		myPollingData.lastUpdate = std::chrono::system_clock::now();
+		myPollingData.lastUpdate = std::chrono::steady_clock::now();
 	}
 
 	~PadDevice() = default;
@@ -252,7 +253,7 @@ class PadDevice
 			myPollingData.readsSinceLastUpdate += inputsRead;
 		}
 
-		auto now = std::chrono::system_clock::now();
+		auto now = std::chrono::steady_clock::now();
 		if (now > myPollingData.lastUpdate + std::chrono::seconds(1))
 		{
 			auto dt = std::chrono::duration<double>(now - myPollingData.lastUpdate).count();
@@ -289,14 +290,13 @@ class PadDevice
 
 	bool SetReleaseMode(ReleaseMode mode)
 	{
-		myPad.releaseMode = mode;
-
 		SetPropertyReport report;
 		report.propertyId = WriteU32LE(SetPropertyReport::SPID_RELEASE_MODE);
 		report.propertyValue = WriteU32LE((uint32_t)mode);
 
 		if (!myReporter->Send(report))
 			return false;
+		myPad.releaseMode = mode;
 
 		// None derives every sensor's release from its threshold, so switching to it
 		// must re-apply that rule immediately. Per-sensor leaves the existing values
@@ -412,7 +412,9 @@ class PadDevice
 
 	bool SetButtonMapping(int sensorIndex, int button)
 	{
-		if (!ValidSensorIndex(sensorIndex))
+		// 0 = unmapped, else 1..numButtons; anything else would be truncated into
+		// the report's int8 and shift past the 16-bit button mask in PollSensors.
+		if (!ValidSensorIndex(sensorIndex) || button < 0 || button > myPad.numButtons)
 			return false;
 
 		mySensors[sensorIndex].button = button;
@@ -570,7 +572,7 @@ class PadDevice
 	void NotifyUnsavedChanges()
 	{
 		myHasUnsavedChanges = true;
-		myLastPendingChange = std::chrono::system_clock::now();
+		myLastPendingChange = std::chrono::steady_clock::now();
 	}
 
 	bool HasUnsavedChanges() { return myHasUnsavedChanges; }
@@ -652,7 +654,7 @@ class PadDevice
 	std::vector<SensorState> mySensors;
 	DeviceChanges myChanges = 0;
 	bool myHasUnsavedChanges = false;
-	std::chrono::time_point<std::chrono::system_clock> myLastPendingChange;
+	std::chrono::time_point<std::chrono::steady_clock> myLastPendingChange;
 	PollingData myPollingData;
 };
 

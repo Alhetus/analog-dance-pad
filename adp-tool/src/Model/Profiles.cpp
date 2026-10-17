@@ -6,6 +6,13 @@
 #include <filesystem>
 #include <fstream>
 
+#ifdef _WIN32
+#include <io.h>
+#else
+#include <fcntl.h>
+#include <unistd.h>
+#endif
+
 namespace fs = std::filesystem;
 
 namespace adp::Profiles
@@ -149,6 +156,9 @@ json List(const Path& dir)
 		try
 		{
 			json profile = json::parse(in);
+			if (!profile.is_object())
+				continue;
+			profile["id"] = PathU8(p.stem());
 			arr.push_back(std::move(profile));
 		}
 		catch (const std::exception&)
@@ -178,6 +188,41 @@ bool Read(const Path& dir, const std::string& id, json& out)
 	}
 }
 
+bool ReadProfile(const Path& dir, const std::string& id, json& out)
+{
+	if (!Read(dir, id, out) || !out.is_object())
+		return false;
+	out["id"] = id;
+	return true;
+}
+
+std::mutex& StoreMutex()
+{
+	static std::mutex m;
+	return m;
+}
+
+// Writes `data` to `p` and flushes it to the disk, not just the OS cache.
+static bool WriteDurably(const fs::path& p, const std::string& data)
+{
+#ifdef _WIN32
+	FILE* f = nullptr;
+	if (_wfopen_s(&f, p.c_str(), L"wb") != 0)
+		f = nullptr;
+#else
+	FILE* f = std::fopen(p.c_str(), "wb");
+#endif
+	if (!f)
+		return false;
+	bool ok = std::fwrite(data.data(), 1, data.size(), f) == data.size() && std::fflush(f) == 0;
+#ifdef _WIN32
+	ok = ok && _commit(_fileno(f)) == 0;
+#else
+	ok = ok && fsync(fileno(f)) == 0;
+#endif
+	return std::fclose(f) == 0 && ok;
+}
+
 bool Write(const Path& dir, const std::string& id, const json& profile)
 {
 	if (!ValidId(id))
@@ -186,17 +231,14 @@ bool Write(const Path& dir, const std::string& id, const json& profile)
 	std::error_code ec;
 	fs::create_directories(dir, ec); // no-op if it already exists
 
-	// Write to a temp file, then rename over the target so a reader (possibly on
-	// another machine sharing this folder) never sees a half-written profile.
+	// Write to a synced temp file, then rename over the target, so neither a
+	// reader nor a power cut ever leaves a half-written or empty profile.
 	const fs::path finalPath = PathFor(dir, id);
 	const fs::path tmpPath = dir / (id + ".json.tmp");
+	if (!WriteDurably(tmpPath, profile.dump(2)))
 	{
-		std::ofstream out(tmpPath, std::ios::binary | std::ios::trunc);
-		if (!out)
-			return false;
-		out << profile.dump(2);
-		if (!out)
-			return false;
+		fs::remove(tmpPath, ec);
+		return false;
 	}
 	fs::rename(tmpPath, finalPath, ec);
 	if (ec)
@@ -204,6 +246,14 @@ bool Write(const Path& dir, const std::string& id, const json& profile)
 		fs::remove(tmpPath, ec);
 		return false;
 	}
+#ifndef _WIN32
+	// Persist the rename itself (the directory entry).
+	if (int fd = ::open(dir.c_str(), O_RDONLY); fd >= 0)
+	{
+		fsync(fd);
+		::close(fd);
+	}
+#endif
 	return true;
 }
 

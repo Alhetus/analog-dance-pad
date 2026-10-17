@@ -45,6 +45,7 @@ struct PlayerList
 struct Rename
 {
 	std::string from, to;
+	std::string folder; // the LocalProfiles folder whose DisplayName changed
 };
 
 // DisplayName from Editable.ini contents ("" if missing). Tolerates a UTF-8

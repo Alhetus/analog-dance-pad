@@ -122,6 +122,9 @@ export const MAX_PROFILES = 5; // per player per pad, enforced by the server too
 // converged and delete a single-percent nudge before the device applied it.
 const EPS = 0.004;
 const SEND_THROTTLE_MS = 40;
+// An optimistic edit the pad hasn't echoed back by then was refused or clamped
+// by the server; drop it so the UI shows the pad's real value again.
+const PENDING_TTL_MS = 1000;
 const STALE_MS = 1000; // no snapshot for this long while open => pad considered gone
 const MAX_BACKOFF_MS = 5000;
 
@@ -134,8 +137,10 @@ class Conn {
 	readonly name: string;
 	status: 'connecting' | 'open' | 'offline' = $state('connecting');
 	deviceList: DeviceInfo[] = $state([]);
-	snapshots: Record<string, Snapshot> = $state({});
-	snapshotAt: Record<string, number> = $state({});
+	/** Replaced (never mutated) per message: raw state skips deep-proxying 60Hz data. */
+	snapshots: Record<string, Snapshot> = $state.raw({});
+	/** Arrival time per pad; not reactive, read alongside `snapshots` and the ticking clock. */
+	snapshotAt: Record<string, number> = {};
 	lights: Record<string, Lights> = $state({});
 	players: Player[] = $state([]);
 	/** False while the server can't reach LocalProfiles; `players` is then the last known list. */
@@ -150,6 +155,8 @@ class Conn {
 	#backoff = 500;
 	#reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 	#closed = false;
+	/** Pads this client wants snapshots for: '*' (server default), a pad path, or '' for none. */
+	#subscription = '*';
 
 	constructor(server: ServerConfig) {
 		this.endpoint = server.url;
@@ -167,14 +174,17 @@ class Conn {
 			return;
 		}
 		this.#ws = ws;
+		// Events of a socket we've already replaced must not touch the new one.
 		ws.addEventListener('open', () => {
+			if (ws !== this.#ws) return;
 			this.status = 'open';
 			this.#backoff = 500;
-			this.send({ rescanPlayers: true }); // the reply brings the player list right away
+			// The server sends its current pads, players and lights on connect.
+			if (this.#subscription !== '*') this.send({ subscribe: this.#subscription });
 		});
-		ws.addEventListener('message', (ev) => this.#onMessage(ev.data));
-		ws.addEventListener('close', () => this.#onDown());
-		ws.addEventListener('error', () => this.#onDown());
+		ws.addEventListener('message', (ev) => ws === this.#ws && this.#onMessage(ev.data));
+		ws.addEventListener('close', () => ws === this.#ws && this.#onDown());
+		ws.addEventListener('error', () => ws === this.#ws && this.#onDown());
 	}
 
 	#onMessage(data: string) {
@@ -188,8 +198,8 @@ class Conn {
 		const msg = m as { msgType?: number; pad?: string };
 		if (msg.msgType === 1) {
 			const s = m as Snapshot;
-			this.snapshots[s.pad] = s;
 			this.snapshotAt[s.pad] = Date.now();
+			this.snapshots = { ...this.snapshots, [s.pad]: s };
 		} else if (msg.msgType === 2) {
 			this.deviceList = (m as { devices: DeviceInfo[] }).devices;
 		} else if (msg.msgType === 3) {
@@ -216,6 +226,7 @@ class Conn {
 		this.deviceList = [];
 		this.lights = {};
 		this.padStates = {};
+		this.avatars = {}; // requests made while down were dropped; ask again on reconnect
 		this.#scheduleReconnect();
 	}
 
@@ -226,6 +237,13 @@ class Conn {
 			this.#open();
 		}, this.#backoff);
 		this.#backoff = Math.min(this.#backoff * 2, MAX_BACKOFF_MS);
+	}
+
+	/** Which pads to stream snapshots for; resent on every reconnect. */
+	subscribe(sub: string) {
+		if (sub === this.#subscription) return;
+		this.#subscription = sub;
+		this.send({ subscribe: sub });
 	}
 
 	send(obj: unknown) {
@@ -274,6 +292,9 @@ class PadsStore {
 
 	#clock: ReturnType<typeof setInterval> | null = null;
 	#sendTimer: ReturnType<typeof setTimeout> | null = null;
+	#stopEffects: (() => void) | null = null;
+	/** When each pending sensor patch was last edited (see PENDING_TTL_MS). */
+	#pendingAt: Record<number, number> = {};
 
 	/** Call once from the browser (onMount). Safe to call more than once. */
 	start() {
@@ -290,11 +311,24 @@ class PadsStore {
 		this.now = Date.now();
 		this.#clock = setInterval(() => (this.now = Date.now()), 250);
 		this.conns = SERVERS.map((s) => new Conn(s));
+		// Stream only what's on screen: every pad of the selected server while
+		// picking one, then just the picked pad; nothing from other servers
+		// (they are only asked for profiles to copy).
+		this.#stopEffects = $effect.root(() => {
+			$effect(() => {
+				for (const c of this.conns)
+					c.subscribe(
+						c.endpoint !== this.server ? '' : this.step === 'pad' || !this.pad ? '*' : this.pad
+					);
+			});
+		});
 	}
 
 	stop() {
 		if (this.#clock) clearInterval(this.#clock);
 		this.#clock = null;
+		this.#stopEffects?.();
+		this.#stopEffects = null;
 		for (const c of this.conns) c.close();
 		this.conns = [];
 	}
@@ -359,9 +393,9 @@ class PadsStore {
 		return this.devices.find((d) => d.id === this.pad);
 	}
 
-	/** Pad names used more than once across all servers (profiles would collide). */
+	/** Pad names used more than once on the selected server, where profiles are keyed by pad name. */
 	get duplicatePadNames(): string[] {
-		const names = this.conns.flatMap((c) => c.deviceList.map((d) => d.name));
+		const names = this.devices.map((d) => d.name);
 		return names.filter((n, i) => names.indexOf(n) !== i);
 	}
 
@@ -475,15 +509,17 @@ class PadsStore {
 		return false;
 	}
 
-	/** A player's avatar; requests it on first use. undefined = none / not yet. */
+	/** A player's avatar, once fetched (see requestAvatar). undefined = none / not yet. */
 	avatar(player: Player): Avatar | undefined {
+		return this.conn?.avatars[player.name] ?? undefined;
+	}
+
+	/** Fetches a player's avatar once per connection. Writes state: call from an effect, not a derived. */
+	requestAvatar(player: Player) {
 		const c = this.conn;
-		if (!c || !player.avatar) return undefined;
-		if (!(player.name in c.avatars)) {
-			c.avatars[player.name] = null;
-			c.send({ getAvatar: player.name });
-		}
-		return c.avatars[player.name] ?? undefined;
+		if (!c || c.status !== 'open' || !player.avatar || player.name in c.avatars) return;
+		c.avatars[player.name] = null;
+		c.send({ getAvatar: player.name });
 	}
 
 	// ---- Profile actions (selected pad + player) ----
@@ -525,6 +561,7 @@ class PadsStore {
 	// ---- Sensor edits (optimistic, throttled) ----
 
 	#patch(sensorIndex: number, patch: SensorPatch) {
+		this.#pendingAt[sensorIndex] = Date.now();
 		this.pending = {
 			...this.pending,
 			[sensorIndex]: { ...this.pending[sensorIndex], ...patch }
@@ -621,10 +658,15 @@ class PadsStore {
 		if (!snap) return;
 		let changed = false;
 		const next = { ...this.pending };
+		const now = Date.now();
 		for (const k of Object.keys(next)) {
 			const i = Number(k);
 			const s = snap.sensors[i];
-			if (!s) continue;
+			if (!s || now - (this.#pendingAt[i] ?? 0) > PENDING_TTL_MS) {
+				delete next[i];
+				changed = true;
+				continue;
+			}
 			const patch: SensorPatch = { ...next[i] };
 			const before = Object.keys(patch).length;
 			if (patch.threshold !== undefined && Math.abs(s.threshold - patch.threshold) < EPS)

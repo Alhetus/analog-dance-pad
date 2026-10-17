@@ -7,13 +7,23 @@
 		sensor: Sensor; // optimistic-overlaid values
 		index: number; // snapshot sensor index
 		releaseEnabled: boolean; // false in "None" mode: hide the release slider
+		gainEnabled: boolean; // false unless the pad has a digipot (featureDigipot)
 		onthreshold: (value: number) => void; // 0..1
 		onrelease: (value: number) => void; // 0..1
 		ongain: (byte: number) => void; // 0..255
 		onclose: () => void;
 	}
 
-	let { sensor, index, releaseEnabled, onthreshold, onrelease, ongain, onclose }: Props = $props();
+	let {
+		sensor,
+		index,
+		releaseEnabled,
+		gainEnabled,
+		onthreshold,
+		onrelease,
+		ongain,
+		onclose
+	}: Props = $props();
 
 	// Gain: higher % = more sensitivity = LOWER resistor byte.
 	// 100% -> byte 0, 0% -> byte 255 (inverted).
@@ -102,7 +112,9 @@
 			</div>
 		{/snippet}
 
-		{@render row('Gain', gainPct, '%', (p) => ongain(pctToByte(p)), 100)}
+		{#if gainEnabled}
+			{@render row('Gain', gainPct, '%', (p) => ongain(pctToByte(p)), 100)}
+		{/if}
 		{@render row('Threshold', thresholdPct, '%', (p) => onthreshold(clampPct(p) / 100), 100)}
 		{#if releaseEnabled}
 			<!-- Release can never exceed the threshold, or hysteresis breaks; cap it. -->

@@ -76,7 +76,7 @@ std::vector<Rename> PlanRenames(const std::map<std::string, std::string>& before
 		auto it = before.find(folder);
 		if (it == before.end() || it->second == name || namesNow.contains(it->second))
 			continue;
-		out.push_back({it->second, name});
+		out.push_back({it->second, name, folder});
 	}
 	return out;
 }
@@ -131,22 +131,34 @@ static void FollowRenames(const Path& profilesDir, const std::map<std::string, s
 			if (name.is_string())
 				prev[folder] = name.get<std::string>();
 
+	// What gets remembered: the new names, except where the profiles could not
+	// be moved; those keep the old name so the move is retried next scan.
+	std::map<std::string, std::string> remembered = now;
+
 	std::error_code ec;
 	for (const auto& r : PlanRenames(prev, now))
 	{
 		const Path from = profilesDir / "players" / Profiles::U8Path(Profiles::EscapeName(r.from));
 		const Path to = profilesDir / "players" / Profiles::U8Path(Profiles::EscapeName(r.to));
-		if (!fs::is_directory(from, ec) || fs::exists(to, ec))
+		if (!fs::is_directory(from, ec))
+			continue; // no profiles to move
+		if (fs::exists(to, ec))
+		{
+			// ponytail: no merging; both dirs are kept and the move retried each scan.
+			remembered[r.folder] = r.from;
 			continue;
+		}
 		fs::rename(from, to, ec);
 		std::printf("Players :: '%s' renamed to '%s', profiles %s\n", r.from.c_str(), r.to.c_str(),
-		            ec ? "NOT moved" : "moved");
+		            ec ? "NOT moved, will retry" : "moved");
+		if (ec)
+			remembered[r.folder] = r.from;
 	}
 
 	// An empty map is never a real venue state; skip it so a scan that read
 	// nothing (share flaking mid-scan) can't wipe the remembered names.
-	if (prev != now && !now.empty())
-		Profiles::Write(profilesDir, "player-names", json(now));
+	if (prev != remembered && !remembered.empty())
+		Profiles::Write(profilesDir, "player-names", json(remembered));
 }
 
 static std::map<std::string, int> CountProfiles(const Path& playerDir)
@@ -248,6 +260,8 @@ PlayerList Scan(const Path& localProfilesDir, const Path& profilesDir, const Pla
 
 	if (!profilesDir.empty())
 	{
+		// Local disk only (the share was read above), so this is held briefly.
+		std::lock_guard<std::mutex> lock(Profiles::StoreMutex());
 		FollowRenames(profilesDir, folderNames);
 		for (auto& [name, p] : byName)
 			p.profileCounts = CountProfiles(profilesDir / "players" / Profiles::U8Path(Profiles::EscapeName(name)));

@@ -3,6 +3,8 @@
 
 	let { player, class: klass = 'size-16' }: { player: Player; class?: string } = $props();
 
+	// Fetching writes state, so it runs in an effect; the derived only reads.
+	$effect(() => pads.requestAvatar(player));
 	const avatar = $derived(pads.avatar(player));
 	const initials = $derived(
 		player.name

@@ -40,8 +40,8 @@ TEST_CASE("ValidId accepts safe stems and rejects path tricks", "[profiles]")
 	CHECK_FALSE(Profiles::ValidId("../etc"));
 	CHECK_FALSE(Profiles::ValidId("a/b"));
 	CHECK_FALSE(Profiles::ValidId("a\\b"));
-	CHECK_FALSE(Profiles::ValidId("a.json"));   // '.' not allowed
-	CHECK_FALSE(Profiles::ValidId("Upper"));    // must be lowercased first
+	CHECK_FALSE(Profiles::ValidId("a.json")); // '.' not allowed
+	CHECK_FALSE(Profiles::ValidId("Upper"));  // must be lowercased first
 	CHECK_FALSE(Profiles::ValidId("with space"));
 }
 
@@ -97,4 +97,23 @@ TEST_CASE("Invalid ids never touch the filesystem", "[profiles]")
 
 	// Nothing was created.
 	CHECK(Profiles::List(dir.str()).empty());
+}
+
+TEST_CASE("A profile's id is its filename, whatever the file says", "[profiles]")
+{
+	// Overwrite/rename used the id stored in the file; a copied or hand-edited
+	// file with a stale (or no) id then wrote somewhere else, or nowhere.
+	TempDir dir("adp-profiles-id");
+	REQUIRE(Profiles::Write(dir.path, "real", json{{"id", "other"}, {"name", "A"}}));
+	REQUIRE(Profiles::Write(dir.path, "noid", json{{"name", "B"}}));
+
+	json p;
+	REQUIRE(Profiles::ReadProfile(dir.path, "real", p));
+	CHECK(p["id"] == "real");
+	REQUIRE(Profiles::ReadProfile(dir.path, "noid", p));
+	CHECK(p["id"] == "noid");
+
+	for (const auto& listed : Profiles::List(dir.path))
+		CHECK((listed["id"] == "real" || listed["id"] == "noid"));
+	CHECK(Profiles::List(dir.path).size() == 2);
 }

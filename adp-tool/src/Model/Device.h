@@ -46,6 +46,7 @@ struct RgbColor
 	RgbColor();
 
 	std::string ToString() const;
+	bool operator==(const RgbColor&) const = default;
 
 	uint8_t red;
 	uint8_t green;
@@ -70,6 +71,8 @@ struct LedMapping
 	int sensorIndex;
 	int ledIndexBegin;
 	int ledIndexEnd;
+
+	bool operator==(const LedMapping&) const = default;
 };
 
 struct LightRule
@@ -80,6 +83,8 @@ struct LightRule
 	RgbColor offColor;
 	RgbColor onFadeColor;
 	RgbColor offFadeColor;
+
+	bool operator==(const LightRule&) const = default;
 };
 
 struct LightsState
@@ -240,8 +245,6 @@ class Device
 
 	// Root of this server's local profile store. Set once at startup.
 	static void SetProfilesDir(const std::filesystem::path& dir);
-
-	static void SetSearching(bool s);
 
 	static void DiscoverNewDevices();
 };

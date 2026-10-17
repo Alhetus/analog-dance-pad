@@ -196,3 +196,72 @@ TEST_CASE("LoadProfile applies a release-only patch in individual mode", "[profi
 	CHECK(pad.Sensor(0)->threshold == Approx(0.5));
 	CHECK(pad.Sensor(0)->releaseThreshold == Approx(0.2));
 }
+
+TEST_CASE("LoadProfile ignores sensor entries past the pad's sensor count", "[profile]")
+{
+	// A partial entry (release only) used to read mySensors[idx] before the
+	// index was checked: out of bounds for every entry past the pad's sensors.
+	RecordingBackend* raw = nullptr;
+	auto rep = makeReporter(raw);
+	PadDevice pad(rep, "t", makeName("x"), makeIdent(1, 3, 8, 2), {}, {},
+	              {makeSensor(0, 425, 0), makeSensor(1, 425, 1)});
+	raw->sent.clear();
+
+	json j;
+	j["sensors"] = json::array();
+	for (int i = 0; i < 6; ++i)
+		j["sensors"].push_back({{"releaseThreshold", 0.2}});
+
+	pad.LoadProfile(j, DPG_SENSITIVITY);
+
+	CHECK(raw->sent.size() == 2); // one SensorReport per real sensor
+	CHECK(pad.Sensor(1)->releaseThreshold == Approx(0.2));
+}
+
+TEST_CASE("LoadProfile treats null light slots as disabled and skips unchanged ones", "[profile]")
+{
+	// A profile saved from a pad with gaps between its enabled slots has nulls
+	// in the gaps; those used to throw halfway through applying the profile.
+	RecordingBackend* raw = nullptr;
+	auto rep = makeReporter(raw);
+	PadDevice pad(rep, "t", makeName("x"), makeIdent(1, 3, 8, 1, IdentificationV2Report::FEATURE_LIGHTS), {}, {},
+	              {makeSensor(0, 425, 0)});
+	raw->sent.clear();
+
+	json rule = {{"fadeOn", true},        {"fadeOff", false},         {"onColor", "#ff0000"},
+	             {"offColor", "#000000"}, {"onFadeColor", "#00ff00"}, {"offFadeColor", "#0000ff"}};
+	json j;
+	j["lightRules"] = json::array({rule, nullptr, rule});
+	j["ledMappings"] =
+	    json::array({nullptr, {{"lightRuleIndex", 2}, {"sensorIndex", 0}, {"ledIndexBegin", 0}, {"ledIndexEnd", 4}}});
+
+	CHECK_NOTHROW(pad.LoadProfile(j, DPG_LIGHTS));
+	CHECK(pad.Lights().lightRules.size() == 2);
+	CHECK(pad.Lights().lightRules.contains(0));
+	CHECK(pad.Lights().lightRules.contains(2));
+	CHECK(pad.Lights().ledMappings.size() == 1);
+	CHECK(pad.Lights().ledMappings.contains(1));
+	CHECK(raw->sent.size() == 3); // only the enabled slots; nothing was on to disable
+
+	// Loading the same lights again sends nothing: every slot already matches.
+	raw->sent.clear();
+	pad.LoadProfile(j, DPG_LIGHTS);
+	CHECK(raw->sent.empty());
+
+	// Dropping a rule disables just that slot.
+	j["lightRules"] = json::array({rule});
+	pad.LoadProfile(j, DPG_LIGHTS);
+	CHECK(raw->sent.size() == 1);
+	CHECK_FALSE(pad.Lights().lightRules.contains(2));
+}
+
+TEST_CASE("SetButtonMapping rejects buttons the pad doesn't have", "[profile]")
+{
+	RecordingBackend* raw = nullptr;
+	auto rep = makeReporter(raw);
+	PadDevice pad(rep, "t", makeName("x"), makeIdent(1, 0, 8, 1), {}, {}, {makeSensor(0, 425, 0)});
+
+	CHECK_FALSE(pad.SetButtonMapping(0, 9));
+	CHECK_FALSE(pad.SetButtonMapping(0, -1));
+	CHECK(pad.Sensor(0)->button == 1);
+}

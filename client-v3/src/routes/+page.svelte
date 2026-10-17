@@ -188,6 +188,7 @@
 		sensor={editing.sensor}
 		index={editing.index}
 		releaseEnabled={pads.releaseEnabled}
+		gainEnabled={snap?.featureDigipot ?? false}
 		onthreshold={(v) => pads.setThreshold(editing.index, v)}
 		onrelease={(v) => pads.setReleaseThreshold(editing.index, v)}
 		ongain={(b) => pads.setGain(editing.index, b)}

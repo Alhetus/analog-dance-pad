@@ -1,6 +1,7 @@
 #pragma once
 
 #include <filesystem>
+#include <mutex>
 #include <string>
 #include <nlohmann/json.hpp>
 
@@ -48,17 +49,27 @@ std::string SlugifyId(const std::string& name);
 // True if <dir>/<id>.json exists (false for an invalid id).
 bool Exists(const Path& dir, const std::string& id);
 
-// Every stored profile as a JSON array (unparseable files are skipped).
+// Every stored profile as a JSON array (unparseable files are skipped). Each
+// profile's "id" is its filename stem, whatever the file itself says.
 json List(const Path& dir);
 
-// Reads one profile into `out`; false if missing, invalid id, or bad JSON.
+// Reads one JSON file into `out`; false if missing, invalid id, or bad JSON.
 bool Read(const Path& dir, const std::string& id, json& out);
 
-// Atomically writes (temp file + rename); false on invalid id or I/O error.
+// Read() for a profile: also false unless it is an object, and "id" is set to
+// `id` (a hand-edited or copied file may carry none, or a stale one).
+bool ReadProfile(const Path& dir, const std::string& id, json& out);
+
+// Atomically and durably writes (temp file, fsync, rename): cabs get
+// power-cut. False on invalid id or I/O error.
 bool Write(const Path& dir, const std::string& id, const json& profile);
 
 // Deletes one profile; false on invalid id. True even if it was already gone.
 bool Delete(const Path& dir, const std::string& id);
+
+// Held while the store's directory layout may change (player/pad dir renames)
+// and around profile reads/writes, so neither sees the other half-done.
+std::mutex& StoreMutex();
 
 // The storable settings of a client-supplied profile (importProfile): keeps
 // only the known fields, each with its expected type. Returns null unless it
