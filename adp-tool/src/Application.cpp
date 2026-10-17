@@ -8,6 +8,7 @@
 #include "MSGQ.hpp"
 #include "WebsocketServer.h"
 #include "Model/Device.h"
+#include "Model/Players.h"
 
 namespace adp
 {
@@ -31,24 +32,25 @@ void Application::UpdateLoop(MSGQ<QueueMessage>& queue, WebsocketServer& websock
 	// shows up in traffic.
 	constexpr int deviceListInterval = 60;
 	int tickCount = 0;
+	uint64_t playersVersion = 0;
 
 	while (running.load())
 	{
-		// Update device data first (discovery + poll + publish snapshot).
+		// Update device data first (discovery + poll + publish snapshots).
 		Tick();
 
-		// Broadcast the freshly published, immutable snapshot to clients.
-		auto snapshot = Device::GetSnapshot();
-		if (snapshot && snapshot->connected)
+		// Broadcast every pad's freshly published, immutable snapshot. Clients
+		// pick the pad they show by its `pad` field.
+		auto snapshots = Device::GetSnapshots();
+		for (const auto& snapshot : snapshots ? *snapshots : std::vector<SensorSnapshot>{})
 		{
 			json sensorJson;
-			Device::SnapshotToJson(*snapshot, sensorJson);
+			Device::SnapshotToJson(snapshot, sensorJson);
 			websocketServer.SendMessageToClients(sensorJson.dump());
 		}
 
-		// Rebroadcast the device list so clients can enumerate/switch pads. Runs
-		// regardless of connection state so a client sees pads even when none is
-		// selected yet.
+		// Rebroadcast the pad list so clients can enumerate pads. Runs regardless
+		// of connection state so a client sees an empty list too.
 		if (tickCount++ % deviceListInterval == 0)
 		{
 			json deviceListJson;
@@ -56,35 +58,43 @@ void Application::UpdateLoop(MSGQ<QueueMessage>& queue, WebsocketServer& websock
 			websocketServer.SendMessageToClients(deviceListJson.dump());
 		}
 
-		// Rebroadcast the stored-profile list so clients (across all venue
-		// machines sharing the folder) can browse/load profiles. Sent on change
-		// (a save/edit/delete flips a dirty flag) or ~2s as a fallback.
-		// ponytail: polls the shared dir every ~2s; move to on-change/watch if the share is slow
-		constexpr int profileListInterval = 120; // ~2s at ~60Hz
-		if (Device::TakeProfilesDirty() || tickCount % profileListInterval == 0)
+		// Player list (msgType 3): resent after every completed background scan
+		// (every 30s, or on request), so the latest one reaches new clients fast.
+		if (const auto version = Players::Version(); version != playersVersion)
 		{
-			json profileListJson;
-			Device::ProfileListToJson(profileListJson);
-			websocketServer.SendMessageToClients(profileListJson.dump());
+			playersVersion = version;
+			websocketServer.SendMessageToClients(Players::ToJson(*Players::Get()).dump());
 		}
 
-		// Lights (msgType 4) are ~1KB and change rarely, so broadcast them only
-		// when the pad signals a change/switch, or ~2s as a fallback so a client
-		// that connected after the last change still gets the current lights.
-		constexpr int lightsInterval = 120; // ~2s at ~60Hz
-		if (snapshot && snapshot->connected &&
-		    (Device::TakeLightsDirty() || tickCount % lightsInterval == 0))
+		// Per-pad selection (msgType 5): on change, or ~2s as a fallback for late joiners.
+		constexpr int padStatesInterval = 120; // ~2s at ~60Hz
+		if (Device::TakePadStatesDirty() || tickCount % padStatesInterval == 0)
 		{
-			json lightsJson;
-			Device::LightsToJson(*snapshot, lightsJson);
-			websocketServer.SendMessageToClients(lightsJson.dump());
+			json padStatesJson;
+			Device::PadStatesToJson(padStatesJson);
+			websocketServer.SendMessageToClients(padStatesJson.dump());
+		}
+
+		// Lights (msgType 4) are ~1KB per pad and change rarely, so broadcast them
+		// only when a pad signals a change, or ~2s as a fallback so a client that
+		// connected after the last change still gets the current lights.
+		constexpr int lightsInterval = 120; // ~2s at ~60Hz
+		if (snapshots && (Device::TakeLightsDirty() || tickCount % lightsInterval == 0))
+		{
+			for (const auto& snapshot : *snapshots)
+			{
+				json lightsJson;
+				Device::LightsToJson(snapshot, lightsJson);
+				websocketServer.SendMessageToClients(lightsJson.dump());
+			}
 		}
 
 		// Drain and apply any inbound client messages. This runs on the
 		// device-I/O thread, so device access stays single-threaded.
 		while (auto item = queue.tryPop())
 		{
-			Device::HandleClientMessage(item->data);
+			for (const auto& reply : Device::HandleClientMessage(item->data))
+				websocketServer.SendMessageToClients(reply.dump());
 		}
 
 		std::this_thread::sleep_for(sleep_time);

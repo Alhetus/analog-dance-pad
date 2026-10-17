@@ -1,5 +1,6 @@
 #include <atomic>
 #include <csignal>
+#include <cstdio>
 #include <iostream>
 #include <string>
 #include <thread>
@@ -11,6 +12,7 @@
 #include "MSGQ.hpp"
 #include "WebsocketServer.h"
 #include <Model/Device.h>
+#include <Model/Players.h>
 
 using json = nlohmann::json;
 
@@ -27,16 +29,28 @@ static void HandleSignal(int)
 
 int main(int argc, char** argv)
 {
-	// Optional --profiles-dir <path>: where named profiles are stored, typically
-	// a shared network folder so every venue machine sees the same set. Must be
-	// set before Application (which constructs Device) is created below.
-	std::string profilesDir = "profiles";
+	// Line-buffer the log: under systemd/journald stdout is a pipe, which is
+	// otherwise fully buffered and shows log lines late (or never, on a kill).
+	std::setvbuf(stdout, nullptr, _IOLBF, 0);
+
+	// --profiles-dir <path>: root of this server's local profile store.
+	// --local-profiles-dir <path>: ITGmania's LocalProfiles folder (usually on
+	//   a network share), the source of the player list.
+	// --host <addr>: interface to listen on; "0.0.0.0" lets phones/tablets in.
+	// Must be set before Application (which constructs Device) is created below.
+	std::string profilesDir = "profiles", localProfilesDir, host = "127.0.0.1";
 	for (int i = 1; i + 1 < argc; ++i)
 	{
-		if (std::string(argv[i]) == "--profiles-dir")
+		const std::string arg = argv[i];
+		if (arg == "--profiles-dir")
 			profilesDir = argv[i + 1];
+		else if (arg == "--local-profiles-dir")
+			localProfilesDir = argv[i + 1];
+		else if (arg == "--host")
+			host = argv[i + 1];
 	}
 	adp::Device::SetProfilesDir(profilesDir);
+	adp::Players::Start(localProfilesDir, profilesDir.empty() ? "profiles" : profilesDir, std::chrono::seconds(30));
 
 	// Required on Windows
 	ix::initNetSystem();
@@ -55,7 +69,7 @@ int main(int argc, char** argv)
 	                                     std::ref(websocketServer), std::ref(g_running));
 
 	// Start the websocket server thread.
-	std::thread websocketServerThread(&adp::WebsocketServer::Init, &websocketServer, std::ref(queue));
+	std::thread websocketServerThread(&adp::WebsocketServer::Init, &websocketServer, std::ref(queue), host);
 
 	// The application loop exits when g_running is cleared by the signal handler.
 	applicationThread.join();
@@ -66,6 +80,7 @@ int main(int argc, char** argv)
 	websocketServer.Stop();
 	queue.stop();
 	websocketServerThread.join();
+	adp::Players::Stop();
 
 	// application's destructor runs here, saving/closing the device (Device::Shutdown).
 

@@ -20,6 +20,7 @@
 #include <Model/Utils.h>
 #include <Model/Firmware.h>
 #include <Model/Wire.h>
+#include <Model/Players.h>
 #include <Model/Profiles.h>
 
 using namespace std;
@@ -258,11 +259,31 @@ class ConnectionManager
   public:
 	~ConnectionManager()
 	{
-		if (myConnectedDevice)
-			myConnectedDevice->SaveChanges();
+		for (auto& [path, pad] : myPads)
+			pad->SaveChanges();
 	}
 
-	PadDevice* ConnectedDevice() const { return myConnectedDevice.get(); }
+	// The pad the static Device::* API currently acts on. Set per pad by
+	// Update() while polling and by HandleClientMessage from the message's `pad`.
+	// ponytail: a current-pad pointer instead of threading a PadDevice& through
+	// the whole static API; safe because only the device-I/O thread touches it.
+	PadDevice* ConnectedDevice() const { return myCurrent; }
+
+	void SetCurrent(PadDevice* pad) { myCurrent = pad; }
+
+	PadDevice* Find(const string& path) const
+	{
+		auto it = myPads.find(path);
+		return it == myPads.end() ? nullptr : it->second.get();
+	}
+
+	vector<PadDevice*> Pads() const
+	{
+		vector<PadDevice*> out;
+		for (auto& [path, pad] : myPads)
+			out.push_back(pad.get());
+		return out;
+	}
 
 	void UpdateDeviceMap(std::vector<string>& devicePaths)
 	{
@@ -288,8 +309,7 @@ class ConnectionManager
 		{
 			if (std::find(devicePaths.begin(), devicePaths.end(), it->first) == devicePaths.end())
 			{
-				if (myConnectedDevice && myConnectedDevice->Path() == it->first)
-					myConnectedDevice.reset();
+				DropPad(it->first);
 
 				std::printf("ConnectionManager :: device removed (%s)\n", it->second.GetName().c_str());
 				it = devices.erase(it);
@@ -298,31 +318,19 @@ class ConnectionManager
 				++it;
 		}
 
+		// Probe and connect every newly seen pad; all pads are polled every tick.
+		bool connected = false;
 		for (auto& path : devicePaths)
 		{
 			if (devices.contains(path))
 				continue;
 
 			auto it = devices.emplace(path, path);
-			if (!it.first->second.Probe())
-			{
-				// devices.erase(it.first);
-				continue;
-			}
+			if (it.first->second.Probe())
+				connected |= it.first->second.ConnectStage2();
 		}
 
-		if (!myConnectedDevice)
-		{
-			int c = 0;
-			for (auto& it : devices)
-			{
-				if (it.second.GetState() != CS_FAILED)
-					return DeviceSelect(c);
-				c++;
-			}
-		}
-
-		return false;
+		return connected;
 	}
 
 	bool ConnectToDeviceStage2(DeviceConnection& deviceCon)
@@ -480,20 +488,32 @@ class ConnectionManager
 
 		std::printf("]\n");
 
-		myConnectedDevice = std::move(device);
+		myPads[devicePath] = std::move(device);
 		return true;
 	}
 
-	void DisconnectFailedDevice()
+	void DisconnectFailedDevice(const string& path)
 	{
-		auto device = myConnectedDevice.get();
-		if (device)
-		{
-			if (devices.contains(device->Path()))
-				devices.at(device->Path()).SetFailed();
+		if (devices.contains(path))
+			devices.at(path).SetFailed();
+		DropPad(path);
+	}
 
-			myConnectedDevice.reset();
-		}
+	void DropPad(const string& path)
+	{
+		auto it = myPads.find(path);
+		if (it == myPads.end())
+			return;
+		if (myCurrent == it->second.get())
+			myCurrent = nullptr;
+		myPads.erase(it);
+	}
+
+	// Refreshes the cached name of a pad's connection (after a rename).
+	void RefreshName(const string& path)
+	{
+		if (devices.contains(path))
+			devices.at(path).GetName(true);
 	}
 
 	void AddIncompatibleDevice(hid_device_info* device)
@@ -524,76 +544,11 @@ class ConnectionManager
 		return it->first;
 	}
 
-	bool DeviceSelect(int index)
-	{
-		if (index < 0 || (size_t)index >= devices.size())
-			return false;
-
-		if (index == DeviceSelected())
-			return true;
-
-		auto it = devices.begin();
-		std::advance(it, index);
-
-		if (!it->second.ConnectStage2())
-			return false;
-
-		return true;
-	}
-
-	int DeviceSelected()
-	{
-		if (!myConnectedDevice)
-			return -1;
-
-		int c = 0;
-
-		for (auto& it : devices)
-		{
-			if (myConnectedDevice->Path() == it.first)
-				return c;
-			c++;
-		}
-
-		return -1;
-	}
-
-	bool ConnectToUrl(string url)
-	{
-		if (devices.contains(url))
-		{
-			// Already known: find its index and select it.
-			int c = 0;
-			for (auto& it : devices)
-			{
-				if (it.second.GetPath() == url)
-					return DeviceSelect(c);
-				++c;
-			}
-
-			return false;
-		}
-
-		auto it = devices.emplace(url, url);
-		if (!it.first->second.Probe())
-		{
-			devices.erase(it.first);
-			return false;
-		}
-
-		if (!it.first->second.ConnectStage2())
-		{
-			devices.erase(it.first);
-			return false;
-		}
-
-		return true;
-	}
-
   private:
 	map<DevicePath, DeviceConnection> devices;
 
-	unique_ptr<PadDevice> myConnectedDevice;
+	map<DevicePath, unique_ptr<PadDevice>> myPads;
+	PadDevice* myCurrent = nullptr;
 	map<DevicePath, DeviceName> myFailedDevices;
 };
 
@@ -604,28 +559,31 @@ class ConnectionManager
 static std::unique_ptr<ConnectionManager> connectionManager;
 static std::atomic<bool> searching = true;
 
-// Profile storage. gProfilesDir is set once at startup (before threads), then
-// only read. gProfilesDirty starts true so the first tick broadcasts the list.
-static std::string gProfilesDir = "profiles";
-static std::atomic<bool> gProfilesDirty{true};
+// Root of the local profile store (see Profiles.h for the layout). Set once at
+// startup (before threads), then only read.
+static Profiles::Path gProfilesDir = "profiles";
 
-// Set when the connected pad's lights change (or a device is (re)selected), so
-// the WebSocket loop can broadcast the lights message only when it matters
-// instead of on every ~60Hz snapshot.
+// Set when a pad's lights change (or pads come and go), so the WebSocket loop
+// broadcasts the lights messages only when it matters instead of every tick.
 static std::atomic<bool> gLightsDirty{false};
+
+// Server-owned per-pad selection {player, profileId, profileName, recent[]},
+// keyed by pad name and persisted at <profilesDir>/pads/<pad>/state.json so it
+// survives restarts. Device-I/O thread only.
+static std::map<std::string, json> gPadStates;
+static std::atomic<bool> gPadStatesDirty{true};
 
 // Profiles capture thresholds+release, per-sensor gain, and lights — but NOT
 // button mappings or the device name (those are pad-specific, not preferences).
-static constexpr DeviceProfileGroups PROFILE_GROUPS =
-    (DeviceProfileGroups)(DPG_SENSITIVITY | DPG_GAIN | DPG_LIGHTS);
+static constexpr DeviceProfileGroups PROFILE_GROUPS = (DeviceProfileGroups)(DPG_SENSITIVITY | DPG_GAIN | DPG_LIGHTS);
 
-// The latest immutable sensor snapshot. Written only on the device-I/O thread
-// (PublishSnapshot); read from any thread (GetSnapshot). Guarded by a mutex
-// rather than std::atomic<shared_ptr> because Apple's libc++ doesn't implement
-// the C++20 atomic<shared_ptr> specialization. The critical section is a single
-// pointer swap/copy, so contention is negligible.
+// The latest immutable snapshots, one per pad. Written only on the device-I/O
+// thread (PublishSnapshot); read from any thread (GetSnapshots). Guarded by a
+// mutex rather than std::atomic<shared_ptr> because Apple's libc++ doesn't
+// implement the C++20 atomic<shared_ptr> specialization. The critical section
+// is a single pointer swap/copy, so contention is negligible.
 static std::mutex gSnapshotMutex;
-static std::shared_ptr<const SensorSnapshot> gSnapshot;
+static std::shared_ptr<const std::vector<SensorSnapshot>> gSnapshots;
 
 bool DeviceConnection::ConnectStage2()
 {
@@ -661,7 +619,7 @@ void Device::Shutdown()
 
 	{
 		std::lock_guard<std::mutex> lock(gSnapshotMutex);
-		gSnapshot = nullptr;
+		gSnapshots = nullptr;
 	}
 
 	hid_exit();
@@ -671,39 +629,38 @@ DeviceChanges Device::Update()
 {
 	DeviceChanges changes = 0;
 
-	// If there is currently no connected device, try to find one.
-	auto device = connectionManager->ConnectedDevice();
-	if (!device && searching)
-	{
-		if (connectionManager->DiscoverDevice())
-			changes |= DCF_DEVICE;
+	// With no pads at all, look for some right away (DiscoverNewDevices also
+	// runs ~1Hz to pick up hot-plugged pads).
+	if (connectionManager->Pads().empty() && searching && connectionManager->DiscoverDevice())
+		changes |= DCF_DEVICE;
 
-		device = connectionManager->ConnectedDevice();
-	}
-
-	// If there is a device, update it. All hidapi access happens here on the
-	// single device-I/O thread.
-	if (device)
+	// Poll every pad. All hidapi access happens here on the device-I/O thread.
+	for (PadDevice* device : connectionManager->Pads())
 	{
-		changes |= device->PopChanges();
+		connectionManager->SetCurrent(device);
+		const string path = device->Path(); // the device is gone after a disconnect
+		DeviceChanges padChanges = device->PopChanges();
 
 		if (!device->PollSensors())
 		{
-			connectionManager->DisconnectFailedDevice();
+			connectionManager->DisconnectFailedDevice(path);
 			changes |= DCF_DEVICE;
+			continue;
 		}
 
-		if (changes & DCF_NAME)
-		{
-			connectionManager->GetDeviceName(connectionManager->DeviceSelected(), true);
-		}
+		if (padChanges & DCF_NAME)
+			connectionManager->RefreshName(path);
+		changes |= padChanges;
 	}
+	connectionManager->SetCurrent(nullptr);
 
-	// A lights change (or a fresh device) means the gated lights message is stale.
+	// A lights change (or pads coming/going) means the gated messages are stale.
 	if (changes & (DCF_LIGHTS | DCF_DEVICE))
 		gLightsDirty = true;
+	if (changes & (DCF_DEVICE | DCF_NAME))
+		gPadStatesDirty = true;
 
-	// Publish the latest immutable snapshot for the WebSocket side to read.
+	// Publish the latest immutable snapshots for the WebSocket side to read.
 	PublishSnapshot();
 
 	return changes;
@@ -735,43 +692,43 @@ const SensorState* Device::Sensor(int sensorIndex)
 
 void Device::PublishSnapshot()
 {
-	auto snapshot = std::make_shared<SensorSnapshot>();
+	auto snapshots = std::make_shared<std::vector<SensorSnapshot>>();
 
-	auto device = connectionManager ? connectionManager->ConnectedDevice() : nullptr;
-	snapshot->deviceCount = connectionManager ? connectionManager->DeviceNumber() : 0;
-	snapshot->selectedIndex = connectionManager ? connectionManager->DeviceSelected() : -1;
-
-	if (device)
+	for (PadDevice* device : connectionManager ? connectionManager->Pads() : vector<PadDevice*>{})
 	{
+		SensorSnapshot snapshot;
 		const PadState& pad = device->State();
-		snapshot->connected = true;
-		snapshot->name = pad.name;
-		snapshot->pollingRate = device->PollingRate();
-		snapshot->releaseThreshold = pad.releaseThreshold;
-		snapshot->releaseMode = (int)pad.releaseMode;
-		snapshot->numButtons = pad.numButtons;
-		snapshot->featureDigipot = pad.featureDigipot;
+		snapshot.connected = true;
+		snapshot.path = device->Path();
+		snapshot.name = pad.name;
+		snapshot.pollingRate = device->PollingRate();
+		snapshot.releaseThreshold = pad.releaseThreshold;
+		snapshot.releaseMode = (int)pad.releaseMode;
+		snapshot.numButtons = pad.numButtons;
+		snapshot.featureDigipot = pad.featureDigipot;
 
-		snapshot->sensors.reserve(pad.numSensors);
+		snapshot.sensors.reserve(pad.numSensors);
 		for (int i = 0; i < pad.numSensors; ++i)
 		{
 			if (const SensorState* s = device->Sensor(i))
-				snapshot->sensors.push_back(*s);
+				snapshot.sensors.push_back(*s);
 		}
 
 		if (pad.featureLights)
-			snapshot->lights = device->Lights();
+			snapshot.lights = device->Lights();
+
+		snapshots->push_back(std::move(snapshot));
 	}
 
 	// Publish as immutable; readers get a stable, consistent view.
 	std::lock_guard<std::mutex> lock(gSnapshotMutex);
-	gSnapshot = std::move(snapshot);
+	gSnapshots = std::move(snapshots);
 }
 
-std::shared_ptr<const SensorSnapshot> Device::GetSnapshot()
+std::shared_ptr<const std::vector<SensorSnapshot>> Device::GetSnapshots()
 {
 	std::lock_guard<std::mutex> lock(gSnapshotMutex);
-	return gSnapshot;
+	return gSnapshots;
 }
 
 // Serializes lights (rules + LED mappings) to the wire shape shared by the
@@ -803,8 +760,7 @@ static void AppendLightsToJson(const LightsState& lights, json& j)
 void Device::SnapshotToJson(const SensorSnapshot& snapshot, json& j)
 {
 	j["msgType"] = 1;
-	j["deviceIndex"] = snapshot.deviceCount;
-	j["selectedIndex"] = snapshot.selectedIndex;
+	j["pad"] = snapshot.path;
 	j["name"] = snapshot.name;
 	j["pollingRate"] = snapshot.pollingRate;
 	j["releaseThreshold"] = snapshot.releaseThreshold;
@@ -833,6 +789,7 @@ void Device::SnapshotToJson(const SensorSnapshot& snapshot, json& j)
 void Device::LightsToJson(const SensorSnapshot& snapshot, json& j)
 {
 	j["msgType"] = 4;
+	j["pad"] = snapshot.path;
 	AppendLightsToJson(snapshot.lights, j);
 }
 
@@ -841,11 +798,163 @@ bool Device::TakeLightsDirty()
 	return gLightsDirty.exchange(false);
 }
 
-void Device::HandleClientMessage(const std::string& message)
+// ---- Pad state ---------------------------------------------------------------------------------------------------
+
+static Profiles::Path PadStateDir(const std::string& pad)
 {
+	return gProfilesDir / "pads" / Profiles::U8Path(Profiles::EscapeName(pad));
+}
+
+// The cached state for a pad, loaded from disk on first use.
+static json& PadStateFor(const std::string& pad)
+{
+	auto it = gPadStates.find(pad);
+	if (it != gPadStates.end())
+		return it->second;
+	json st;
+	if (!Profiles::Read(PadStateDir(pad), "state", st) || !st.is_object())
+		st = json::object();
+	return gPadStates[pad] = st;
+}
+
+static void SavePadState(const std::string& pad)
+{
+	if (!Profiles::Write(PadStateDir(pad), "state", PadStateFor(pad)))
+		std::printf("SavePadState :: could not write state for '%s'\n", pad.c_str());
+	gPadStatesDirty = true;
+}
+
+// Marks `player`/`id` as the pad's current selection and moves the player to
+// the front of the pad's recent list.
+static void SetPadSelection(const std::string& pad, const std::string& player, const std::string& id,
+                            const std::string& profileName)
+{
+	json& st = PadStateFor(pad);
+	st["player"] = player;
+	st["profileId"] = id;
+	st["profileName"] = profileName;
+	json recent = json::array({player});
+	for (const auto& r : st.value("recent", json::array()))
+		if (r.is_string() && r != player && recent.size() < 8)
+			recent.push_back(r);
+	st["recent"] = recent;
+	SavePadState(pad);
+}
+
+void Device::PadStatesToJson(json& j)
+{
+	j["msgType"] = 5;
+	j["pads"] = json::object();
+	for (PadDevice* device : connectionManager ? connectionManager->Pads() : vector<PadDevice*>{})
+	{
+		json st = PadStateFor(device->State().name);
+		st["name"] = device->State().name;
+		j["pads"][device->Path()] = st;
+	}
+}
+
+bool Device::TakePadStatesDirty()
+{
+	return gPadStatesDirty.exchange(false);
+}
+
+// A pad was renamed: move its profile dirs (every player) and its state along.
+// ponytail: walks all player dirs on the device thread; renaming is a rare operator action.
+static void RenamePad(const std::string& from, const std::string& to)
+{
+	if (from == to || from.empty() || to.empty())
+		return;
+	std::error_code ec;
+	const auto escFrom = Profiles::U8Path(Profiles::EscapeName(from));
+	const auto escTo = Profiles::U8Path(Profiles::EscapeName(to));
+	for (const auto& player : std::filesystem::directory_iterator(gProfilesDir / "players", ec))
+	{
+		if (!std::filesystem::exists(player.path() / escTo, ec))
+			std::filesystem::rename(player.path() / escFrom, player.path() / escTo, ec);
+	}
+	if (!std::filesystem::exists(PadStateDir(to), ec))
+		std::filesystem::rename(PadStateDir(from), PadStateDir(to), ec);
+	gPadStates.erase(from);
+	gPadStates.erase(to);
+	gPadStatesDirty = true;
+	Players::RequestRescan();
+	std::printf("Pad renamed '%s' -> '%s', profiles moved\n", from.c_str(), to.c_str());
+}
+
+// ---- Client messages ---------------------------------------------------------------------------------------------
+
+// All of one player's stored profiles, grouped by pad name (msgType 6).
+static json PlayerProfilesJson(const std::string& player)
+{
+	json j = {{"msgType", 6}, {"player", player}, {"pads", json::object()}};
+	const auto dir = gProfilesDir / "players" / Profiles::U8Path(Profiles::EscapeName(player));
+	std::error_code ec;
+	for (const auto& pad : std::filesystem::directory_iterator(dir, ec))
+	{
+		if (!pad.is_directory(ec))
+			continue;
+		json list = Profiles::List(pad.path());
+		if (!list.empty())
+			j["pads"][Profiles::UnescapeName(Profiles::PathU8(pad.path().filename()))] = std::move(list);
+	}
+	return j;
+}
+
+// A new id for `name` that is free in `dir`.
+static std::string NewProfileId(const Profiles::Path& dir, const std::string& name)
+{
+	const std::string base = Profiles::SlugifyId(name);
+	std::string id = base;
+	for (int n = 2; Profiles::Exists(dir, id); ++n)
+		id = base + "-" + std::to_string(n);
+	return id;
+}
+
+// The `player` field of a profile op, validated against the scanned player
+// list. That check is the trust boundary: only known names reach a path.
+static bool ValidPlayer(const json& op, std::string& player)
+{
+	if (!op.is_object() || !op.contains("player") || !op["player"].is_string())
+		return false;
+	player = op["player"].get<std::string>();
+	if (Players::Has(player))
+		return true;
+	std::printf("HandleClientMessage :: unknown player '%s', ignored\n", player.c_str());
+	return false;
+}
+
+static bool HasString(const json& op, const char* key)
+{
+	return op.contains(key) && op[key].is_string();
+}
+
+static std::vector<json> HandleClientMessageImpl(const std::string& message);
+
+std::vector<json> Device::HandleClientMessage(const std::string& message)
+{
+	// Directory iteration throws on I/O errors (permissions, a dir removed
+	// mid-walk), and json throws on a client field of an unexpected type;
+	// neither may take down the device thread.
+	try
+	{
+		return HandleClientMessageImpl(message);
+	}
+	catch (const std::exception& e)
+	{
+		// Filesystem errors, or a json type error from an unexpected field type.
+		std::printf("HandleClientMessage :: failed (%s)\n", e.what());
+		return {};
+	}
+}
+
+static std::vector<json> HandleClientMessageImpl(const std::string& message)
+{
+	using D = Device;
 	// Runs on the device-I/O thread, so any device mutation triggered here is
 	// single-threaded and safe. Parsing is fully defensive: a malformed or
-	// unrecognized message is logged and ignored, never fatal.
+	// unrecognized message is logged and ignored, never fatal. Returns messages
+	// to broadcast in reply (e.g. a player's refreshed profile list).
+	std::vector<json> replies;
 	json j;
 	try
 	{
@@ -854,154 +963,229 @@ void Device::HandleClientMessage(const std::string& message)
 	catch (const std::exception& e)
 	{
 		std::printf("HandleClientMessage :: invalid JSON ignored (%s)\n", e.what());
-		return;
+		return replies;
 	}
 
 	if (!j.is_object())
 	{
 		std::printf("HandleClientMessage :: non-object message ignored\n");
-		return;
+		return replies;
 	}
 
-	// Device selection works even with no device currently connected (it is how
-	// a client connects to one), so handle it before the connected-device guard.
-	if (j.contains("selectDevice") && j["selectDevice"].is_number_integer())
+	std::string player;
+
+	if (j.contains("rescanPlayers"))
 	{
-		if (connectionManager)
-			connectionManager->DeviceSelect(j["selectDevice"].get<int>());
-		gLightsDirty = true; // resend lights promptly for the newly selected pad
-		return;
+		Players::RequestRescan();
+		return replies;
 	}
 
-	// Profile browsing/editing/deleting is filesystem-only (no device needed), so
-	// handle it before the connected-device guard. Profiles::* validate the id.
 	if (j.contains("listProfiles"))
 	{
-		gProfilesDirty = true; // triggers a fresh broadcast on the next tick
-		return;
+		if (ValidPlayer(j["listProfiles"], player))
+			replies.push_back(PlayerProfilesJson(player));
+		return replies;
 	}
 
-	if (j.contains("deleteProfile") && j["deleteProfile"].is_string())
+	// Everything else acts on one pad, named by its HID path in `pad`.
+	PadDevice* device = nullptr;
+	if (connectionManager && HasString(j, "pad"))
+		device = connectionManager->Find(j["pad"].get<std::string>());
+	if (!device)
 	{
-		if (Profiles::Delete(gProfilesDir, j["deleteProfile"].get<std::string>()))
-			gProfilesDirty = true;
-		return;
+		std::printf("HandleClientMessage :: missing or unknown pad, message ignored\n");
+		return replies;
+	}
+	connectionManager->SetCurrent(device);
+	struct ClearCurrent
+	{
+		~ClearCurrent() { connectionManager->SetCurrent(nullptr); }
+	} clearCurrent;
+
+	const std::string padName = device->State().name;
+	const int numSensors = device->State().numSensors;
+	const auto padDir = [&] { return Profiles::PlayerPadDir(gProfilesDir, player, padName); };
+
+	// ---- Profile ops: {pad, <op>:{player, ...}} on <player>/<this pad>/. ----
+	// Profile files are on local disk, so this I/O on the device thread is fast.
+	const json* op = nullptr;
+	auto isOp = [&](const char* key) {
+		if (!j.contains(key))
+			return false;
+		op = ValidPlayer(j[key], player) ? &j[key] : nullptr;
+		return true;
+	};
+	auto refreshed = [&] {
+		replies.push_back(PlayerProfilesJson(player));
+		Players::RequestRescan(); // profile counts in the player list
+	};
+
+	if (isOp("loadProfile"))
+	{
+		json blob;
+		if (!op || !HasString(*op, "id") || !Profiles::Read(padDir(), (*op)["id"].get<std::string>(), blob))
+		{
+			std::printf("loadProfile :: unknown profile, ignored\n");
+			return replies;
+		}
+		if (blob.value("sensorCount", -1) != numSensors)
+		{
+			std::printf("loadProfile :: sensor-count mismatch, ignored\n");
+			return replies;
+		}
+		try
+		{
+			D::LoadProfile(blob, PROFILE_GROUPS);
+			SetPadSelection(padName, player, blob.value("id", std::string()), blob.value("name", std::string()));
+		}
+		catch (const std::exception& e)
+		{
+			std::printf("loadProfile :: failed (%s)\n", e.what());
+		}
+		return replies;
+	}
+
+	// Capture this pad's live settings. Two forms:
+	//   {saveProfile:{player, name, description?}} -> new profile (refused at MAX_PER_PAD)
+	//   {saveProfile:{player, id}}                 -> overwrite, keeping name/description
+	if (isOp("saveProfile"))
+	{
+		if (!op)
+			return replies;
+		const auto dir = padDir();
+		std::string id, name, description;
+		if (HasString(*op, "id"))
+		{
+			json existing;
+			if (!Profiles::Read(dir, (*op)["id"].get<std::string>(), existing))
+			{
+				std::printf("saveProfile :: unknown id, ignored\n");
+				return replies;
+			}
+			id = existing.value("id", std::string());
+			name = existing.value("name", std::string());
+			description = existing.value("description", std::string());
+		}
+		else if (HasString(*op, "name"))
+		{
+			if (Profiles::List(dir).size() >= Profiles::MAX_PER_PAD)
+			{
+				std::printf("saveProfile :: %s already has %zu profiles on %s, refused\n", player.c_str(),
+				            Profiles::MAX_PER_PAD, padName.c_str());
+				return replies;
+			}
+			name = (*op)["name"].get<std::string>();
+			description = (*op).value("description", std::string());
+			id = NewProfileId(dir, name);
+		}
+		else
+		{
+			std::printf("saveProfile :: needs a name or id, ignored\n");
+			return replies;
+		}
+
+		json blob;
+		D::SaveProfile(blob, PROFILE_GROUPS); // capture this pad
+		blob["id"] = id;
+		blob["name"] = name;
+		blob["description"] = description;
+		blob["sensorCount"] = numSensors;
+		blob["savedAt"] = (int64_t)std::time(nullptr);
+		if (Profiles::Write(dir, id, blob))
+		{
+			SetPadSelection(padName, player, id, name); // that is what the pad holds now
+			refreshed();
+		}
+		return replies;
+	}
+
+	// Store a profile the client read from any pad (this one: a duplicate; or
+	// one on another server, since every server keeps only its own pads'
+	// profiles) onto this pad under a new name:
+	//   {pad, importProfile:{player, name, profile:{...stored profile...}}}
+	if (isOp("importProfile"))
+	{
+		if (!op || !HasString(*op, "name") || !(*op).contains("profile"))
+			return replies;
+		json blob = Profiles::Sanitize((*op)["profile"]);
+		const auto dir = padDir();
+		if (blob.is_null() || blob["sensorCount"] != numSensors || Profiles::List(dir).size() >= Profiles::MAX_PER_PAD)
+		{
+			std::printf("importProfile :: invalid profile, sensor-count mismatch or pad full, refused\n");
+			return replies;
+		}
+		const std::string name = (*op)["name"].get<std::string>();
+		const std::string id = NewProfileId(dir, name);
+		blob["id"] = id;
+		blob["name"] = name;
+		blob["savedAt"] = (int64_t)std::time(nullptr);
+		if (Profiles::Write(dir, id, blob))
+			refreshed();
+		return replies;
 	}
 
 	// Edit metadata (name/description) only — never re-captures the pad.
-	if (j.contains("updateProfile") && j["updateProfile"].is_object())
+	if (isOp("updateProfile"))
 	{
-		const auto& u = j["updateProfile"];
 		json blob;
-		if (u.contains("id") && u["id"].is_string() && Profiles::Read(gProfilesDir, u["id"].get<std::string>(), blob))
+		const auto dir = op ? padDir() : Profiles::Path();
+		if (!op || !HasString(*op, "id") || !Profiles::Read(dir, (*op)["id"].get<std::string>(), blob))
+			return replies;
+		if (HasString(*op, "name"))
+			blob["name"] = (*op)["name"].get<std::string>();
+		if (HasString(*op, "description"))
+			blob["description"] = (*op)["description"].get<std::string>();
+		const std::string id = blob.value("id", std::string());
+		if (Profiles::Write(dir, id, blob))
 		{
-			if (u.contains("name") && u["name"].is_string())
-				blob["name"] = u["name"].get<std::string>();
-			if (u.contains("description") && u["description"].is_string())
-				blob["description"] = u["description"].get<std::string>();
-			if (Profiles::Write(gProfilesDir, blob.value("id", std::string()), blob))
-				gProfilesDirty = true;
+			json& st = PadStateFor(padName);
+			if (st.value("player", "") == player && st.value("profileId", "") == id)
+			{
+				st["profileName"] = blob.value("name", std::string());
+				SavePadState(padName);
+			}
+			refreshed();
 		}
-		return;
+		return replies;
 	}
 
-	// Only act when a device is connected; otherwise there is nothing to apply.
-	if (!connectionManager || !connectionManager->ConnectedDevice())
+	if (isOp("deleteProfile"))
 	{
-		std::printf("HandleClientMessage :: no device connected, message ignored\n");
-		return;
+		if (!op || !HasString(*op, "id"))
+			return replies;
+		const std::string id = (*op)["id"].get<std::string>();
+		if (Profiles::Delete(padDir(), id))
+		{
+			json& st = PadStateFor(padName);
+			if (st.value("player", "") == player && st.value("profileId", "") == id)
+			{
+				st["profileId"] = "";
+				st["profileName"] = "";
+				SavePadState(padName);
+			}
+			refreshed();
+		}
+		return replies;
 	}
+
+	// ---- Device ops. ----
 
 	// Release mode: 0 = none, 1 = global, 2 = individual (ReleaseMode enum).
 	if (j.contains("releaseMode") && j["releaseMode"].is_number_integer())
 	{
 		int mode = j["releaseMode"].get<int>();
 		if (mode >= RELEASE_NONE && mode <= RELEASE_INDIVIDUAL)
-			SetReleaseMode((ReleaseMode)mode);
+			D::SetReleaseMode((ReleaseMode)mode);
 		else
 			std::printf("releaseMode :: out of range, ignored\n");
-		return;
+		return replies;
 	}
 
 	// Recalibrate one sensor's baseline; out-of-range indices are rejected downstream.
 	if (j.contains("calibrateSensor") && j["calibrateSensor"].is_number_integer())
 	{
-		CalibrateSensor(j["calibrateSensor"].get<int>());
-		return;
-	}
-
-	// Save the connected pad's current settings as a named profile. Two forms:
-	//   {saveProfile:{name}}      -> create a new profile (slug id, de-collided)
-	//   {saveProfile:{id}}        -> overwrite an existing one, keeping its name
-	if (j.contains("saveProfile") && j["saveProfile"].is_object())
-	{
-		const auto& sp = j["saveProfile"];
-		std::string id, name, description;
-
-		if (sp.contains("id") && sp["id"].is_string())
-		{
-			json existing;
-			if (!Profiles::Read(gProfilesDir, sp["id"].get<std::string>(), existing))
-			{
-				std::printf("saveProfile :: unknown id, ignored\n");
-				return;
-			}
-			id = existing.value("id", std::string());
-			name = existing.value("name", std::string());
-			description = existing.value("description", std::string());
-		}
-		else if (sp.contains("name") && sp["name"].is_string())
-		{
-			name = sp["name"].get<std::string>();
-			description = sp.value("description", std::string());
-			id = Profiles::SlugifyId(name);
-			std::string base = id;
-			for (int n = 2; Profiles::Exists(gProfilesDir, id); ++n)
-				id = base + "-" + std::to_string(n);
-		}
-		else
-		{
-			std::printf("saveProfile :: needs a name or id, ignored\n");
-			return;
-		}
-
-		json blob;
-		SaveProfile(blob, PROFILE_GROUPS); // capture the connected device
-		blob["id"] = id;
-		blob["name"] = name;
-		blob["description"] = description;
-		blob["sensorCount"] = Pad() ? Pad()->numSensors : 0;
-		blob["savedAt"] = (int64_t)std::time(nullptr);
-		if (Profiles::Write(gProfilesDir, id, blob))
-			gProfilesDirty = true;
-		return;
-	}
-
-	// Apply a stored profile to the connected pad. Refuse a sensor-count mismatch
-	// so a 4-panel profile is never squeezed onto a differently-shaped pad.
-	if (j.contains("loadProfile") && j["loadProfile"].is_string())
-	{
-		json blob;
-		if (!Profiles::Read(gProfilesDir, j["loadProfile"].get<std::string>(), blob))
-		{
-			std::printf("loadProfile :: unknown id, ignored\n");
-			return;
-		}
-		const int numSensors = Pad() ? Pad()->numSensors : 0;
-		if (blob.value("sensorCount", -1) != numSensors)
-		{
-			std::printf("loadProfile :: sensor-count mismatch, ignored\n");
-			return;
-		}
-		try
-		{
-			LoadProfile(blob, PROFILE_GROUPS);
-		}
-		catch (const std::exception& e)
-		{
-			std::printf("loadProfile :: failed (%s)\n", e.what());
-		}
-		return;
+		D::CalibrateSensor(j["calibrateSensor"].get<int>());
+		return replies;
 	}
 
 	// A configuration update reuses the hardened LoadProfile path, which
@@ -1010,16 +1194,19 @@ void Device::HandleClientMessage(const std::string& message)
 	{
 		try
 		{
-			LoadProfile(j, DGP_ALL);
+			D::LoadProfile(j, DGP_ALL);
 		}
 		catch (const std::exception& e)
 		{
 			std::printf("HandleClientMessage :: failed to apply config (%s)\n", e.what());
 		}
-		return;
+		// Profiles are stored per pad name, so a rename carries them along.
+		RenamePad(padName, device->State().name);
+		return replies;
 	}
 
 	std::printf("HandleClientMessage :: unhandled message: %s\n", message.c_str());
+	return replies;
 }
 
 std::string Device::ReadDebug()
@@ -1137,7 +1324,11 @@ void Device::SetSearching(bool s)
 
 void Device::DiscoverNewDevices()
 {
-	connectionManager->DiscoverDevice();
+	if (connectionManager->DiscoverDevice())
+	{
+		gLightsDirty = true;
+		gPadStatesDirty = true;
+	}
 }
 
 int Device::DeviceNumber()
@@ -1164,55 +1355,27 @@ string Device::GetDevicePath(int index)
 void Device::DeviceListToJson(json& j)
 {
 	j["msgType"] = 2;
-	j["selectedIndex"] = connectionManager ? connectionManager->DeviceSelected() : -1;
 	j["devices"] = json::array();
-
-	int count = connectionManager ? connectionManager->DeviceNumber() : 0;
-	for (int i = 0; i < count; ++i)
+	for (PadDevice* device : connectionManager ? connectionManager->Pads() : vector<PadDevice*>{})
 	{
-		json device;
-		device["index"] = i;
-		device["id"] = connectionManager->GetDevicePath(i);
-		device["name"] = connectionManager->GetDeviceName(i);
-		j["devices"].push_back(std::move(device));
+		json d;
+		d["id"] = device->Path();
+		d["name"] = device->State().name;
+		d["sensorCount"] = device->State().numSensors;
+		j["devices"].push_back(std::move(d));
 	}
 }
 
-void Device::SetProfilesDir(const std::string& dir)
+void Device::SetProfilesDir(const std::filesystem::path& dir)
 {
 	gProfilesDir = dir.empty() ? "profiles" : dir;
+	std::printf("Profiles directory: %s\n", Profiles::PathU8(gProfilesDir).c_str());
 	std::error_code ec;
 	std::filesystem::create_directories(gProfilesDir, ec);
 	if (ec)
-		std::printf("SetProfilesDir :: could not create '%s' (%s)\n", gProfilesDir.c_str(), ec.message().c_str());
-	else
-		std::printf("Profiles directory: %s\n", gProfilesDir.c_str());
-	gProfilesDirty = true;
-}
-
-void Device::ProfileListToJson(json& j)
-{
-	j["msgType"] = 3;
-	j["profiles"] = Profiles::List(gProfilesDir);
-}
-
-bool Device::TakeProfilesDirty()
-{
-	return gProfilesDirty.exchange(false);
-}
-
-bool Device::DeviceSelect(int index)
-{
-	if (!connectionManager)
-		return false;
-	return connectionManager->DeviceSelect(index);
-}
-
-int Device::DeviceSelected()
-{
-	if (!connectionManager)
-		return -1;
-	return connectionManager->DeviceSelected();
+		std::printf("SetProfilesDir :: could not create it (%s)\n", ec.message().c_str());
+	gPadStates.clear();
+	gPadStatesDirty = true;
 }
 
 void PadDevice::LoadProfile(json& j, DeviceProfileGroups groups)

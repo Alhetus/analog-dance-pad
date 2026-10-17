@@ -1,6 +1,8 @@
 #include <Model/Profiles.h>
 
 #include <cctype>
+#include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 
@@ -48,12 +50,77 @@ std::string SlugifyId(const std::string& name)
 	return out;
 }
 
-static fs::path PathFor(const std::string& dir, const std::string& id)
+Path U8Path(const std::string& utf8)
 {
-	return fs::path(dir) / (id + ".json");
+	return Path(std::u8string(utf8.begin(), utf8.end()));
 }
 
-bool Exists(const std::string& dir, const std::string& id)
+std::string PathU8(const Path& p)
+{
+	const std::u8string s = p.u8string();
+	return std::string(s.begin(), s.end());
+}
+
+std::string EscapeName(const std::string& name)
+{
+	static const char* reserved[] = {"CON",  "PRN",  "AUX",  "NUL",  "COM1", "COM2", "COM3", "COM4",
+	                                 "COM5", "COM6", "COM7", "COM8", "COM9", "LPT1", "LPT2", "LPT3",
+	                                 "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"};
+	// Windows treats "CON.txt" as CON too, so compare the part before any dot.
+	std::string stem = name.substr(0, name.find('.'));
+	for (auto& c : stem)
+		c = (char)std::toupper((unsigned char)c);
+	bool isReserved = false;
+	for (const char* r : reserved)
+		isReserved = isReserved || stem == r;
+
+	std::string out;
+	for (size_t i = 0; i < name.size(); ++i)
+	{
+		const unsigned char c = (unsigned char)name[i];
+		const bool edge = i == 0 || i + 1 == name.size();
+		const bool bad = c < 0x20 || c == 0x7f || std::strchr("<>:\"/\\|?*%", c) != nullptr || (c == '.' && edge) ||
+		                 (c == ' ' && i + 1 == name.size()) || (i == 0 && isReserved);
+		if (bad)
+		{
+			char buf[4];
+			std::snprintf(buf, sizeof(buf), "%%%02X", c);
+			out += buf;
+		}
+		else
+			out.push_back((char)c);
+	}
+	return out;
+}
+
+std::string UnescapeName(const std::string& escaped)
+{
+	std::string out;
+	for (size_t i = 0; i < escaped.size(); ++i)
+	{
+		if (escaped[i] == '%' && i + 2 < escaped.size() && std::isxdigit((unsigned char)escaped[i + 1]) &&
+		    std::isxdigit((unsigned char)escaped[i + 2]))
+		{
+			out.push_back((char)std::stoi(escaped.substr(i + 1, 2), nullptr, 16));
+			i += 2;
+		}
+		else
+			out.push_back(escaped[i]);
+	}
+	return out;
+}
+
+Path PlayerPadDir(const Path& profilesDir, const std::string& player, const std::string& pad)
+{
+	return profilesDir / "players" / U8Path(EscapeName(player)) / U8Path(EscapeName(pad));
+}
+
+static fs::path PathFor(const Path& dir, const std::string& id)
+{
+	return dir / (id + ".json");
+}
+
+bool Exists(const Path& dir, const std::string& id)
 {
 	if (!ValidId(id))
 		return false;
@@ -61,7 +128,7 @@ bool Exists(const std::string& dir, const std::string& id)
 	return fs::exists(PathFor(dir, id), ec);
 }
 
-json List(const std::string& dir)
+json List(const Path& dir)
 {
 	json arr = json::array();
 	std::error_code ec;
@@ -93,7 +160,7 @@ json List(const std::string& dir)
 	return arr;
 }
 
-bool Read(const std::string& dir, const std::string& id, json& out)
+bool Read(const Path& dir, const std::string& id, json& out)
 {
 	if (!ValidId(id))
 		return false;
@@ -111,7 +178,7 @@ bool Read(const std::string& dir, const std::string& id, json& out)
 	}
 }
 
-bool Write(const std::string& dir, const std::string& id, const json& profile)
+bool Write(const Path& dir, const std::string& id, const json& profile)
 {
 	if (!ValidId(id))
 		return false;
@@ -122,7 +189,7 @@ bool Write(const std::string& dir, const std::string& id, const json& profile)
 	// Write to a temp file, then rename over the target so a reader (possibly on
 	// another machine sharing this folder) never sees a half-written profile.
 	const fs::path finalPath = PathFor(dir, id);
-	const fs::path tmpPath = fs::path(dir) / (id + ".json.tmp");
+	const fs::path tmpPath = dir / (id + ".json.tmp");
 	{
 		std::ofstream out(tmpPath, std::ios::binary | std::ios::trunc);
 		if (!out)
@@ -140,7 +207,26 @@ bool Write(const std::string& dir, const std::string& id, const json& profile)
 	return true;
 }
 
-bool Delete(const std::string& dir, const std::string& id)
+json Sanitize(const json& profile)
+{
+	if (!profile.is_object() || !profile.contains("sensorCount") || !profile["sensorCount"].is_number_integer() ||
+	    !profile.contains("sensors") || !profile["sensors"].is_array())
+		return nullptr;
+
+	json out = json::object();
+	out["sensorCount"] = profile["sensorCount"];
+	out["sensors"] = profile["sensors"];
+	if (profile.contains("releaseThreshold") && profile["releaseThreshold"].is_number())
+		out["releaseThreshold"] = profile["releaseThreshold"];
+	for (const char* key : {"lightRules", "ledMappings"})
+		if (profile.contains(key) && profile[key].is_array())
+			out[key] = profile[key];
+	out["description"] =
+	    profile.contains("description") && profile["description"].is_string() ? profile["description"] : json("");
+	return out;
+}
+
+bool Delete(const Path& dir, const std::string& id)
 {
 	if (!ValidId(id))
 		return false;

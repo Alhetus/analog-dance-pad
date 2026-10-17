@@ -4,6 +4,7 @@
 #include <string>
 #include <map>
 #include <memory>
+#include <filesystem>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -88,14 +89,13 @@ struct LightsState
 };
 
 // An immutable, self-contained copy of everything the WebSocket clients need to
-// see about the currently connected pad. Built on the device-I/O thread each
+// see about one connected pad. Built on the device-I/O thread each
 // tick and published via an atomic shared_ptr, so readers never touch live
 // device state (no locks, no torn reads, no TOCTOU null-deref).
 struct SensorSnapshot
 {
 	bool connected = false;
-	int deviceCount = 0;
-	int selectedIndex = -1; // index of the streamed device in the discovered-device list, or -1.
+	std::string path; // HID path: how clients address this pad in messages
 	std::string name;
 	int pollingRate = 0;
 	double releaseThreshold = 1.0;
@@ -161,22 +161,22 @@ class Device
 
 	static const SensorState* Sensor(int sensorIndex);
 
-	// Builds an immutable snapshot of the connected pad and publishes it
+	// Builds an immutable snapshot of every connected pad and publishes them
 	// atomically. Called on the device-I/O thread (from Update()).
 	static void PublishSnapshot();
 
-	// Returns the most recently published snapshot (may be null before the
-	// first tick). Lock-free; safe to call from any thread.
-	static std::shared_ptr<const SensorSnapshot> GetSnapshot();
+	// Returns the most recently published snapshots, one per pad (may be null
+	// before the first tick). Safe to call from any thread.
+	static std::shared_ptr<const std::vector<SensorSnapshot>> GetSnapshots();
 
 	// Serializes a snapshot to the client-facing JSON wire format.
 	static void SnapshotToJson(const SensorSnapshot& snapshot, json& j);
 
-	// Serializes the list of discovered devices (msgType 2) so clients can
-	// enumerate pads and pick which one to stream/control.
+	// Serializes the list of connected pads (msgType 2) so clients can
+	// enumerate them and address messages by path.
 	static void DeviceListToJson(json& j);
 
-	// Serializes the connected pad's lights (msgType 4). Broadcast only on
+	// Serializes one pad's lights (msgType 4). Broadcast only on
 	// change / periodically (see TakeLightsDirty), not with every snapshot.
 	static void LightsToJson(const SensorSnapshot& snapshot, json& j);
 
@@ -185,8 +185,16 @@ class Device
 	static bool TakeLightsDirty();
 
 	// Parses and dispatches one inbound client message. Must be called on the
-	// device-I/O thread so device access stays single-threaded.
-	static void HandleClientMessage(const std::string& message);
+	// device-I/O thread so device access stays single-threaded. Returns any
+	// messages to broadcast in reply.
+	static std::vector<json> HandleClientMessage(const std::string& message);
+
+	// Serializes each pad's server-owned selection (msgType 5): current player
+	// and profile plus recent players, keyed by pad path.
+	static void PadStatesToJson(json& j);
+
+	// Returns true and clears the flag if any pad state changed since the last call.
+	static bool TakePadStatesDirty();
 
 	static std::string ReadDebug();
 
@@ -226,24 +234,12 @@ class Device
 
 	static std::string GetDevicePath(int index);
 
-	static bool DeviceSelect(int index);
-
-	static int DeviceSelected();
-
 	static void LoadProfile(json& j, DeviceProfileGroups groups);
 
 	static void SaveProfile(json& j, DeviceProfileGroups groups);
 
-	// Directory where named profiles are stored (typically a shared network
-	// folder so every venue machine sees the same set). Set once at startup.
-	static void SetProfilesDir(const std::string& dir);
-
-	// Serializes the stored-profile list (msgType 3) for broadcast to clients.
-	static void ProfileListToJson(json& j);
-
-	// Returns true and clears the flag if the profile set changed since the last
-	// call, so the caller can broadcast a fresh list immediately.
-	static bool TakeProfilesDirty();
+	// Root of this server's local profile store. Set once at startup.
+	static void SetProfilesDir(const std::filesystem::path& dir);
 
 	static void SetSearching(bool s);
 

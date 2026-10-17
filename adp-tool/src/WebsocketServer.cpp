@@ -4,25 +4,21 @@
 #include <ixwebsocket/IXWebSocketServer.h>
 #include "WebsocketServer.h"
 #include "MSGQ.hpp"
+#include "Model/Players.h"
 
 namespace adp
 {
 WebsocketServer::WebsocketServer() = default;
 WebsocketServer::~WebsocketServer() = default;
 
-void WebsocketServer::Init(MSGQ<QueueMessage>& queue)
+void WebsocketServer::Init(MSGQ<QueueMessage>& queue, std::string host)
 {
-	// Run a server on localhost at a given port.
-	// Bound host name, max connections and listen backlog can also be passed in as parameters.
 	constexpr int port = 8008;
-	const std::string host(
-	    "127.0.0.1"); // If you need this server to be accessible on a different machine, use "0.0.0.0"
 
 	auto srv = std::make_unique<ix::WebSocketServer>(port, host);
 
 	srv->setOnClientMessageCallback([&queue](const std::shared_ptr<ix::ConnectionState>& connectionState,
 	                                         ix::WebSocket& webSocket, const ix::WebSocketMessagePtr& msg) {
-		(void)webSocket;
 		// The ConnectionState object contains information about the connection,
 		// at this point only the client ip address and the port.
 
@@ -38,6 +34,18 @@ void WebsocketServer::Init(MSGQ<QueueMessage>& queue)
 		}
 		else if (msg->type == ix::WebSocketMessageType::Message)
 		{
+			// Avatars are file-only and can be MBs, so answer them here, to the
+			// asking client only, instead of on the device thread. The name is
+			// looked up in the scanned player list, never used as a path.
+			if (msg->str.find("\"getAvatar\"") != std::string::npos)
+			{
+				const auto j = nlohmann::json::parse(msg->str, nullptr, false);
+				if (j.is_object() && j.contains("getAvatar") && j["getAvatar"].is_string())
+				{
+					webSocket.send(Players::AvatarMessage(j["getAvatar"].get<std::string>()));
+					return;
+				}
+			}
 			// Enqueue the message by value; the device thread drains and applies it.
 			queue.push(QueueMessage(msg->str));
 		}

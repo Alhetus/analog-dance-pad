@@ -16,8 +16,9 @@ class WebsocketServer
 	WebsocketServer();
 	~WebsocketServer();
 
-	// Runs the server; blocks until Stop() is called.
-	void Init(MSGQ<QueueMessage>& queue);
+	// Runs the server on `host` (e.g. "0.0.0.0" to accept phones/tablets on
+	// the LAN); blocks until Stop() is called.
+	void Init(MSGQ<QueueMessage>& queue, std::string host);
 
 	// Broadcasts a message to all connected clients. Thread-safe.
 	void SendMessageToClients(const std::string& message);

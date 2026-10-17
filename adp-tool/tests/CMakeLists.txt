@@ -13,6 +13,7 @@ add_executable(adp-tool-tests
 	ProfileTests.cpp
 	ProfilesStoreTests.cpp
 	HandleMessageTests.cpp
+	PlayersTests.cpp
 )
 
 target_include_directories(adp-tool-tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})

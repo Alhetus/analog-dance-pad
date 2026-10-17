@@ -8,7 +8,7 @@ TEST_CASE("SnapshotToJson emits the WebSocket contract fields", "[snapshot]")
 {
 	SensorSnapshot snap;
 	snap.connected = true;
-	snap.deviceCount = 2;
+	snap.path = "hid#1";
 	snap.name = "MyPad";
 	snap.pollingRate = 1000;
 	snap.releaseThreshold = 0.8;
@@ -27,8 +27,8 @@ TEST_CASE("SnapshotToJson emits the WebSocket contract fields", "[snapshot]")
 	Device::SnapshotToJson(snap, j);
 
 	CHECK(j["msgType"] == 1);
-	// The field is named deviceIndex but is sourced from deviceCount (pinned quirk).
-	CHECK(j["deviceIndex"] == 2);
+	// Clients route every message by the pad's HID path.
+	CHECK(j["pad"] == "hid#1");
 	CHECK(j["name"] == "MyPad");
 	CHECK(j["pollingRate"] == 1000);
 	CHECK(j["releaseThreshold"] == 0.8);
@@ -53,14 +53,15 @@ TEST_CASE("SnapshotToJson emits the WebSocket contract fields", "[snapshot]")
 TEST_CASE("LightsToJson emits the lights message in profile shape", "[snapshot]")
 {
 	SensorSnapshot snap;
-	snap.lights.lightRules[0] = LightRule{true, false, RgbColor(255, 0, 0), RgbColor(0, 0, 0),
-	                                       RgbColor(0, 0, 0), RgbColor(0, 0, 0)};
+	snap.lights.lightRules[0] =
+	    LightRule{true, false, RgbColor(255, 0, 0), RgbColor(0, 0, 0), RgbColor(0, 0, 0), RgbColor(0, 0, 0)};
 	snap.lights.ledMappings[0] = LedMapping{0, 1, 2, 3};
 
 	json j;
 	Device::LightsToJson(snap, j);
 
 	CHECK(j["msgType"] == 4);
+	CHECK(j.contains("pad"));
 	// Same shape a saved profile uses, so the client can compare field-for-field.
 	REQUIRE(j["lightRules"].is_array());
 	REQUIRE(j["lightRules"].size() == 1);

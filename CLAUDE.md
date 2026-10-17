@@ -13,11 +13,14 @@ Clone note: this repo uses git submodules (under `adp-tool/lib`, `adp-tool/vcpkg
 
 ## adp-tool (C++, server)
 
-Threading model (`src/Main.cpp`): two threads communicating through a blocking queue (`MSGQ.hpp`):
-- **Device-I/O thread** (`Application::UpdateLoop`) — ~60 Hz loop and the *sole owner of all hidapi access*. Each tick it runs `Device::Update()` (discover → poll sensors → build and atomically publish an immutable `SensorSnapshot`), broadcasts the latest snapshot JSON (`Device::SnapshotToJson`) to all WebSocket clients, then drains the inbound queue and applies each message via `Device::HandleClientMessage`. Because every device touch happens here, there are no data races on device state and no concurrent HID calls.
-- **WebSocket thread** (`WebsocketServer::Init`) — ixwebsocket server on port 8008. Inbound client messages are pushed by value onto the queue; the device-I/O thread drains and dispatches them. The server is owned by `WebsocketServer` (no dangling pointers) and stopped via `WebsocketServer::Stop()`.
+Threading model (`src/Main.cpp`): device-I/O and WebSocket threads communicating through a blocking queue (`MSGQ.hpp`), plus a player scanner:
+- **Device-I/O thread** (`Application::UpdateLoop`) — ~60 Hz loop and the *sole owner of all hidapi access*. All connected pads are polled every tick: `Device::Update()` (discover → poll every pad → publish one immutable `SensorSnapshot` per pad), broadcasts each snapshot (`Device::SnapshotToJson`, tagged with the pad's HID path) to all clients, then drains the inbound queue via `Device::HandleClientMessage`. Every device message carries `pad: <path>`; the static `Device::*` API acts on the "current pad" that Update/HandleClientMessage set. Because every device touch happens here, there are no data races on device state and no concurrent HID calls.
+- **WebSocket thread** (`WebsocketServer::Init`) — ixwebsocket server on port 8008. Inbound client messages are pushed by value onto the queue; the device-I/O thread drains and dispatches them. `getAvatar` is answered directly on this thread (file-only, can be MBs). The server is owned by `WebsocketServer` (no dangling pointers) and stopped via `WebsocketServer::Stop()`.
+- **Player scanner** (`Model/Players.cpp`) — rescans `--local-profiles-dir` (ITGmania LocalProfiles, `DisplayName=` in `Editable.ini`) every 30s or on `rescanPlayers`, follows player renames, and publishes an immutable player list.
 
-Sensor state crosses threads only as `std::atomic<std::shared_ptr<const SensorSnapshot>>` (`Device::GetSnapshot()`), so readers are lock-free and never see torn/partial state.
+Profiles live on each server's local disk at `<--profiles-dir>/players/<player>/<pad name>/<id>.json` (max 5 per player per pad); per-pad selection at `pads/<pad name>/state.json`. Only LocalProfiles is on a network share; while it is unreachable the last known player list is kept and rescans run every 5s. Run with `--host 0.0.0.0` so phones/tablets can connect.
+
+Sensor state crosses threads only as an immutable `shared_ptr<const vector<SensorSnapshot>>` (`Device::GetSnapshots()`), so readers are lock-free and never see torn/partial state.
 
 Shutdown is graceful: `SIGINT`/`SIGTERM` clears an atomic flag, the loop exits, the server is stopped, the queue is drained, threads join, and destructors run (`Device::Shutdown` saves/closes the device).
 
