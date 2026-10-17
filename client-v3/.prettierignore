@@ -7,3 +7,6 @@ bun.lockb
 
 # Miscellaneous
 /static/
+
+# Not app code; kept as hand-written Markdown
+README.md

@@ -35,7 +35,7 @@
 
 <dialog
 	bind:this={dialogEl}
-	onclose={onclose}
+	{onclose}
 	onclick={(e) => e.target === dialogEl && dialogEl?.close()}
 	class="bg-card text-card-foreground m-auto w-[min(92vw,26rem)] rounded-lg border p-6 backdrop:bg-black/50"
 >
