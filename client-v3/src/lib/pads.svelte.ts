@@ -1,7 +1,7 @@
 import { browser } from '$app/environment';
 import serversConfig from './servers.config.json';
 
-// ---- Protocol types (see adp-tool Device::SnapshotToJson / DeviceListToJson) ----
+// ---- Protocol types (see adp-tool Device.cpp / Players.cpp) ----
 
 export interface Sensor {
 	threshold: number; // normalized 0..1
@@ -34,11 +34,12 @@ export interface LedMapping {
 	ledIndexEnd: number;
 }
 
+/** msgType 1, one per pad per tick. */
 export interface Snapshot {
 	msgType: 1;
+	pad: string; // HID path: how messages address this pad
 	name: string;
 	pollingRate: number;
-	selectedIndex: number;
 	releaseThreshold: number; // legacy global release ratio, 0.01..1 (unused; see releaseMode)
 	releaseMode: number; // 0 none, 2 per-sensor (1 = legacy global, treated as per-sensor)
 	numButtons: number; // mappable buttons this pad exposes
@@ -52,36 +53,32 @@ export interface Lights {
 	ledMappings: LedMapping[];
 }
 
+/** A connected pad (msgType 2). */
 export interface DeviceInfo {
-	index: number;
-	id: string;
+	id: string; // HID path
+	name: string; // stable identity: profiles are stored per pad name
+	sensorCount: number;
+}
+
+/** A player from the shared LocalProfiles folder (msgType 3). */
+export interface Player {
 	name: string;
+	avatar: boolean;
+	profiles: Record<string, number>; // pad name -> stored profile count
 }
 
-/** A mapped sensor plus its original index in the snapshot (needed to write back). */
-export interface MappedSensor {
-	index: number;
-	sensor: Sensor;
-}
-
-/** Mapped sensors sharing one button, grouped for display. */
-export interface ButtonGroup {
-	button: number; // 1-based button number
-	sensors: MappedSensor[]; // sensors mapped to this button, in snapshot-index order
-}
-
-export interface DeviceOption {
-	endpoint: string;
-	index: number;
-	id: string;
+/** Server-owned selection on one pad (msgType 5). */
+export interface PadState {
 	name: string;
-	key: string; // `${endpoint}#${index}` — the Select value
-	label: string;
+	player?: string;
+	profileId?: string;
+	profileName?: string;
+	recent?: string[];
 }
 
-/** A stored profile (msgType 3). Captures thresholds+release, gain and lights. */
+/** A stored profile (msgType 6). Captures thresholds+release, gain and lights. */
 export interface Profile {
-	id: string; // immutable filename stem
+	id: string; // filename stem, unique per player+pad
 	name: string;
 	description?: string;
 	sensorCount: number; // only loadable onto a pad with this many sensors
@@ -91,6 +88,32 @@ export interface Profile {
 	lightRules?: LightRule[];
 	ledMappings?: LedMapping[];
 }
+
+export interface Avatar {
+	mime: string; // '' when the player has none
+	url: string; // data: URL
+}
+
+/** Mapped sensors grouped per button, plus each sensor's index in the snapshot. */
+export interface MappedSensor {
+	index: number;
+	sensor: Sensor;
+}
+
+export interface ButtonGroup {
+	button: number; // 1-based button number
+	sensors: MappedSensor[]; // sensors mapped to this button, in snapshot-index order
+}
+
+export interface ServerConfig {
+	name: string;
+	url: string;
+}
+
+/** The 4-step flow, then tuning. */
+export type Step = 'server' | 'pad' | 'player' | 'profile' | 'tune';
+
+export const MAX_PROFILES = 5; // per player per pad, enforced by the server too
 
 // Reconcile tolerance for float thresholds. Must sit between the device's
 // quantization noise (thresholds are stored /850 ~= 0.0012) and the smallest
@@ -104,26 +127,33 @@ const MAX_BACKOFF_MS = 5000;
 
 const clamp01 = (v: number) => (v < 0 ? 0 : v > 1 ? 1 : v);
 const clampByte = (v: number) => (v < 0 ? 0 : v > 255 ? 255 : Math.round(v));
-const hostLabel = (endpoint: string) => endpoint.replace(/^wss?:\/\//, '');
 
 /** One WebSocket connection to a single adp-tool server. */
 class Conn {
 	readonly endpoint: string;
+	readonly name: string;
 	status: 'connecting' | 'open' | 'offline' = $state('connecting');
 	deviceList: DeviceInfo[] = $state([]);
-	selectedIndex = $state(-1);
-	snapshot: Snapshot | null = $state(null);
-	profiles: Profile[] = $state([]);
-	lights: Lights | null = $state(null); // null until the first lights message arrives
-	lastMessageAt = $state(0);
+	snapshots: Record<string, Snapshot> = $state({});
+	snapshotAt: Record<string, number> = $state({});
+	lights: Record<string, Lights> = $state({});
+	players: Player[] = $state([]);
+	/** False while the server can't reach LocalProfiles; `players` is then the last known list. */
+	localProfilesOk = $state(true);
+	padStates: Record<string, PadState> = $state({});
+	/** player -> pad name -> profiles, filled by listProfiles replies. */
+	profiles: Record<string, Record<string, Profile[]>> = $state({});
+	/** player -> avatar; null while requested. */
+	avatars: Record<string, Avatar | null> = $state({});
 
 	#ws: WebSocket | null = null;
 	#backoff = 500;
 	#reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 	#closed = false;
 
-	constructor(endpoint: string) {
-		this.endpoint = endpoint;
+	constructor(server: ServerConfig) {
+		this.endpoint = server.url;
+		this.name = server.name;
 		this.#open();
 	}
 
@@ -140,7 +170,7 @@ class Conn {
 		ws.addEventListener('open', () => {
 			this.status = 'open';
 			this.#backoff = 500;
-			this.send({ listProfiles: true }); // get the profile list right away
+			this.send({ rescanPlayers: true }); // the reply brings the player list right away
 		});
 		ws.addEventListener('message', (ev) => this.#onMessage(ev.data));
 		ws.addEventListener('close', () => this.#onDown());
@@ -155,29 +185,37 @@ class Conn {
 			return;
 		}
 		if (typeof m !== 'object' || m === null) return;
-		const msg = m as { msgType?: number };
-		if (msg.msgType === 2) {
-			const dl = m as { devices: DeviceInfo[]; selectedIndex: number };
-			this.deviceList = dl.devices;
-			this.selectedIndex = dl.selectedIndex;
-		} else if (msg.msgType === 1) {
-			this.snapshot = m as Snapshot;
-			this.selectedIndex = (m as Snapshot).selectedIndex;
-			this.lastMessageAt = Date.now();
+		const msg = m as { msgType?: number; pad?: string };
+		if (msg.msgType === 1) {
+			const s = m as Snapshot;
+			this.snapshots[s.pad] = s;
+			this.snapshotAt[s.pad] = Date.now();
+		} else if (msg.msgType === 2) {
+			this.deviceList = (m as { devices: DeviceInfo[] }).devices;
 		} else if (msg.msgType === 3) {
-			this.profiles = (m as { profiles: Profile[] }).profiles;
+			const pl = m as { players: Player[]; localProfiles?: boolean };
+			this.players = pl.players;
+			this.localProfilesOk = pl.localProfiles ?? true;
 		} else if (msg.msgType === 4) {
-			this.lights = m as Lights;
+			if (msg.pad) this.lights[msg.pad] = m as Lights;
+		} else if (msg.msgType === 5) {
+			this.padStates = (m as { pads: Record<string, PadState> }).pads;
+		} else if (msg.msgType === 6) {
+			const r = m as { player: string; pads: Record<string, Profile[]> };
+			this.profiles[r.player] = r.pads;
+		} else if (msg.msgType === 7) {
+			const a = m as { name: string; mime: string; data: string };
+			this.avatars[a.name] = { mime: a.mime, url: a.mime ? `data:${a.mime};base64,${a.data}` : '' };
 		}
 	}
 
 	#onDown() {
 		if (this.#closed) return;
 		this.status = 'offline';
-		this.snapshot = null;
+		this.snapshots = {};
 		this.deviceList = [];
-		this.profiles = [];
-		this.lights = null;
+		this.lights = {};
+		this.padStates = {};
 		this.#scheduleReconnect();
 	}
 
@@ -201,15 +239,9 @@ class Conn {
 	}
 }
 
-interface ActiveRef {
-	endpoint: string;
-	index: number;
-}
-
-const ACTIVE_KEY = 'adp-active';
-const LOADED_KEY = 'adp-loaded'; // { [padKey]: profileId } — last profile loaded onto each pad
+const SERVER_KEY = 'adp-server';
 /** Server list is baked in at build time from servers.config.json — not user-editable. */
-const CONFIGURED_ENDPOINTS = serversConfig.servers;
+const SERVERS: ServerConfig[] = serversConfig.servers;
 
 /** Order-independent deep equality via key-sorted JSON (both sides come from the
  * server's nlohmann serialization, so this is exact for lights comparison). */
@@ -224,23 +256,20 @@ const canon = (v: unknown): string =>
 			: val
 	);
 
-/** Same slug rule as the server (Profiles::SlugifyId), to predict a new id. */
-const slugify = (name: string) => {
-	const s = name
-		.toLowerCase()
-		.replace(/[^a-z0-9]+/g, '-')
-		.replace(/^-+|-+$/g, '');
-	return s || 'profile';
-};
-
 class PadsStore {
-	endpoints: string[] = $state([...CONFIGURED_ENDPOINTS]);
+	readonly servers = SERVERS;
 	conns: Conn[] = $state([]);
-	active: ActiveRef | null = $state(null);
-	/** Optimistic per-sensor edits for the active device, keyed by sensor index. */
+
+	// ---- Selection: server -> pad -> player -> profile ----
+	step: Step = $state('server');
+	server: string | null = $state(null); // endpoint url, remembered per device
+	pad: string | null = $state(null); // HID path on that server
+	player: string | null = $state(null);
+	/** Set when a player is picked; the profile step auto-loads a lone profile once. */
+	autoLoad = $state(false);
+
+	/** Optimistic per-sensor edits for the selected pad, keyed by sensor index. */
 	pending: Record<number, SensorPatch> = $state({});
-	/** Last profile loaded onto each pad, keyed by `${endpoint}#${index}`. */
-	loaded: Record<string, string> = $state({});
 	now = $state(0); // ticking clock so staleness stays reactive
 
 	#clock: ReturnType<typeof setInterval> | null = null;
@@ -250,16 +279,17 @@ class PadsStore {
 	start() {
 		if (!browser || this.#clock) return;
 		try {
-			const a = localStorage.getItem(ACTIVE_KEY);
-			if (a) this.active = JSON.parse(a);
-			const l = localStorage.getItem(LOADED_KEY);
-			if (l) this.loaded = JSON.parse(l);
+			const s = localStorage.getItem(SERVER_KEY);
+			if (s && SERVERS.some((c) => c.url === s)) {
+				this.server = s;
+				this.step = 'pad';
+			}
 		} catch {
-			/* ignore malformed storage */
+			/* storage unavailable */
 		}
 		this.now = Date.now();
 		this.#clock = setInterval(() => (this.now = Date.now()), 250);
-		this.#reconcileConns();
+		this.conns = SERVERS.map((s) => new Conn(s));
 	}
 
 	stop() {
@@ -269,97 +299,134 @@ class PadsStore {
 		this.conns = [];
 	}
 
-	#reconcileConns() {
-		if (!browser) return;
-		const wanted = new Set(this.endpoints);
-		// Drop connections no longer wanted.
-		for (const c of this.conns) if (!wanted.has(c.endpoint)) c.close();
-		const kept = this.conns.filter((c) => wanted.has(c.endpoint));
-		const have = new Set(kept.map((c) => c.endpoint));
-		// Open connections for new endpoints.
-		const added = this.endpoints.filter((e) => !have.has(e)).map((e) => new Conn(e));
-		this.conns = [...kept, ...added];
-	}
+	// ---- Navigation ----
 
-	/** All devices across all endpoints, for the dropdown. */
-	get devices(): DeviceOption[] {
-		const out: DeviceOption[] = [];
-		for (const c of this.conns) {
-			for (const d of c.deviceList) {
-				out.push({
-					endpoint: c.endpoint,
-					index: d.index,
-					id: d.id,
-					name: d.name,
-					key: `${c.endpoint}#${d.index}`,
-					label: `${hostLabel(c.endpoint)} — ${d.name || 'Pad'}`
-				});
-			}
+	selectServer(url: string) {
+		this.server = url;
+		this.pad = null;
+		this.player = null;
+		this.pending = {};
+		this.step = 'pad';
+		try {
+			localStorage.setItem(SERVER_KEY, url);
+		} catch {
+			/* storage unavailable */
 		}
-		return out;
 	}
 
-	get activeKey(): string {
-		return this.active ? `${this.active.endpoint}#${this.active.index}` : '';
+	selectPad(path: string) {
+		this.pad = path;
+		this.player = null;
+		this.pending = {};
+		this.step = 'player';
+		this.conn?.send({ rescanPlayers: true }); // pick up just-created players
 	}
 
-	#activeConn(): Conn | undefined {
-		return this.active ? this.conns.find((c) => c.endpoint === this.active!.endpoint) : undefined;
+	selectPlayer(name: string) {
+		this.player = name;
+		this.autoLoad = true;
+		this.step = 'profile';
+		this.#requestProfiles(name);
 	}
 
-	get activeConn(): Conn | undefined {
-		return this.#activeConn();
+	goto(step: Step) {
+		if (step === 'profile' && this.player) this.#requestProfiles(this.player);
+		this.autoLoad = false;
+		this.step = step;
 	}
 
-	#isFresh(c: Conn | undefined): c is Conn {
-		return (
-			!!c && c.status === 'open' && c.snapshot !== null && this.now - c.lastMessageAt < STALE_MS
+	/** Every server keeps only its own pads' profiles: ask them all (copy sources). */
+	#requestProfiles(player: string) {
+		for (const c of this.conns) c.send({ listProfiles: { player } });
+	}
+
+	// ---- Derived views ----
+
+	get conn(): Conn | undefined {
+		return this.conns.find((c) => c.endpoint === this.server);
+	}
+
+	get serverName(): string {
+		return this.conn?.name ?? '';
+	}
+
+	/** The selected server's pads. */
+	get devices(): DeviceInfo[] {
+		return this.conn?.deviceList ?? [];
+	}
+
+	get device(): DeviceInfo | undefined {
+		return this.devices.find((d) => d.id === this.pad);
+	}
+
+	/** Pad names used more than once across all servers (profiles would collide). */
+	get duplicatePadNames(): string[] {
+		const names = this.conns.flatMap((c) => c.deviceList.map((d) => d.name));
+		return names.filter((n, i) => names.indexOf(n) !== i);
+	}
+
+	/** A pad's live snapshot on the selected server, or null if stale/missing. */
+	snapshotOf(path: string): Snapshot | null {
+		const c = this.conn;
+		if (!c || c.status !== 'open') return null;
+		const s = c.snapshots[path];
+		return s && this.now - (c.snapshotAt[path] ?? 0) < STALE_MS ? s : null;
+	}
+
+	padStateOf(path: string): PadState | undefined {
+		return this.conn?.padStates[path];
+	}
+
+	get activeSnapshot(): Snapshot | null {
+		return this.pad ? this.snapshotOf(this.pad) : null;
+	}
+
+	get padState(): PadState | undefined {
+		return this.pad ? this.padStateOf(this.pad) : undefined;
+	}
+
+	get localProfilesOk(): boolean {
+		return this.conn?.localProfilesOk ?? true;
+	}
+
+	get players(): Player[] {
+		return this.conn?.players ?? [];
+	}
+
+	/** Profiles of `player` on pad `padName` (once listProfiles has answered). */
+	profilesOf(player: string, padName: string): Profile[] | undefined {
+		const byPad = this.conn?.profiles[player];
+		return byPad ? (byPad[padName] ?? []) : undefined;
+	}
+
+	/** The selected player's profiles on the selected pad; undefined while loading. */
+	get playerProfiles(): Profile[] | undefined {
+		const d = this.device;
+		return this.player && d ? this.profilesOf(this.player, d.name) : undefined;
+	}
+
+	/** The selected player's compatible profiles on *other* pads, on any server (copy sources). */
+	get copySources(): Array<{ server: string; pad: string; profile: Profile }> {
+		const d = this.device;
+		const player = this.player;
+		if (!d || !player) return [];
+		return this.conns.flatMap((c) =>
+			Object.entries(c.profiles[player] ?? {}).flatMap(([pad, list]) =>
+				c === this.conn && pad === d.name
+					? []
+					: list
+							.filter((p) => p.sensorCount === d.sensorCount)
+							.map((profile) => ({ server: c.name, pad, profile }))
+			)
 		);
 	}
 
-	/** The live snapshot for the active device, or null if not (yet) available. */
-	get activeSnapshot(): Snapshot | null {
-		const c = this.#activeConn();
-		if (!this.#isFresh(c)) return null;
-		if (!this.active || c.snapshot!.selectedIndex !== this.active.index) return null;
-		return c.snapshot;
-	}
-
-	/**
-	 * Whether per-sensor release thresholds are in effect. False only in "None"
-	 * mode (release == press threshold). Any non-zero mode (including legacy global)
-	 * counts as per-sensor. Defaults to true until a snapshot arrives.
-	 */
+	/** Whether per-sensor release thresholds are in effect (false only in "None" mode). */
 	get releaseEnabled(): boolean {
 		return (this.activeSnapshot?.releaseMode ?? 2) !== 0;
 	}
 
-	/** True once a device is chosen but the server hasn't switched to it yet. */
-	get switching(): boolean {
-		const c = this.#activeConn();
-		if (!this.active || !c) return false;
-		return c.status === 'open' && c.selectedIndex !== this.active.index;
-	}
-
-	/** Mapped sensors of the active device, with optimistic thresholds overlaid. */
-	get mappedSensors(): MappedSensor[] {
-		return this.allSensors.filter((m) => m.sensor.button > 0);
-	}
-
-	/** Mapped sensors grouped by button, sorted ascending; empty buttons skipped. */
-	get buttonGroups(): ButtonGroup[] {
-		const byButton = new Map<number, MappedSensor[]>();
-		for (const m of this.mappedSensors) {
-			let group = byButton.get(m.sensor.button);
-			if (!group) byButton.set(m.sensor.button, (group = []));
-			group.push(m);
-		}
-		return [...byButton.entries()]
-			.sort((a, b) => a[0] - b[0])
-			.map(([button, sensors]) => ({ button, sensors }));
-	}
-
-	/** Every sensor of the active device (mapped or not), with optimistic edits overlaid. */
+	/** Every sensor of the selected pad (mapped or not), with optimistic edits overlaid. */
 	get allSensors(): MappedSensor[] {
 		const snap = this.activeSnapshot;
 		if (!snap) return [];
@@ -369,33 +436,23 @@ class PadsStore {
 		});
 	}
 
-	// ---- Profiles ----------------------------------------------------------
-
-	/** All stored profiles, deduped by id (every server shares the same folder). */
-	get profiles(): Profile[] {
-		const byId = new Map<string, Profile>();
-		for (const c of this.conns) for (const p of c.profiles) if (!byId.has(p.id)) byId.set(p.id, p);
-		return [...byId.values()].sort((a, b) => a.name.localeCompare(b.name));
+	get mappedSensors(): MappedSensor[] {
+		return this.allSensors.filter((m) => m.sensor.button > 0);
 	}
 
-	/** Sensor count of the active pad (profiles must match this to be loadable). */
-	get activeSensorCount(): number | null {
-		return this.activeSnapshot?.sensors.length ?? null;
+	/** Mapped sensors grouped by button, sorted ascending; empty buttons skipped. */
+	get buttonGroups(): ButtonGroup[] {
+		return groupByButton(this.mappedSensors);
 	}
 
-	/** Profiles that can be loaded onto the active pad (matching sensor count). */
-	get compatibleProfiles(): Profile[] {
-		const n = this.activeSensorCount;
-		return n === null ? [] : this.profiles.filter((p) => p.sensorCount === n);
-	}
-
-	/** The profile last loaded onto the active pad, if it still exists. */
+	/** The profile currently on the selected pad, if it belongs to the selected player. */
 	get loadedProfile(): Profile | null {
-		const id = this.active ? this.loaded[this.activeKey] : undefined;
-		return id ? (this.profiles.find((p) => p.id === id) ?? null) : null;
+		const st = this.padState;
+		if (!st?.profileId || st.player !== this.player) return null;
+		return this.playerProfiles?.find((p) => p.id === st.profileId) ?? null;
 	}
 
-	/** True if the active pad's live settings have drifted from the loaded profile. */
+	/** True if the pad's live settings have drifted from the loaded profile. */
 	get isModified(): boolean {
 		const p = this.loadedProfile;
 		const snap = this.activeSnapshot;
@@ -410,7 +467,7 @@ class PadsStore {
 		}
 		// Lights arrive in their own (gated) message; only compare once we've got
 		// them, so we don't flag drift before the first lights message lands.
-		const lights = this.activeConn?.lights;
+		const lights = this.pad ? this.conn?.lights[this.pad] : undefined;
 		if (lights) {
 			if (canon(p.lightRules ?? []) !== canon(lights.lightRules)) return true;
 			if (canon(p.ledMappings ?? []) !== canon(lights.ledMappings)) return true;
@@ -418,76 +475,55 @@ class PadsStore {
 		return false;
 	}
 
-	/** The active server if any, else any open connection (for file-only ops). */
-	#anyConn(): Conn | undefined {
-		return this.activeConn ?? this.conns.find((c) => c.status === 'open');
+	/** A player's avatar; requests it on first use. undefined = none / not yet. */
+	avatar(player: Player): Avatar | undefined {
+		const c = this.conn;
+		if (!c || !player.avatar) return undefined;
+		if (!(player.name in c.avatars)) {
+			c.avatars[player.name] = null;
+			c.send({ getAvatar: player.name });
+		}
+		return c.avatars[player.name] ?? undefined;
 	}
 
-	#persistLoaded() {
-		if (browser) localStorage.setItem(LOADED_KEY, JSON.stringify(this.loaded));
+	// ---- Profile actions (selected pad + player) ----
+
+	#sendPad(msg: Record<string, unknown>) {
+		if (this.pad) this.conn?.send({ pad: this.pad, ...msg });
 	}
 
-	#markLoaded(id: string | null) {
-		if (!this.active) return;
-		const next = { ...this.loaded };
-		if (id === null) delete next[this.activeKey];
-		else next[this.activeKey] = id;
-		this.loaded = next;
-		this.#persistLoaded();
-	}
-
-	/** Apply a stored profile to the active pad (server validates sensor count). */
 	loadProfile(id: string) {
-		this.activeConn?.send({ loadProfile: id });
-		this.#markLoaded(id);
+		this.#sendPad({ loadProfile: { player: this.player, id } });
+		this.pending = {};
 	}
 
-	/** Capture the active pad's live settings as a new named profile. */
 	saveProfileAs(name: string) {
-		this.activeConn?.send({ saveProfile: { name } });
-		// ponytail: optimistically assume the predicted slug id. A duplicate name
-		// gets a suffixed id server-side and would mislabel until the list arrives.
-		this.#markLoaded(slugify(name));
+		this.#sendPad({ saveProfile: { player: this.player, name } });
 	}
 
-	/** Re-capture the active pad's live settings into an existing profile. */
 	overwriteProfile(id: string) {
-		this.activeConn?.send({ saveProfile: { id } });
-		this.#markLoaded(id);
+		this.#sendPad({ saveProfile: { player: this.player, id } });
 	}
 
-	/** Edit a profile's name/description (no re-capture). */
+	/**
+	 * Store a copy of `profile` (read from this or any other server) on the
+	 * selected pad as `name`. Purely client-side across servers: the profile
+	 * travels in the message, the target server validates and stores it.
+	 */
+	copyProfile(profile: Profile, name: string) {
+		this.#sendPad({ importProfile: { player: this.player, name, profile } });
+	}
+
 	updateProfile(id: string, name: string, description: string) {
-		this.#anyConn()?.send({ updateProfile: { id, name, description } });
+		this.#sendPad({ updateProfile: { player: this.player, id, name, description } });
 	}
 
 	deleteProfile(id: string) {
-		this.#anyConn()?.send({ deleteProfile: id });
-		// Drop it from any pad's last-loaded pointer.
-		const next = { ...this.loaded };
-		let changed = false;
-		for (const k of Object.keys(next))
-			if (next[k] === id) {
-				delete next[k];
-				changed = true;
-			}
-		if (changed) {
-			this.loaded = next;
-			this.#persistLoaded();
-		}
+		this.#sendPad({ deleteProfile: { player: this.player, id } });
 	}
 
-	/** Select which device to view/control; tells that server to stream it. */
-	selectDevice(endpoint: string, index: number) {
-		this.active = { endpoint, index };
-		this.pending = {};
-		if (browser) localStorage.setItem(ACTIVE_KEY, JSON.stringify(this.active));
-		const conn = this.conns.find((c) => c.endpoint === endpoint);
-		if (conn) conn.lights = null; // stale for the new pad until its lights message arrives
-		conn?.send({ selectDevice: index });
-	}
+	// ---- Sensor edits (optimistic, throttled) ----
 
-	/** Merge an optimistic patch for a sensor and (throttled) push it to the pad. */
 	#patch(sensorIndex: number, patch: SensorPatch) {
 		this.pending = {
 			...this.pending,
@@ -500,10 +536,9 @@ class PadsStore {
 	setThreshold(sensorIndex: number, value: number) {
 		const v = clamp01(value);
 		const patch: SensorPatch = { threshold: v };
-		// The device keeps release at a fixed ratio of threshold (global mode);
-		// overlay it in lockstep so the release marker tracks the drag instead of
-		// lagging until the pad echoes the recomputed value back.
-		const s = this.#activeConn()?.snapshot?.sensors[sensorIndex];
+		// Keep release at its current ratio of threshold so the release marker
+		// tracks the drag instead of lagging until the pad echoes it back.
+		const s = this.activeSnapshot?.sensors[sensorIndex];
 		if (s && s.threshold > 0)
 			patch.releaseThreshold = clamp01(v * (s.releaseThreshold / s.threshold));
 		this.#patch(sensorIndex, patch);
@@ -512,7 +547,7 @@ class PadsStore {
 	setReleaseThreshold(sensorIndex: number, value: number) {
 		// Release can never exceed the press threshold (hysteresis would break); the
 		// server enforces this too. Cap against the most current threshold we have.
-		const s = this.#activeConn()?.snapshot?.sensors[sensorIndex];
+		const s = this.activeSnapshot?.sensors[sensorIndex];
 		const cap = this.pending[sensorIndex]?.threshold ?? s?.threshold ?? 1;
 		this.#patch(sensorIndex, { releaseThreshold: clamp01(Math.min(value, cap)) });
 	}
@@ -527,20 +562,21 @@ class PadsStore {
 		this.#patch(sensorIndex, { button: Math.max(0, Math.round(button)) });
 	}
 
-	// ---- Device-level config (not per-sensor; sent directly, snapshot echoes back) ----
+	// ---- Device-level config (sent directly, snapshot echoes back) ----
 
+	/** Renames the pad; the server moves its stored profiles along. */
 	setName(name: string) {
-		this.activeConn?.send({ name });
+		this.#sendPad({ name });
 	}
 
 	/** Release mode: 0 none, 2 per-sensor. */
 	setReleaseMode(mode: number) {
-		this.activeConn?.send({ releaseMode: mode });
+		this.#sendPad({ releaseMode: mode });
 	}
 
 	/** Recalibrate one sensor's baseline. */
 	calibrate(sensorIndex: number) {
-		this.activeConn?.send({ calibrateSensor: sensorIndex });
+		this.#sendPad({ calibrateSensor: sensorIndex });
 	}
 
 	/**
@@ -572,17 +608,16 @@ class PadsStore {
 	}
 
 	#flush() {
-		const c = this.#activeConn();
-		const snap = c?.snapshot;
-		if (!c || !snap) return;
+		const snap = this.activeSnapshot;
+		if (!snap) return;
 		// Positional array: {} for untouched sensors, the patch for pending ones.
 		const sensors = snap.sensors.map((_, i) => this.pending[i] ?? {});
-		c.send({ sensors });
+		this.#sendPad({ sensors });
 	}
 
 	/** Clear optimistic values the server has caught up to. Call each snapshot. */
 	reconcile() {
-		const snap = this.#activeConn()?.snapshot;
+		const snap = this.activeSnapshot;
 		if (!snap) return;
 		let changed = false;
 		const next = { ...this.pending };
@@ -613,6 +648,18 @@ class PadsStore {
 		}
 		if (changed) this.pending = next;
 	}
+}
+
+/** Mapped sensors grouped by button, sorted ascending; empty buttons skipped. */
+export function groupByButton(mapped: MappedSensor[]): ButtonGroup[] {
+	// Stable sort keeps snapshot-index order within a button.
+	const groups: ButtonGroup[] = [];
+	for (const m of [...mapped].sort((a, b) => a.sensor.button - b.sensor.button)) {
+		const last = groups.at(-1);
+		if (last?.button === m.sensor.button) last.sensors.push(m);
+		else groups.push({ button: m.sensor.button, sensors: [m] });
+	}
+	return groups;
 }
 
 export const pads = new PadsStore();

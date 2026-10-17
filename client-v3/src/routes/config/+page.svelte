@@ -1,30 +1,25 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
+	import { resolve } from '$app/paths';
 	import { pads, type MappedSensor } from '$lib/pads.svelte';
 	import { Button } from '$lib/components/ui/button';
 	import { Input } from '$lib/components/ui/input';
 	import { Label } from '$lib/components/ui/label';
 	import * as Card from '$lib/components/ui/card';
 	import * as Select from '$lib/components/ui/select';
+	import { onMount } from 'svelte';
 
-	// Auto-pick the first device if none chosen (same as the tuning page).
-	$effect(() => {
-		if (!pads.active && pads.devices.length > 0) {
-			const d = pads.devices[0];
-			pads.selectDevice(d.endpoint, d.index);
-		}
+	// Configures the pad picked in the main flow; without one, go pick it.
+	onMount(() => {
+		if (!pads.pad) goto(resolve('/'));
 	});
 
 	// Clear optimistic edits the pad has caught up to, on every snapshot.
 	$effect(() => {
-		void pads.activeConn?.snapshot;
+		void pads.activeSnapshot;
 		pads.reconcile();
 	});
 
-	const devices = $derived(pads.devices);
-	const activeLabel = $derived(
-		devices.find((d) => d.key === pads.activeKey)?.label ?? 'Select a pad'
-	);
 	const snap = $derived(pads.activeSnapshot);
 	const numButtons = $derived(snap?.numButtons ?? 0);
 	const buttonOptions = $derived(Array.from({ length: numButtons }, (_, i) => i + 1));
@@ -46,12 +41,6 @@
 	const nameValue = $derived(nameDraft ?? snap?.name ?? '');
 
 	const str = (e: Event) => (e.currentTarget as HTMLInputElement).value;
-
-	function onSelect(key: string | undefined) {
-		if (!key) return;
-		const at = key.lastIndexOf('#');
-		pads.selectDevice(key.slice(0, at), Number(key.slice(at + 1)));
-	}
 
 	function commitName() {
 		if (nameDraft !== null && nameDraft !== snap?.name) pads.setName(nameDraft.slice(0, 50));
@@ -101,18 +90,8 @@
 
 <div class="mx-auto flex min-h-[100dvh] max-w-4xl flex-col gap-6 p-4 sm:p-6">
 	<header class="flex flex-wrap items-center gap-2">
-		<Select.Root type="single" value={pads.activeKey} onValueChange={onSelect}>
-			<Select.Trigger class="w-56">{activeLabel}</Select.Trigger>
-			<Select.Content>
-				{#each devices as d (d.key)}
-					<Select.Item value={d.key} label={d.label}>{d.label}</Select.Item>
-				{/each}
-				{#if devices.length === 0}
-					<div class="text-muted-foreground px-2 py-1.5 text-sm">No pads found</div>
-				{/if}
-			</Select.Content>
-		</Select.Root>
-		<Button variant="outline" size="sm" class="ml-auto" onclick={() => goto('/')}>
+		<h1 class="text-xl font-bold">{pads.serverName} · {pads.device?.name ?? 'Pad'}</h1>
+		<Button variant="outline" size="sm" class="ml-auto" onclick={() => goto(resolve('/'))}>
 			Back to tuning
 		</Button>
 	</header>
@@ -126,6 +105,10 @@
 			<Card.Content class="flex flex-col gap-5">
 				<div class="flex flex-col gap-1.5">
 					<Label for="pad-name">Name</Label>
+					<p class="text-muted-foreground text-sm">
+						Profiles are stored per pad name and move along on rename. Keep names unique across all
+						machines.
+					</p>
 					<Input
 						id="pad-name"
 						value={nameValue}
@@ -163,8 +146,7 @@
 		<div class="flex flex-col gap-2">
 			<h2 class="text-lg font-semibold">Button mapping</h2>
 			<p class="text-muted-foreground text-sm">
-				Assign each sensor to a button. Sensors set to <em>Off</em> are unassigned and don't trigger
-				anything.
+				Assign each sensor to a button. Sensors set to <em>Off</em> are unassigned and don't trigger anything.
 			</p>
 		</div>
 
@@ -204,13 +186,7 @@
 				</Card.Root>
 			{/if}
 		{/if}
-	{:else if pads.switching}
-		<p class="text-muted-foreground">Switching pad…</p>
-	{:else if pads.active}
-		<p class="text-muted-foreground">Waiting for pad data…</p>
-	{:else if devices.length > 0}
-		<p class="text-muted-foreground">Select a pad to configure.</p>
 	{:else}
-		<p class="text-muted-foreground">Connecting to server…</p>
+		<p class="text-muted-foreground">Waiting for pad data…</p>
 	{/if}
 </div>
