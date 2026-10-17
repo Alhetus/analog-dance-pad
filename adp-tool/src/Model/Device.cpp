@@ -15,6 +15,7 @@
 #include <future>
 #include <optional>
 #include <set>
+#include <utility>
 
 #include "hidapi.h"
 #include <fmt/format.h>
@@ -312,8 +313,9 @@ class ConnectionManager
 		return out;
 	}
 
-	void UpdateDeviceMap(std::vector<string>& devicePaths)
+	static std::vector<string> Enumerate()
 	{
+		std::vector<string> devicePaths;
 		for (auto id : HID_IDS)
 		{
 			auto foundDevices = hid_enumerate(id.vendorId, id.productId);
@@ -324,14 +326,29 @@ class ConnectionManager
 			// hid_enumerate allocates a linked list that the caller must free.
 			hid_free_enumeration(foundDevices);
 		}
+		return devicePaths;
 	}
 
-	// Drops unplugged pads and starts connecting new ones (Collect finishes
-	// that). True if a pad went away.
+	// Enumerates on a worker (it can take tens of ms on Windows, a hitch in
+	// every pad's live values) every ~1s, and once it is done drops unplugged
+	// pads and starts connecting new ones (Collect finishes that). Opening a
+	// pad stays on this thread and never overlaps an enumeration. True if a
+	// pad went away.
 	bool DiscoverDevice()
 	{
-		std::vector<string> devicePaths;
-		UpdateDeviceMap(devicePaths);
+		constexpr auto interval = std::chrono::seconds(1);
+		if (!enumeration.valid())
+		{
+			if (std::chrono::steady_clock::now() - lastEnumeration >= interval)
+			{
+				lastEnumeration = std::chrono::steady_clock::now();
+				enumeration = std::async(std::launch::async, Enumerate);
+			}
+			return false;
+		}
+		if (enumeration.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
+			return false;
+		const std::vector<string> devicePaths = enumeration.get();
 
 		// Remove any devices that are no longer connected. One whose stage 2 is
 		// still running goes once that is done (its pad then fails its first read).
@@ -343,7 +360,12 @@ class ConnectionManager
 			{
 				changed |= myPads.contains(it->first);
 				DropPad(it->first);
-				unsavedPaths.erase(it->first); // unplugged: its RAM, and the edits, are gone
+				// Unplugged: its RAM, and the edits, are gone.
+				if (auto unsaved = unsavedPaths.find(it->first); unsaved != unsavedPaths.end())
+				{
+					lostEdits.push_back(unsaved->second);
+					unsavedPaths.erase(unsaved);
+				}
 
 				std::printf("ConnectionManager :: device removed (%s)\n", it->first.c_str());
 				it = devices.erase(it);
@@ -393,6 +415,8 @@ class ConnectionManager
 			// Back after a failed read that left edits in the pad's RAM unsaved.
 			if (unsavedPaths.erase(path))
 				pad->NotifyUnsavedChanges();
+			// ponytail: a pad back on another path (another USB port) after a
+			// failed save counts as lost; key by serial number if that shows.
 			myPads[path] = std::move(pad);
 			con.SetConnected();
 			changed = true;
@@ -407,12 +431,21 @@ class ConnectionManager
 			r.pad->FinishSave();
 			if (r.pad->Saving())
 				return false;
-			if (r.pad->HasUnsavedChanges() && devices.contains(r.path))
-				unsavedPaths.insert(r.path);
+			if (r.pad->HasUnsavedChanges())
+			{
+				if (devices.contains(r.path))
+					unsavedPaths[r.path] = r.pad->State().name;
+				else
+					lostEdits.push_back(r.pad->State().name); // unplugged before its save
+			}
 			return true;
 		});
 		return changed;
 	}
+
+	// Names of pads whose edits never reached their EEPROM (unplugged before
+	// the save) since the last call.
+	std::vector<string> TakeLostEdits() { return std::exchange(lostEdits, {}); }
 
 	bool BackgroundWork() const
 	{
@@ -457,10 +490,14 @@ class ConnectionManager
 	};
 
 	map<DevicePath, DeviceConnection> devices;
-	std::set<DevicePath> unsavedPaths;
+	map<DevicePath, string> unsavedPaths; // -> pad name: edits in the pad's RAM only
+	vector<string> lostEdits;             // see TakeLostEdits
 
 	map<DevicePath, unique_ptr<PadDevice>> myPads;
 	vector<Retiring> myRetiring; // dropped, their last save still running
+
+	std::future<std::vector<string>> enumeration; // a running Enumerate
+	std::chrono::steady_clock::time_point lastEnumeration;
 };
 
 // ====================================================================================================================
@@ -515,6 +552,7 @@ void Device::Shutdown()
 }
 
 static void FollowPlayerRenames(const std::vector<Players::Rename>& renames);
+static void SetEditsLost(const std::string& pad, bool lost);
 
 void Device::Update()
 {
@@ -523,6 +561,11 @@ void Device::Update()
 	// Pads connected in the background, finished saves.
 	if (connectionManager->Collect())
 		changes |= DCF_DEVICE;
+	for (const string& pad : connectionManager->TakeLostEdits())
+	{
+		std::printf("ConnectionManager :: '%s' was unplugged before its edits were saved\n", pad.c_str());
+		SetEditsLost(pad, true);
+	}
 
 	// Poll every pad. HID access happens here on the device-I/O thread, except
 	// for a pad's background save or connect (see PadDevice::StartSave).
@@ -571,13 +614,9 @@ void Device::PublishSnapshot()
 		SensorSnapshot snapshot;
 		const PadState& pad = device->State();
 		snapshot.path = device->Path();
-		snapshot.name = pad.name;
 		snapshot.pollingRate = device->PollingRate();
 		snapshot.releaseMode = (int)pad.releaseMode;
-		snapshot.numButtons = pad.numButtons;
 		snapshot.maxSensorValue = pad.maxSensorValue;
-		snapshot.featureDigipot = pad.featureDigipot;
-		snapshot.featureLights = pad.featureLights;
 		snapshot.unsaved = device->HasUnsavedChanges();
 		snapshot.saveFailed = device->SaveFailed();
 		snapshot.saving = device->Saving();
@@ -633,13 +672,8 @@ void Device::SnapshotToJson(const SensorSnapshot& snapshot, json& j)
 {
 	j["msgType"] = 1;
 	j["pad"] = snapshot.path;
-	j["name"] = snapshot.name;
 	j["pollingRate"] = snapshot.pollingRate;
 	j["releaseMode"] = snapshot.releaseMode;
-	j["numButtons"] = snapshot.numButtons;
-	j["maxSensorValue"] = snapshot.maxSensorValue;
-	j["featureDigipot"] = snapshot.featureDigipot;
-	j["featureLights"] = snapshot.featureLights;
 	j["unsaved"] = snapshot.unsaved;
 	j["saveFailed"] = snapshot.saveFailed;
 	j["saving"] = snapshot.saving;
@@ -721,12 +755,28 @@ static void SavePadState(const std::string& pad)
 	gPadStatesDirty = true;
 }
 
+// Flags (or clears) that the pad's last edits never reached its EEPROM: it
+// was unplugged before they were saved, so it came back with older settings.
+// Shown until settings are applied to it again.
+static void SetEditsLost(const std::string& pad, bool lost)
+{
+	json& st = PadStateFor(pad);
+	if (st.value("editsLost", false) == lost)
+		return;
+	if (lost)
+		st["editsLost"] = true;
+	else
+		st.erase("editsLost");
+	SavePadState(pad);
+}
+
 // Marks `player`/`id` as the pad's current selection and moves the player to
 // the front of the pad's recent list.
 static void SetPadSelection(const std::string& pad, const std::string& player, const std::string& id,
                             const std::string& profileName)
 {
 	json& st = PadStateFor(pad);
+	st.erase("editsLost");
 	st["player"] = player;
 	st["profileId"] = id;
 	st["profileName"] = profileName;
@@ -755,12 +805,34 @@ bool Device::TakePadStatesDirty()
 	return gPadStatesDirty.exchange(false);
 }
 
+static void RenamePadDirs(const std::string& from, const std::string& to);
+
 // A pad was renamed: move its profile dirs (every player) and its state along.
 // ponytail: walks all player dirs on the device thread; renaming is a rare operator action.
 static void RenamePad(const std::string& from, const std::string& to)
 {
 	if (from == to || from.empty() || to.empty())
 		return;
+	// The pad already holds the new name, so a failure here is logged, never
+	// reported as a failed rename.
+	try
+	{
+		RenamePadDirs(from, to);
+	}
+	catch (const std::exception& e)
+	{
+		std::printf("RenamePad :: moving the profiles of '%s' to '%s' failed (%s)\n", from.c_str(), to.c_str(),
+		            e.what());
+	}
+	gPadStates.erase(from);
+	gPadStates.erase(to);
+	gPadStatesDirty = true;
+	Players::RequestRecount(); // every player's counts are keyed by pad name
+	std::printf("Pad renamed '%s' -> '%s'\n", from.c_str(), to.c_str());
+}
+
+static void RenamePadDirs(const std::string& from, const std::string& to)
+{
 	std::error_code ec;
 	const auto escFrom = Profiles::U8Path(Profiles::EscapeName(from));
 	const auto escTo = Profiles::U8Path(Profiles::EscapeName(to));
@@ -780,11 +852,6 @@ static void RenamePad(const std::string& from, const std::string& to)
 	for (const auto& player : std::filesystem::directory_iterator(gProfilesDir / "players", ec))
 		move(player.path() / escFrom, player.path() / escTo);
 	move(PadStateDir(from), PadStateDir(to));
-	gPadStates.erase(from);
-	gPadStates.erase(to);
-	gPadStatesDirty = true;
-	Players::RequestRecount(); // every player's counts are keyed by pad name
-	std::printf("Pad renamed '%s' -> '%s'\n", from.c_str(), to.c_str());
 }
 
 // Why renaming pad `from` to `to` would lose data, or "" if it is safe: both
@@ -956,6 +1023,16 @@ static PadDevice* OtherPadNamed(const PadDevice* device, const std::string& name
 	return nullptr;
 }
 
+// The error of an op whose settings only partly reached the pad, naming what
+// didn't (LoadProfile's `failed`).
+static std::string NotApplied(const std::vector<std::string>& failed)
+{
+	std::string what;
+	for (const auto& f : failed)
+		what += (what.empty() ? "" : ", ") + f;
+	return what.empty() ? "not every setting reached the pad" : "not every setting reached the pad (" + what + ")";
+}
+
 // The op being handled, so a failure can still be answered.
 struct OpContext
 {
@@ -999,22 +1076,11 @@ bool Device::IsConfigure(const json& j)
 
 bool Device::MergeConfigure(json& into, const json& next)
 {
-	// Later lights replace earlier ones: if the pad would refuse the later
-	// (all or nothing), folding would lose the earlier valid ones.
-	if (next.contains("lightRules") || next.contains("ledMappings"))
-	{
-		const PadDevice* pad = connectionManager && HasString(next, "pad")
-		                           ? connectionManager->Find(next["pad"].get<std::string>())
-		                           : nullptr;
-		std::vector<std::optional<LedMapping>> mappings;
-		std::vector<std::optional<LightRule>> rules;
-		if (!pad || !pad->ParseLights(next, mappings, rules))
-			return false;
-	}
+	json merged = into;
 	const bool intoSensors = into.contains("sensors"), nextSensors = next.contains("sensors");
 	if (intoSensors && nextSensors)
 	{
-		json& a = into["sensors"];
+		json& a = merged["sensors"];
 		const json& b = next["sensors"];
 		// Different lengths: at least one is refused as a whole, so keep both.
 		if (!a.is_array() || !b.is_array() || a.size() != b.size())
@@ -1029,7 +1095,21 @@ bool Device::MergeConfigure(json& into, const json& next)
 	}
 	for (const auto& [key, value] : next.items())
 		if (key != "sensors" || !intoSensors)
-			into[key] = value; // lights arrays configure every slot, so the later wins
+			merged[key] = value; // lights arrays configure every slot, so the later wins
+
+	// Later lights replace earlier ones: if the pad would refuse the later
+	// (all or nothing), folding would lose the earlier valid ones.
+	if (next.contains("lightRules") || next.contains("ledMappings"))
+	{
+		const PadDevice* pad = connectionManager && HasString(next, "pad")
+		                           ? connectionManager->Find(next["pad"].get<std::string>())
+		                           : nullptr;
+		std::vector<std::optional<LedMapping>> mappings;
+		std::vector<std::optional<LightRule>> rules;
+		if (!pad || !pad->ParseLights(next, mappings, rules) || !pad->UnlitMapping(merged).empty())
+			return false;
+	}
+	into = std::move(merged);
 	return true;
 }
 
@@ -1172,11 +1252,12 @@ static std::vector<ClientReply> HandleClientMessageImpl(const json& j, OpContext
 			return done(false, "unknown profile");
 		if (blob.value("sensorCount", -1) != numSensors)
 			return done(false, "profile is for a pad with a different number of sensors");
-		const bool applied = device->LoadProfile(blob, PROFILE_GROUPS);
+		std::vector<std::string> failed;
+		const bool applied = device->LoadProfile(blob, PROFILE_GROUPS, &failed);
 		// Select it even if a write failed: most of it is on the pad, and the
 		// client shows the drift.
 		SetPadSelection(padName, player, blob.value("id", std::string()), blob.value("name", std::string()));
-		return done(applied, applied ? "" : "not every setting reached the pad", blob.value("name", std::string()));
+		return done(applied, applied ? "" : NotApplied(failed), blob.value("name", std::string()));
 	}
 
 	// Capture this pad's live settings. Two forms:
@@ -1315,6 +1396,11 @@ static std::vector<ClientReply> HandleClientMessageImpl(const json& j, OpContext
 			return done(false, conflict);
 		if (!device->SendName(newName.c_str()))
 			return done(false, "the pad didn't accept the name");
+		// Into the EEPROM before the profiles move: a pad unplugged before its
+		// usual save (~2s later) would come back with the old name, its
+		// profiles filed under the new one.
+		if (!device->SaveChanges())
+			std::printf("rename :: the pad didn't save its new name yet (retried in 2s)\n");
 		RenamePad(padName, device->State().name);
 		return done(true, "", device->State().name);
 	}
@@ -1327,9 +1413,15 @@ static std::vector<ClientReply> HandleClientMessageImpl(const json& j, OpContext
 	{
 		if (j.contains("sensors") && (!j["sensors"].is_array() || (int)j["sensors"].size() != numSensors))
 			return done(false, fmt::format("expected {} sensors", numSensors));
-		if (!device->LoadProfile(j, (DeviceProfileGroups)(DPG_ALL & ~DPG_DEVICE)))
-			return done(false, "not every setting reached the pad");
-		return replies;
+		if (const std::string why = device->UnlitMapping(j); !why.empty())
+			return done(false, why);
+		std::vector<std::string> failed;
+		if (!device->LoadProfile(j, (DeviceProfileGroups)(DPG_ALL & ~DPG_DEVICE), &failed))
+			return done(false, NotApplied(failed));
+		SetEditsLost(padName, false);
+		// Answered either way; the caller passes a success on only to askers
+		// that sent a requestId (slider rate).
+		return done(true, "");
 	}
 
 	std::printf("HandleClientMessage :: unhandled message: %s\n", j.dump().c_str());
@@ -1465,6 +1557,9 @@ void Device::DeviceListToJson(json& j)
 		d["firmware"] =
 		    fmt::format("{}.{}", device->State().firmwareVersion.major, device->State().firmwareVersion.minor);
 		d["maxSensorValue"] = device->State().maxSensorValue;
+		d["numButtons"] = device->State().numButtons;
+		d["featureDigipot"] = device->State().featureDigipot;
+		d["featureLights"] = device->State().featureLights;
 		j["devices"].push_back(std::move(d));
 	}
 }
@@ -1481,10 +1576,29 @@ void Device::SetProfilesDir(const std::filesystem::path& dir)
 	gPadStatesDirty = true;
 }
 
-bool PadDevice::LoadProfile(const json& j, DeviceProfileGroups groups)
+// A whole number at `key` within [lo, hi], or nullopt if absent or not one
+// (a client's 4294967297 must not wrap to 1).
+static std::optional<int> IntField(const json& o, const char* key, int64_t lo, int64_t hi)
+{
+	if (!o.contains(key) || !o[key].is_number_integer())
+		return std::nullopt;
+	const json& v = o[key];
+	if (v.is_number_unsigned() ? v.get<uint64_t>() > (uint64_t)hi : v.get<int64_t>() > hi)
+		return std::nullopt;
+	if (!v.is_number_unsigned() && v.get<int64_t>() < lo)
+		return std::nullopt;
+	return (int)v.get<int64_t>();
+}
+
+bool PadDevice::LoadProfile(const json& j, DeviceProfileGroups groups, std::vector<std::string>* failed)
 {
 	const PadState* pad = &myPad;
 	bool ok = true;
+	const auto fail = [&](const std::string& what) {
+		ok = false;
+		if (failed && std::find(failed->begin(), failed->end(), what) == failed->end())
+			failed->push_back(what);
+	};
 
 	if ((groups & DPG_LIGHTS) && pad->featureLights)
 	{
@@ -1495,15 +1609,17 @@ bool PadDevice::LoadProfile(const json& j, DeviceProfileGroups groups)
 		std::vector<std::optional<LedMapping>> mappings;
 		std::vector<std::optional<LightRule>> rules;
 		bool sent = false;
-		if (!ParseLights(j, mappings, rules))
-			ok = false;
+		std::string why;
+		if (!ParseLights(j, mappings, rules, &why))
+			fail("lights: " + why);
 		for (int i = 0; i < (int)mappings.size(); ++i)
 		{
 			const auto current = myLights.ledMappings.find(i);
 			const bool enabled = current != myLights.ledMappings.end();
 			if (!mappings[i] ? enabled : !enabled || !(current->second == *mappings[i]))
 			{
-				ok &= mappings[i] ? SendLedMapping(i, *mappings[i]) : DisableLedMapping(i);
+				if (!(mappings[i] ? SendLedMapping(i, *mappings[i]) : DisableLedMapping(i)))
+					fail(fmt::format("LED mapping {}", i));
 				sent = true;
 			}
 		}
@@ -1513,7 +1629,8 @@ bool PadDevice::LoadProfile(const json& j, DeviceProfileGroups groups)
 			const bool enabled = current != myLights.lightRules.end();
 			if (!rules[i] ? enabled : !enabled || !(current->second == *rules[i]))
 			{
-				ok &= rules[i] ? SendLightRule(i, *rules[i]) : DisableLightRule(i);
+				if (!(rules[i] ? SendLightRule(i, *rules[i]) : DisableLightRule(i)))
+					fail(fmt::format("light rule {}", i));
 				sent = true;
 			}
 		}
@@ -1544,13 +1661,22 @@ bool PadDevice::LoadProfile(const json& j, DeviceProfileGroups groups)
 				if (sensor.contains("releaseThreshold") && sensor["releaseThreshold"].is_number())
 					want.releaseThreshold = sensor["releaseThreshold"].get<double>();
 			}
-			if ((groups & DPG_MAPPING) && sensor.contains("button") && sensor["button"].is_number_integer() &&
-			    ValidButton(sensor["button"].get<int>()))
-				want.button = sensor["button"].get<int>();
-			if ((groups & DPG_GAIN) && pad->featureDigipot && sensor.contains("resistorValue") &&
-			    sensor["resistorValue"].is_number_integer())
-				want.resistorValue = sensor["resistorValue"].get<int>();
-			ok &= SetSensor(idx, want);
+			if ((groups & DPG_MAPPING) && sensor.contains("button"))
+			{
+				if (const auto button = IntField(sensor, "button", 0, myPad.numButtons))
+					want.button = *button;
+				else
+					fail(fmt::format("sensor {} button", idx));
+			}
+			if ((groups & DPG_GAIN) && pad->featureDigipot && sensor.contains("resistorValue"))
+			{
+				if (const auto gain = IntField(sensor, "resistorValue", 0, 255))
+					want.resistorValue = *gain;
+				else
+					fail(fmt::format("sensor {} gain", idx));
+			}
+			if (!SetSensor(idx, want))
+				fail(fmt::format("sensor {}", idx));
 		}
 	}
 
@@ -1558,19 +1684,44 @@ bool PadDevice::LoadProfile(const json& j, DeviceProfileGroups groups)
 	{
 		if (j.contains("name") && j["name"].is_string())
 		{
-			ok &= SendName(j["name"].get<string>().c_str());
+			if (!SendName(j["name"].get<string>().c_str()))
+				fail("name");
 		}
 	}
 	return ok;
 }
 
+std::string PadDevice::UnlitMapping(const json& j) const
+{
+	std::vector<std::optional<LedMapping>> mappings;
+	std::vector<std::optional<LightRule>> rules;
+	if (!myPad.featureLights || !ParseLights(j, mappings, rules))
+		return ""; // nothing to light, or refused by LoadProfile anyway
+	const bool hasRules = j.contains("lightRules") && j["lightRules"].is_array();
+	for (int i = 0; i < (int)mappings.size(); ++i)
+	{
+		if (!mappings[i])
+			continue;
+		// One the pad already has stays allowed, so its other lights can still be edited.
+		const auto current = myLights.ledMappings.find(i);
+		if (current != myLights.ledMappings.end() && current->second == *mappings[i])
+			continue;
+		const int rule = mappings[i]->lightRuleIndex; // < MAX_LIGHT_RULES (ValidLedMapping)
+		if (!(hasRules ? rules[rule].has_value() : myLights.lightRules.contains(rule)))
+			return fmt::format("LED mapping {} uses light rule {}, which is disabled", i, rule);
+	}
+	return "";
+}
+
 bool PadDevice::ParseLights(const json& j, std::vector<std::optional<LedMapping>>& mappings,
-                            std::vector<std::optional<LightRule>>& rules) const
+                            std::vector<std::optional<LightRule>>& rules, std::string* why) const
 {
 	const bool hasMappings = j.contains("ledMappings") && j["ledMappings"].is_array();
 	const bool hasRules = j.contains("lightRules") && j["lightRules"].is_array();
-	const auto refuse = [&](const char* why) {
-		std::printf("LoadProfile :: %s, no lights applied\n", why);
+	const auto refuse = [&](const char* reason) {
+		std::printf("LoadProfile :: %s, no lights applied\n", reason);
+		if (why)
+			*why = reason;
 		mappings.clear();
 		rules.clear();
 		return false;

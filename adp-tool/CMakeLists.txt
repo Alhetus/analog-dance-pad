@@ -36,7 +36,7 @@ set(GLOBAL_LIBS
 )
 
 if(WIN32 OR MINGW)
-	list(APPEND GLOBAL_LIBS setupapi ws2_32)
+	list(APPEND GLOBAL_LIBS setupapi ws2_32 winmm)
 elseif(APPLE)
 	# hidapi's mac backend needs these frameworks
 	# (the udev the Linux branch links does not exist on macOS).

@@ -83,6 +83,5 @@ class Application
 	std::map<std::string, Sent> lastSnapshot;               // per pad
 	std::deque<Inbound> backlog;                            // taken off the queue, not handled yet
 	std::map<std::string, Clock::time_point> lastConfigure; // per pad
-	unsigned discoverTick = 0;                              // unsigned: wraps (after ~2 years) instead of overflowing
 };
 } // namespace adp

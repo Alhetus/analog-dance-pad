@@ -36,18 +36,13 @@ export interface LedMapping {
 	ledIndexEnd: number;
 }
 
-/** msgType 1, one per pad per tick. */
+/** msgType 1, one per pad per tick. What doesn't change while a pad runs is in DeviceInfo. */
 export interface Snapshot {
 	msgType: 1;
 	pad: string; // HID path: how messages address this pad
-	name: string;
 	/** Input reports per second. A pad at rest may send none, so 0 isn't a dead link. */
 	pollingRate: number;
 	releaseMode: number; // 0 none, 2 per-sensor (1 = legacy global, treated as per-sensor)
-	numButtons: number; // mappable buttons this pad exposes
-	maxSensorValue: number; // device counts that 1.0 stands for
-	featureDigipot: boolean; // pad supports per-sensor gain
-	featureLights: boolean; // pad has configurable lights
 	unsaved: boolean; // edits not yet in the pad's EEPROM (saved ~2s after the last one)
 	saveFailed: boolean; // the last save to the pad failed; the server retries every 2s
 	saving?: boolean; // an EEPROM save is running: values are frozen until it's done (up to ~2s)
@@ -67,6 +62,9 @@ export interface DeviceInfo {
 	sensorCount: number;
 	firmware?: string; // e.g. "2.1"
 	maxSensorValue: number; // device counts that 1.0 stands for
+	numButtons: number; // mappable buttons this pad exposes
+	featureDigipot: boolean; // pad supports per-sensor gain
+	featureLights: boolean; // pad has configurable lights
 }
 
 /** A player from the shared LocalProfiles folder (msgType 3). */
@@ -83,6 +81,8 @@ export interface PadState {
 	profileId?: string;
 	profileName?: string;
 	recent?: string[];
+	/** The pad was unplugged before its last edits were saved: it came back with older settings. */
+	editsLost?: boolean;
 }
 
 /** A stored profile (msgType 6). Captures thresholds+release, gain and lights. */
@@ -169,7 +169,7 @@ const STALE_MS = 2000;
 // wait behind the pad's save, which can take ~2s, then take ~150ms itself).
 const LOAD_TIMEOUT_MS = 10000;
 /** The adp-tool protocol this client speaks (WebsocketServer.h PROTOCOL_VERSION). */
-const PROTOCOL_VERSION = 1;
+const PROTOCOL_VERSION = 2;
 /** Lowest release threshold the server stores, in device counts (Reporter.h MIN_RELEASE_COUNTS). */
 const MIN_RELEASE_COUNTS = 10;
 const MAX_BACKOFF_MS = 5000;
@@ -607,7 +607,8 @@ class PadsStore {
 	get isModified(): boolean {
 		const p = this.loadedProfile;
 		const snap = this.activeSnapshot;
-		if (!p || !snap) return false;
+		const device = this.device;
+		if (!p || !snap || !device) return false;
 		const n = Math.min(p.sensors.length, snap.sensors.length);
 		// In "None" release mode the pad holds release == threshold whatever the
 		// profile says, so release values aren't compared there.
@@ -621,7 +622,7 @@ class PadsStore {
 			// The server skips gain and lights a pad lacks when loading a profile
 			// (e.g. one copied from another pad), so those can't drift.
 			if (
-				snap.featureDigipot &&
+				device.featureDigipot &&
 				a.resistorValue !== undefined &&
 				a.resistorValue !== b.resistorValue
 			)
@@ -631,7 +632,7 @@ class PadsStore {
 		// them, so we don't flag drift before the first lights message lands. A
 		// profile without lights (saved on a pad that has none) leaves them as
 		// they were when loaded, so there is nothing to compare.
-		const lights = this.pad && snap.featureLights ? this.conn?.lights[this.pad] : undefined;
+		const lights = this.pad && device.featureLights ? this.conn?.lights[this.pad] : undefined;
 		if (lights) {
 			if (p.lightRules && canon(p.lightRules) !== canon(lights.lightRules)) return true;
 			if (p.ledMappings && canon(p.ledMappings) !== canon(lights.ledMappings)) return true;
@@ -768,7 +769,7 @@ class PadsStore {
 		const s = this.activeSnapshot?.sensors[sensorIndex];
 		// Nor go below the server's floor (a release near 0 can leave a button stuck).
 		const cap = this.pending[sensorIndex]?.threshold ?? s?.threshold ?? 1;
-		const minRelease = MIN_RELEASE_COUNTS / (this.activeSnapshot?.maxSensorValue ?? 1024);
+		const minRelease = MIN_RELEASE_COUNTS / (this.device?.maxSensorValue ?? 1024);
 		this.#patch(sensorIndex, {
 			releaseThreshold: clamp01(Math.min(Math.max(value, minRelease), cap))
 		});

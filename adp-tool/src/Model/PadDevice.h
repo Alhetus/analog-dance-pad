@@ -293,9 +293,10 @@ class PadDevice
 	// MIN_RELEASE_COUNTS, normalized for this pad.
 	double MinReleaseThreshold() const { return (double)MIN_RELEASE_COUNTS / myPad.maxSensorValue; }
 
-	// True if the firmware would light this mapping: an existing sensor and rule
+	// True if the firmware could light this mapping: an existing sensor and rule
 	// slot and an LED range on the pad. It skips anything else silently, so such
-	// a mapping is refused instead of being shown as set.
+	// a mapping is refused instead of being shown as set. (It also skips one
+	// whose rule is disabled: see UnlitMapping.)
 	bool ValidLedMapping(const LedMapping& m) const
 	{
 		return ValidSensorIndex(m.sensorIndex) && m.lightRuleIndex < MAX_LIGHT_RULES &&
@@ -571,15 +572,22 @@ class PadDevice
 
 	// Apply / capture a client profile against this device. Defined out-of-line
 	// in Device.cpp (they lean on json/fmt/Adp.h, kept out of this header).
-	// LoadProfile returns false if any HID write failed.
-	bool LoadProfile(const json& j, DeviceProfileGroups groups);
+	// LoadProfile returns false if any setting was refused or a HID write
+	// failed, adding what didn't apply (e.g. "sensor 3") to `failed`.
+	bool LoadProfile(const json& j, DeviceProfileGroups groups, std::vector<std::string>* failed = nullptr);
 	void SaveProfile(json& j, DeviceProfileGroups groups) const;
 
 	// The lights arrays of a configure or profile, parsed slot by slot (an
-	// absent array stays empty). False, with nothing parsed, if any slot is
-	// malformed or a mapping is outside this pad's sensors, rules or LEDs.
+	// absent array stays empty). False, with nothing parsed and the reason in
+	// `why`, if any slot is malformed or a mapping is outside this pad's
+	// sensors, rules or LEDs.
 	bool ParseLights(const json& j, std::vector<std::optional<LedMapping>>& mappings,
-	                 std::vector<std::optional<LightRule>>& rules) const;
+	                 std::vector<std::optional<LightRule>>& rules, std::string* why = nullptr) const;
+
+	// Why a client's lights edit would set an LED mapping the firmware never
+	// lights (its rule is disabled), or "". Mappings the pad already holds are
+	// let through. Not checked on profile loads: they restore what a pad had.
+	std::string UnlitMapping(const json& j) const;
 
 	void TriggerChange(int type) { myChanges |= type; }
 

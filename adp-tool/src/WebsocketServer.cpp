@@ -1,5 +1,6 @@
 #include "Adp.h"
 #include <cctype>
+#include <chrono>
 #include <cstdio>
 #include <string>
 #include <ixwebsocket/IXWebSocketServer.h>
@@ -9,19 +10,39 @@
 
 namespace adp
 {
-// Above this much unsent data a client is considered stalled and gets no
+// Above this much unsent data a client is considered backed up and gets no
 // snapshots until it catches up (~2s of 60Hz snapshots for a few pads).
 constexpr size_t MAX_BUFFERED_BYTES = 256 * 1024;
 
-// Above this (a few avatars' worth) a client that isn't reading at all is
-// disconnected rather than buffered for without bound; it gets everything
-// again from the replay when it reconnects.
-constexpr size_t MAX_STALLED_BYTES = 16 * 1024 * 1024;
+// A client backed up for this long isn't reading at all (an asleep phone with
+// the socket still open) and is disconnected rather than buffered for without
+// bound; it gets everything again from the replay when it reconnects. A burst
+// of avatars right after connecting backs a slow phone up for a few seconds
+// only, so time, not size, tells the two apart.
+constexpr auto MAX_STALL = std::chrono::seconds(30);
 
-// Sends `message` unless the client is stalled, which is then disconnected.
-static void Deliver(ix::WebSocket& socket, const std::string& message)
+// Past this much unsent data a client is disconnected at once (memory bound).
+constexpr size_t MAX_STALLED_BYTES = 64 * 1024 * 1024;
+
+void WebsocketServer::Deliver(ix::WebSocket& socket, const std::string& message)
 {
-	if (socket.bufferedAmount() > MAX_STALLED_BYTES)
+	const size_t buffered = socket.bufferedAmount();
+	bool stalled = buffered > MAX_STALLED_BYTES;
+	{
+		std::lock_guard<std::mutex> lock(clientsMutex);
+		if (auto it = clients.find(&socket); it != clients.end())
+		{
+			auto& since = it->second.backedUpSince;
+			const auto now = std::chrono::steady_clock::now();
+			if (buffered <= MAX_BUFFERED_BYTES)
+				since.reset();
+			else if (!since)
+				since = now;
+			stalled |= since && now - *since > MAX_STALL;
+		}
+	}
+	// Outside clientsMutex: close() runs our Close handler on this thread.
+	if (stalled)
 	{
 		socket.close(4008, "Too slow");
 		return;
@@ -158,8 +179,12 @@ void WebsocketServer::Init(MSGQ<QueueMessage>& queue, std::string host, Websocke
 				if (j.is_object() && j.contains("subscribe") && j["subscribe"].is_string())
 				{
 					{
+						// find(), not []: the device thread may have closed it
+						// since the check above, and a re-added entry would
+						// outlive the socket.
 						std::lock_guard<std::mutex> lock(clientsMutex);
-						clients[&webSocket].subscription = j["subscribe"].get<std::string>();
+						if (auto it = clients.find(&webSocket); it != clients.end())
+							it->second.subscription = j["subscribe"].get<std::string>();
 					}
 					snapshotResend = true;
 					return;

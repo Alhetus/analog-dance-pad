@@ -97,25 +97,22 @@ struct LightsState
 	std::map<int, LedMapping> ledMappings;
 };
 
-// An immutable, self-contained copy of everything the WebSocket clients need to
-// see about one connected pad. Built on the device-I/O thread each
-// tick and published as a shared_ptr swapped under a short mutex, so readers
-// never touch live device state (no torn reads, no TOCTOU null-deref).
+// An immutable, self-contained copy of what changes about one connected pad
+// while it runs (what doesn't, its name, button count and features, is in the
+// device list, msgType 2). Built on the device-I/O thread each tick and
+// published as a shared_ptr swapped under a short mutex, so readers never
+// touch live device state (no torn reads, no TOCTOU null-deref).
 struct SensorSnapshot
 {
 	std::string path; // HID path: how clients address this pad in messages
-	std::string name;
 	// Input reports received per second. The 32u4 firmware only sends one when
 	// a value changes, so a pad at rest drops toward 0: not a link-health signal.
 	int pollingRate = 0;
 	int releaseMode = 0;
-	int numButtons = 0;
-	int maxSensorValue = DEFAULT_MAX_SENSOR_VALUE; // the scale values are normalized against
-	bool featureDigipot = false;
-	bool featureLights = false;
-	bool unsaved = false;    // edits not yet in the pad's EEPROM (saved ~2s after the last one)
-	bool saveFailed = false; // the last save attempt failed; retried every 2s
-	bool saving = false;     // an EEPROM save is running: values are frozen until it is done (up to ~2s)
+	int maxSensorValue = DEFAULT_MAX_SENSOR_VALUE; // the scale values are normalized against (not sent)
+	bool unsaved = false;                          // edits not yet in the pad's EEPROM (saved ~2s after the last one)
+	bool saveFailed = false;                       // the last save attempt failed; retried every 2s
+	bool saving = false; // an EEPROM save is running: values are frozen until it is done (up to ~2s)
 	std::vector<SensorState> sensors;
 
 	bool operator==(const SensorSnapshot&) const = default;
@@ -170,7 +167,8 @@ class Device
 	// Serializes a snapshot to the client-facing JSON wire format.
 	static void SnapshotToJson(const SensorSnapshot& snapshot, json& j);
 
-	// Serializes the list of connected pads (msgType 2) so clients can
+	// Serializes the list of connected pads (msgType 2), with what doesn't change
+	// while a pad runs (name, buttons, features, sensor scale), so clients can
 	// enumerate them and address messages by path.
 	static void DeviceListToJson(json& j);
 
@@ -218,6 +216,8 @@ class Device
 	// Root of this server's local profile store. Set once at startup.
 	static void SetProfilesDir(const std::filesystem::path& dir);
 
+	// Call every tick: enumerates HID devices ~1Hz on a worker, then drops
+	// unplugged pads and starts connecting new ones. Device-I/O thread only.
 	static void DiscoverNewDevices();
 
 	// HID paths of the pads busy with a background save: their messages must

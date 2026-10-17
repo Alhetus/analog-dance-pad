@@ -223,10 +223,16 @@ TEST_CASE("Device ops answer their sender", "[deviceops]")
 	CHECK(r["op"] == "configure");
 	CHECK(r["ok"] == false); // wrong sensor count
 
-	// A successful configure is not answered (slider rate).
-	CHECK(Device::HandleClientMessage(
-	          json{{"pad", "p1"}, {"sensors", json::array({{{"threshold", 0.3}}, json::object()})}}.dump())
-	          .empty());
+	// A successful configure is answered too; the application passes it on
+	// only to askers with a requestId (slider rate).
+	r = Server::Send({{"pad", "p1"}, {"sensors", json::array({{{"threshold", 0.3}}, json::object()})}});
+	CHECK(r["op"] == "configure");
+	CHECK(r["ok"] == true);
+
+	// A button past the pad's 8 (or past int range) is refused, not wrapped, and named.
+	r = Server::Send({{"pad", "p1"}, {"sensors", json::array({{{"button", 4294967297LL}}, json::object()})}});
+	CHECK(r["ok"] == false);
+	CHECK(r["error"] == "not every setting reached the pad (sensor 0 button)");
 
 	// calibrateSensor was removed: no firmware implements it.
 	CHECK(Device::HandleClientMessage(R"({"pad":"p1","calibrateSensor":0})").empty());
@@ -343,6 +349,8 @@ TEST_CASE("The device list carries each pad's firmware and sensor scale", "[devi
 	Device::DeviceListToJson(list);
 	CHECK(list["devices"][0]["maxSensorValue"] == 1024);
 	CHECK(list["devices"][0]["firmware"] == "1.3");
+	CHECK(list["devices"][0]["numButtons"] == 8);
+	CHECK(list["devices"][0]["featureLights"] == false);
 }
 
 TEST_CASE("A pad saving in the background is left alone and shown as saving", "[deviceops]")
@@ -451,4 +459,46 @@ TEST_CASE("Lights the pad would refuse are not folded over earlier ones", "[devi
 	    a, {{"pad", "p1"}, {"ledMappings", {{{"sensorIndex", 7}}}}})); // past this pad's 2 sensors
 	CHECK(a["lightRules"].size() == 2);
 	CHECK_FALSE(Device::MergeConfigure(a, {{"pad", "gone"}, {"lightRules", {rule}}}));
+}
+
+TEST_CASE("A renamed pad saves the new name before its profiles move", "[deviceops]")
+{
+	Server server;
+	RecordingBackend* raw = server.AddPad("p1", "Old");
+	REQUIRE(Server::Send({{"pad", "p1"}, {"saveProfile", {{"player", "Mike"}, {"name", "a"}}}})["ok"] == true);
+	raw->QueueGet(makeName("New"));
+	REQUIRE(Server::Send({{"pad", "p1"}, {"name", "New"}})["ok"] == true);
+	// Unplugged right now, it would come back as "New", where its profiles are.
+	REQUIRE_FALSE(raw->sent.empty());
+	CHECK(raw->sent.back()[0] == REPORT_SAVE_CONFIGURATION);
+	Device::PublishSnapshot();
+	CHECK((*Device::GetSnapshots())[0].unsaved == false);
+}
+
+TEST_CASE("A pad gone before its edits were saved is flagged until settings are applied again", "[deviceops]")
+{
+	Server server;
+	RecordingBackend* raw = nullptr;
+	const auto rep = makeReporter(raw); // outlives the dropped pad
+	Device::AddPadForTest(std::make_unique<PadDevice>(rep, "p1", makeName("Cab1 P1"), makeIdent(1, 3, 8, 1),
+	                                                  std::vector<LightRuleReport>{}, std::vector<LedMappingReport>{},
+	                                                  std::vector<SensorReport>{makeSensor(0, 425, 0)}));
+	REQUIRE(Server::Send({{"pad", "p1"}, {"releaseMode", 0}})["ok"] == true); // now unsaved
+	raw->writeReturn = -1;                                                    // its last save fails too
+	raw->QueueReadCount(-1);                                                  // and the next poll's read: gone
+	Device::Update();
+	while (Device::BackgroundWorkForTest())
+	{
+		std::this_thread::yield();
+		Device::Update();
+	}
+	json st;
+	REQUIRE(Profiles::Read(server.dir / "pads" / "Cab1 P1", "state", st));
+	CHECK(st["editsLost"] == true);
+
+	// Back (here: a new pad of that name), a configure clears it.
+	server.AddPad("p2", "Cab1 P1", 1);
+	CHECK(Server::PadState("p2")["editsLost"] == true);
+	REQUIRE(Server::Send({{"pad", "p2"}, {"sensors", json::array({{{"threshold", 0.3}}})}})["ok"] == true);
+	CHECK_FALSE(Server::PadState("p2").contains("editsLost"));
 }

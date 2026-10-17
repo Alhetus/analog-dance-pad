@@ -12,10 +12,8 @@ TEST_CASE("SnapshotToJson emits the WebSocket contract fields", "[snapshot]")
 	SensorSnapshot snap;
 	snap.maxSensorValue = TEST_MAX_SENSOR_VALUE;
 	snap.path = "hid#1";
-	snap.name = "MyPad";
 	snap.pollingRate = 1000;
 	snap.releaseMode = 1;
-	snap.featureLights = true;
 
 	SensorState s;
 	s.threshold = 0.5;
@@ -36,12 +34,12 @@ TEST_CASE("SnapshotToJson emits the WebSocket contract fields", "[snapshot]")
 	CHECK(j["msgType"] == 1);
 	// Clients route every message by the pad's HID path.
 	CHECK(j["pad"] == "hid#1");
-	CHECK(j["name"] == "MyPad");
+	// What doesn't change while a pad runs is in the device list (msgType 2) only.
+	for (const char* key : {"name", "numButtons", "maxSensorValue", "featureDigipot", "featureLights"})
+		CHECK_FALSE(j.contains(key));
 	CHECK(j["pollingRate"] == 1000);
 	CHECK_FALSE(j.contains("releaseThreshold")); // the removed global release ratio
 	CHECK(j["releaseMode"] == 1);
-	// The client skips lights drift checks on pads without lights.
-	CHECK(j["featureLights"] == true);
 
 	REQUIRE(j["sensors"].is_array());
 	REQUIRE(j["sensors"].size() == 1);

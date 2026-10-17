@@ -2,10 +2,12 @@
 #define WEBSOCKETSERVER_H
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
@@ -18,7 +20,7 @@ namespace adp
 // Sent to every client on connect ({msgType 0, protocol}). Bumped on any
 // incompatible message change, so an old client cached on a phone can tell it
 // is out of date instead of half working.
-constexpr int PROTOCOL_VERSION = 1;
+constexpr int PROTOCOL_VERSION = 2;
 
 // Who may connect. Both are optional and off by default: the server is open
 // to any client by design (README, "Security model"). Browsers don't apply
@@ -103,9 +105,15 @@ class WebsocketServer
 	{
 		std::string id;
 		std::string subscription = "*"; // pad path, "*" for all, "" for none
+		// When its unsent data last went past MAX_BUFFERED_BYTES, while it still is.
+		std::optional<std::chrono::steady_clock::time_point> backedUpSince;
 	};
 	std::mutex clientsMutex;
 	std::map<const ix::WebSocket*, Client> clients;
+
+	// Sends `message` unless the client is stalled, which is then disconnected.
+	// Takes clientsMutex: call without it.
+	void Deliver(ix::WebSocket& socket, const std::string& message);
 };
 } // namespace adp
 

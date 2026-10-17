@@ -339,7 +339,9 @@ void Start(const Path& localProfilesDir, const Path& profilesDir, std::chrono::s
 		gStop = false;
 	}
 	gThread = std::thread([=] {
-		constexpr auto retryInterval = std::chrono::seconds(5); // while LocalProfiles is unreachable
+		constexpr auto retryInterval = std::chrono::seconds(5);       // while LocalProfiles is unreachable
+		constexpr auto minRescanInterval = std::chrono::seconds(5);   // between requested rescans
+		auto lastScanStart = std::chrono::steady_clock::time_point{}; // of the last full scan
 		std::unique_lock lock(gMutex);
 		// This thread is the only writer of gList, so a recount can't be
 		// overwritten by the counts of a scan that started before it.
@@ -353,6 +355,8 @@ void Start(const Path& localProfilesDir, const Path& profilesDir, std::chrono::s
 			const auto prev = gList;
 			lock.unlock();
 			PlayerList next;
+			if (!recountOnly)
+				lastScanStart = std::chrono::steady_clock::now();
 			// Lock order: store, then gMutex (as on the device thread).
 			std::unique_lock<std::mutex> store;
 			try
@@ -370,7 +374,7 @@ void Start(const Path& localProfilesDir, const Path& profilesDir, std::chrono::s
 			}
 			std::vector<Rename> renamed = std::move(next.renamed);
 			next.renamed.clear();
-			if (next.localOk != prev->localOk || gVersion == 0)
+			if (!localProfilesDir.empty() && (next.localOk != prev->localOk || gVersion == 0))
 				std::printf("Players :: LocalProfiles %s\n", next.localOk ? "reachable" : "UNREACHABLE, retrying");
 			if (!recountOnly)
 				nextScan = std::chrono::steady_clock::now() + (next.localOk ? interval : retryInterval);
@@ -384,13 +388,27 @@ void Start(const Path& localProfilesDir, const Path& profilesDir, std::chrono::s
 			gRenames.insert(gRenames.end(), renamed.begin(), renamed.end());
 			if (store.owns_lock())
 				store.unlock();
-			gCv.wait_until(lock, nextScan, [] { return gStop || gRescan || gRecountAll || !gRecountPlayers.empty(); });
+			for (;;)
+			{
+				gCv.wait_until(lock, nextScan,
+				               [] { return gStop || gRescan || gRecountAll || !gRecountPlayers.empty(); });
+				// A requested rescan comes no sooner than minRescanInterval after
+				// the last one, so clients asking for one again and again can't
+				// keep the share busy.
+				if (gRescan)
+				{
+					nextScan = std::min(nextScan, lastScanStart + minRescanInterval);
+					gRescan = false;
+				}
+				if (gStop || gRecountAll || !gRecountPlayers.empty() || std::chrono::steady_clock::now() >= nextScan)
+					break;
+			}
 			// A full scan recounts too, so a recount only runs alone before the
 			// next scan is due.
 			const bool recount = gRecountAll || !gRecountPlayers.empty();
-			recountOnly = recount && !gRescan && std::chrono::steady_clock::now() < nextScan;
+			recountOnly = recount && std::chrono::steady_clock::now() < nextScan;
 			recountPlayers = gRecountAll ? std::set<std::string>{} : std::move(gRecountPlayers);
-			gRescan = gRecountAll = false;
+			gRecountAll = false;
 			gRecountPlayers.clear();
 		}
 	});

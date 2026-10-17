@@ -4,11 +4,14 @@
 #include <iostream>
 #include <string>
 #include <thread>
+#include <vector>
 
 #ifdef _WIN32
 #define NOMINMAX
 #define WIN32_LEAN_AND_MEAN // no winsock.h: ixwebsocket includes winsock2.h
 #include <windows.h>
+#include <shellapi.h>
+#include <timeapi.h>
 #endif
 
 #ifdef _MSC_VER
@@ -64,6 +67,36 @@ int main(int argc, char** argv)
 #ifdef _WIN32
 	// MSVC has no line buffering (_IOLBF means full) and aborts on size 0.
 	std::setvbuf(stdout, nullptr, _IONBF, 0);
+	// Names and paths are logged as UTF-8.
+	SetConsoleOutputCP(CP_UTF8);
+	// Sleep() otherwise rounds up to the 15.6ms system tick on some machines:
+	// the 60Hz loop would run at ~32Hz and every back-to-back HID feature
+	// report would wait a whole tick instead of its 2ms gap.
+	timeBeginPeriod(1);
+	// argv is in the ANSI codepage; the paths below are read as UTF-8.
+	std::vector<std::string> utf8Args;
+	{
+		int n = 0;
+		if (wchar_t** wargv = CommandLineToArgvW(GetCommandLineW(), &n))
+		{
+			for (int i = 0; i < n; ++i)
+			{
+				const int len = WideCharToMultiByte(CP_UTF8, 0, wargv[i], -1, nullptr, 0, nullptr, nullptr);
+				std::string s(len > 0 ? len - 1 : 0, '\0');
+				WideCharToMultiByte(CP_UTF8, 0, wargv[i], -1, s.data(), len, nullptr, nullptr);
+				utf8Args.push_back(std::move(s));
+			}
+			LocalFree(wargv);
+		}
+	}
+	std::vector<char*> utf8Argv;
+	for (auto& a : utf8Args)
+		utf8Argv.push_back(a.data());
+	if (!utf8Argv.empty())
+	{
+		argc = (int)utf8Argv.size();
+		argv = utf8Argv.data();
+	}
 #else
 	std::setvbuf(stdout, nullptr, _IOLBF, 0);
 #endif
@@ -162,5 +195,8 @@ int main(int argc, char** argv)
 
 	// Required on Windows
 	ix::uninitNetSystem();
+#ifdef _WIN32
+	timeEndPeriod(1);
+#endif
 	return failed ? 1 : 0;
 }

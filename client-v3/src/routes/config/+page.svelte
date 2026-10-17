@@ -15,7 +15,7 @@
 	});
 
 	const snap = $derived(pads.activeSnapshot);
-	const numButtons = $derived(snap?.numButtons ?? 0);
+	const numButtons = $derived(pads.device?.numButtons ?? 0);
 	const buttonOptions = $derived(Array.from({ length: numButtons }, (_, i) => i + 1));
 
 	// Group every sensor by its button; button 0 / out-of-range => Unassigned (disabled).
@@ -32,7 +32,7 @@
 
 	// Local drafts so live edits aren't stomped by the incoming snapshot mid-interaction.
 	let nameDraft = $state<string | null>(null);
-	const nameValue = $derived(nameDraft ?? snap?.name ?? '');
+	const nameValue = $derived(nameDraft ?? pads.device?.name ?? '');
 
 	const str = (e: Event) => (e.currentTarget as HTMLInputElement).value;
 
@@ -48,7 +48,7 @@
 	function commitName() {
 		// Profiles live under the pad name, so the server refuses an empty one too.
 		const name = clipName((nameDraft ?? '').trim());
-		if (nameDraft !== null && name && name !== snap?.name) pads.setName(name);
+		if (nameDraft !== null && name && name !== pads.device?.name) pads.setName(name);
 		nameDraft = null;
 	}
 

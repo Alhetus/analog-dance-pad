@@ -133,14 +133,11 @@ void Application::RunTick(MSGQ<QueueMessage>& queue, WebsocketServer& websocketS
 	// clients treat a pad silent for 2s as gone.
 	constexpr auto snapshotHeartbeat = std::chrono::milliseconds(250);
 
-	// Run discovery ~1Hz (not every 60Hz tick — hid_enumerate is not free) so the
-	// device map keeps up with hot-plug, including the very first tick. It only
-	// probes newly-seen (or failed, after a backoff) paths, so connected pads
-	// are not disturbed; their stage 2 runs in the background and Update()
-	// collects the finished ones.
-	constexpr unsigned discoverInterval = 60;
-	if (discoverTick++ % discoverInterval == 0)
-		Device::DiscoverNewDevices();
+	// Discovery enumerates ~1Hz in the background (from the very first tick)
+	// so the device map keeps up with hot-plug. It only probes newly-seen (or
+	// failed, after a backoff) paths, so connected pads are not disturbed;
+	// their stage 2 runs in the background and Update() collects the finished ones.
+	Device::DiscoverNewDevices();
 
 	// Update device data (collect, poll, publish snapshots).
 	Device::Update();
@@ -243,9 +240,15 @@ void Application::RunTick(MSGQ<QueueMessage>& queue, WebsocketServer& websocketS
 				websocketServer.SendMessageToClients(Profiles::Dump(reply.message));
 				continue;
 			}
-			websocketServer.SendTo(in.sender, Profiles::Dump(reply.message));
+			// A successful configure (slider rate) is answered only to askers
+			// that sent a requestId.
+			const bool quietOk = reply.message.value("op", "") == "configure" && reply.message.value("ok", false);
+			if (!quietOk || !RequestIdOf(in.message).is_null())
+				websocketServer.SendTo(in.sender, Profiles::Dump(reply.message));
 			for (const Asker& asker : in.folded)
 			{
+				if (quietOk && asker.requestId.is_null())
+					continue;
 				json copy = reply.message;
 				if (asker.requestId.is_null())
 					copy.erase("requestId");

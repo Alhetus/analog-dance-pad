@@ -355,3 +355,25 @@ TEST_CASE("SetSensor rejects buttons the pad doesn't have", "[profile]")
 	CHECK_FALSE(SetButton(pad, 0, -1));
 	CHECK(pad.Sensor(0)->button == 1);
 }
+
+TEST_CASE("A client's LED mapping to a disabled light rule is refused", "[profile]")
+{
+	RecordingBackend* raw = nullptr;
+	auto rep = makeReporter(raw);
+	LedMappingReport existing{};
+	existing.ledMappingIndex = 0;
+	existing.flags = LMF_ENABLED;
+	existing.lightRuleIndex = 3; // its rule is disabled: dark, but the pad already has it
+	existing.ledIndexEnd = 4;
+	PadDevice pad(rep, "t", makeName("x"), makeIdent(1, 3, 8, 1, IdentificationV2Report::FEATURE_LIGHTS), {},
+	              {existing}, {makeSensor(0, 425, 0)});
+
+	const json mapping0 = {{"lightRuleIndex", 3}, {"sensorIndex", 0}, {"ledIndexBegin", 0}, {"ledIndexEnd", 4}};
+	const json toRule1 = {{"lightRuleIndex", 1}, {"sensorIndex", 0}, {"ledIndexBegin", 4}, {"ledIndexEnd", 8}};
+	CHECK(pad.UnlitMapping({{"ledMappings", {mapping0, toRule1}}}) ==
+	      "LED mapping 1 uses light rule 1, which is disabled");
+	// Enabled in the same edit: fine. So is keeping the pad's own dark mapping.
+	CHECK(pad.UnlitMapping({{"ledMappings", {mapping0, toRule1}}, {"lightRules", {nullptr, {{"onColor", "#ffffff"}}}}})
+	          .empty());
+	CHECK(pad.UnlitMapping({{"ledMappings", {mapping0}}}).empty());
+}

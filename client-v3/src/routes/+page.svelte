@@ -82,6 +82,12 @@
 					<Badge variant="outline" title="Edits reach the pad's memory ~2s after the last one"
 						>saving…</Badge
 					>
+				{:else if pads.padState?.editsLost}
+					<Badge
+						variant="destructive"
+						title="The pad was unplugged before its last edits were saved: check its settings, or load a profile"
+						>last edits lost</Badge
+					>
 				{/if}
 			{/if}
 
@@ -154,7 +160,7 @@
 						{/each}
 					</div>
 					<p class="text-muted-foreground shrink-0 text-sm">
-						{snap.name || 'Pad'} · {snap.pollingRate} Hz
+						{pads.device?.name || 'Pad'} · {snap.pollingRate} Hz
 					</p>
 				</div>
 			{:else}
@@ -171,7 +177,7 @@
 		sensor={editing.sensor}
 		index={editing.index}
 		releaseEnabled={pads.releaseEnabled}
-		gainEnabled={snap?.featureDigipot ?? false}
+		gainEnabled={pads.device?.featureDigipot ?? false}
 		onthreshold={(v) => pads.setThreshold(editing.index, v)}
 		onrelease={(v) => pads.setReleaseThreshold(editing.index, v)}
 		ongain={(b) => pads.setGain(editing.index, b)}
