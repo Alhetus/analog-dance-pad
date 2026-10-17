@@ -15,8 +15,15 @@
 
 namespace adp
 {
-// Who may connect. Browsers don't apply the same-origin policy to WebSockets,
-// so without these any page a visitor opens on the LAN could drive the pads.
+// Sent to every client on connect ({msgType 0, protocol}). Bumped on any
+// incompatible message change, so an old client cached on a phone can tell it
+// is out of date instead of half working.
+constexpr int PROTOCOL_VERSION = 1;
+
+// Who may connect. Both are optional and off by default: the server is open
+// to any client by design (README, "Security model"). Browsers don't apply
+// the same-origin policy to WebSockets, so these are the knobs if a venue
+// ever needs one.
 struct WebsocketAccess
 {
 	std::set<std::string> allowedOrigins; // empty: any Origin
@@ -24,6 +31,7 @@ struct WebsocketAccess
 };
 
 // True if a connection with this Origin header and request URI may connect.
+// The token is ?token=<t> in the query string, percent-decoded.
 bool AccessAllowed(const WebsocketAccess& access, const std::string& origin, const std::string& uri);
 
 class WebsocketServer

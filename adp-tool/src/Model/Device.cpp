@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <filesystem>
+#include <optional>
 
 #include "hidapi.h"
 #include <fmt/format.h>
@@ -19,7 +20,6 @@
 #include <Model/Device.h>
 #include <Model/PadDevice.h>
 #include <Model/Reporter.h>
-#include <Model/Firmware.h>
 #include <Model/Wire.h>
 #include <Model/Players.h>
 #include <Model/Profiles.h>
@@ -90,42 +90,6 @@ SensorReport SensorState::ToReport(int index)
 	return report;
 }
 
-static void PrintLightRuleReport(const LightRuleReport& r)
-{
-	std::printf("light rule [\n");
-	std::printf("  lightRuleIndex: %i\n", r.lightRuleIndex);
-	std::printf("  flags: %s\n", fmt::format("{:b}", r.flags).c_str());
-	std::printf("  onColor: [R%i G%i B%i]\n", r.onColor.red, r.onColor.green, r.onColor.blue);
-	std::printf("  offColor: [R%i G%i B%i]\n", r.offColor.red, r.offColor.green, r.offColor.blue);
-	std::printf("  onFadeColor: [R%i G%i B%i]\n", r.onFadeColor.red, r.onFadeColor.green, r.onFadeColor.blue);
-	std::printf("  offFadeColor: [R%i G%i B%i]\n", r.offFadeColor.red, r.offFadeColor.green, r.offFadeColor.blue);
-	std::printf("]\n");
-}
-
-static void PrintLedMappingReport(const LedMappingReport& r)
-{
-	std::printf("led mapping [\n");
-	std::printf("  ledMappingIndex: %i\n", r.ledMappingIndex);
-	std::printf("  flags: %s\n", fmt::format("{:b}", r.flags).c_str());
-	std::printf("  lightRuleIndex: %i\n", r.lightRuleIndex);
-	std::printf("  sensorIndex: %i\n", r.sensorIndex);
-	std::printf("  ledIndexBegin: %i\n", r.ledIndexBegin);
-	std::printf("  ledIndexEnd: %i\n", r.ledIndexEnd);
-	std::printf("]\n");
-}
-
-static void PrintSensorReport(const SensorReport& r)
-{
-	std::printf("sensor config[\n");
-	std::printf("  mappingIndex: %i\n", r.index);
-	std::printf("  threshold: %i\n", ReadU16LE(r.threshold));
-	std::printf("  releaseThreshold: %i\n", ReadU16LE(r.releaseThreshold));
-	std::printf("  buttonMapping: %i\n", r.buttonMapping);
-	std::printf("  resistorValue: %i\n", r.resistorValue);
-	std::printf("  flags: %s\n", fmt::format("{:b}", ReadU16LE(r.flags)).c_str());
-	std::printf("]\n");
-}
-
 enum ConnectionState
 {
 	CS_UNKNOWN,
@@ -166,6 +130,8 @@ class DeviceConnection
 		// Reporter/BackendHid takes ownership of the handle from here on.
 		reporter = make_shared<Reporter>(handle);
 
+		// IdentificationV2 exists from firmware v1.3 on; older firmware is not
+		// supported (it fails here, and is retried with a backoff).
 		NameReport nameReport;
 		IdentificationV2Report identificationReport;
 		if (!reporter->Get(nameReport) || !reporter->Get(identificationReport))
@@ -297,162 +263,71 @@ class ConnectionManager
 		shared_ptr<Reporter> reporter = deviceCon.GetReporter();
 		string devicePath = deviceCon.GetPath();
 
+		// Firmware before v1.3 has no IdentificationV2 report, so Probe() already
+		// refused it: everything below assumes the v1.3+ reports.
 		NameReport name;
-		IdentificationReport padIdentification;
-		IdentificationV2Report padIdentificationV2;
-		vector<SensorReport> sensors;
-
-		if (reporter == nullptr || !reporter->Get(name))
-		{
+		IdentificationV2Report identification;
+		if (reporter == nullptr || !reporter->Get(name) || !reporter->Get(identification))
 			return false;
-		}
+		ClampIdentification(identification);
 
-		VersionType padVersion = versionTypeUnknown;
-
-		// The other checks were fine, which means the pad doesn't support identification yet. Loading defaults.
-		if (!reporter->Get(padIdentification))
-		{
-			padIdentification.firmwareMajor = WriteU16LE(0);
-			padIdentification.firmwareMinor = WriteU16LE(0);
-			padIdentification.buttonCount = MAX_BUTTON_COUNT;
-			padIdentification.sensorCount = SENSOR_COUNT_V1;
-			padIdentification.ledCount = 0;
-			padIdentification.maxSensorValue = WriteU16LE(MAX_SENSOR_VALUE);
-			memset(padIdentification.boardType, 0, BOARD_TYPE_LENGTH);
-			strcpy(padIdentification.boardType, "unknown");
-
-			static_cast<IdentificationReport&>(padIdentificationV2) = padIdentification;
-			padIdentificationV2.features = WriteU16LE(0);
-		}
-		else
-		{
-			padVersion = {(uint16_t)ReadU16LE(padIdentification.firmwareMajor),
-			              (uint16_t)ReadU16LE(padIdentification.firmwareMinor)};
-
-			if (padVersion.IsNewer({1, 2}))
+		// Reads every slot of one kind: select slot i, then get it.
+		auto readSlots = [&](SetPropertyReport::Ids select, int count, auto& report, auto&& keep) {
+			SetPropertyReport selectReport;
+			selectReport.propertyId = WriteU32LE(select);
+			for (int i = 0; i < count; ++i)
 			{
-				if (!reporter->Get(padIdentificationV2))
-				{
-					static_cast<IdentificationReport&>(padIdentificationV2) = padIdentification;
-					padIdentificationV2.features = WriteU16LE(0);
-				}
+				selectReport.propertyValue = WriteU32LE(i);
+				if (!reporter->Send(selectReport) || !reporter->Get(report))
+					return false;
+				keep(report);
 			}
-			else
-			{
-				static_cast<IdentificationReport&>(padIdentificationV2) = padIdentification;
-				padIdentificationV2.features = WriteU16LE(0);
-			}
-		}
+			return true;
+		};
 
-		ClampIdentification(padIdentificationV2);
-
-		// If we got some lights, try to read the light rules.
 		vector<LightRuleReport> lightRules;
 		vector<LedMappingReport> ledMappings;
-		if (padIdentification.ledCount > 0 && padVersion.IsNewer({1, 1}))
+		if (identification.ledCount > 0)
 		{
-			SetPropertyReport selectReport;
-
 			LightRuleReport lightReport;
-			selectReport.propertyId = WriteU32LE(SetPropertyReport::SELECTED_LIGHT_RULE_INDEX);
-
-			for (int i = 0; i < MAX_LIGHT_RULES; ++i)
-			{
-				selectReport.propertyValue = WriteU32LE(i);
-				if (!reporter->Send(selectReport))
-					return false;
-
-				if (!reporter->Get(lightReport))
-					return false;
-
-				if (lightReport.flags & LRF_ENABLED)
-				{
-					PrintLightRuleReport(lightReport);
-					lightRules.push_back(lightReport);
-				}
-			}
-
 			LedMappingReport ledReport;
-			selectReport.propertyId = WriteU32LE(SetPropertyReport::SELECTED_LED_MAPPING_INDEX);
-
-			for (int i = 0; i < MAX_LED_MAPPINGS; ++i)
-			{
-				selectReport.propertyValue = WriteU32LE(i);
-				if (!reporter->Send(selectReport))
-					return false;
-
-				if (!reporter->Get(ledReport))
-					return false;
-
-				if (ledReport.flags & LMF_ENABLED)
-				{
-					PrintLedMappingReport(ledReport);
-					ledMappings.push_back(ledReport);
-				}
-			}
-		}
-
-		SensorReport sensorReport;
-
-		if (padVersion.IsNewer({1, 2}))
-		{
-			SetPropertyReport selectReport;
-			selectReport.propertyId = WriteU32LE(SetPropertyReport::SELECTED_SENSOR_INDEX);
-
-			for (int i = 0; i < padIdentificationV2.sensorCount; ++i)
-			{
-				selectReport.propertyValue = WriteU32LE(i);
-				if (!reporter->Send(selectReport))
-					return false;
-
-				if (!reporter->Get(sensorReport))
-					return false;
-
-				PrintSensorReport(sensorReport);
-				sensors.push_back(sensorReport);
-			}
-		}
-		else
-		{
-			// Backwards compat
-			// Without it every threshold would start at 0, and the first edit
-			// (which rewrites the whole report) would store those zeros: fail, so
-			// the connect is retried.
-			PadConfigurationReport padConfig;
-			if (!reporter->Get(padConfig))
+			if (!readSlots(SetPropertyReport::SELECTED_LIGHT_RULE_INDEX, MAX_LIGHT_RULES, lightReport,
+			               [&](const LightRuleReport& r) {
+				               if (r.flags & LRF_ENABLED)
+					               lightRules.push_back(r);
+			               }) ||
+			    !readSlots(SetPropertyReport::SELECTED_LED_MAPPING_INDEX, MAX_LED_MAPPINGS, ledReport,
+			               [&](const LedMappingReport& r) {
+				               if (r.flags & LMF_ENABLED)
+					               ledMappings.push_back(r);
+			               }))
 				return false;
-			for (int i = 0; i < SENSOR_COUNT_V1; ++i)
-			{
-				sensorReport.index = i;
-				sensorReport.threshold = padConfig.sensorThresholds[i];
-				auto th = ReadU16LE(padConfig.sensorThresholds[i]);
-				auto rt = ReadF32LE(padConfig.releaseThreshold);
-				sensorReport.releaseThreshold = WriteU16LE(int(th * rt));
-				sensorReport.buttonMapping = padConfig.sensorToButtonMapping[i];
-				sensorReport.resistorValue = 0;
-				sensorReport.flags = WriteU16LE(0);
-
-				sensors.push_back(sensorReport);
-			}
 		}
 
-		auto device = make_unique<PadDevice>(reporter, devicePath.c_str(), name, padIdentificationV2, lightRules,
+		vector<SensorReport> sensors;
+		SensorReport sensorReport;
+		if (!readSlots(SetPropertyReport::SELECTED_SENSOR_INDEX, identification.sensorCount, sensorReport,
+		               [&](const SensorReport& r) { sensors.push_back(r); }))
+			return false;
+
+		auto device = make_unique<PadDevice>(reporter, devicePath.c_str(), name, identification, lightRules,
 		                                     ledMappings, sensors);
 
-		std::string boardType = device->State().boardType.ToString();
-
-		std::printf("ConnectionManager :: new device connected [\n");
-		std::printf("  Name: %s\n", device->State().name.c_str());
-		std::printf("  Board: %s: %s\n", padIdentificationV2.boardType, boardType.c_str());
-		std::printf("  Firmware version: v%u.%u\n", ReadU16LE(padIdentificationV2.firmwareMajor),
-		            ReadU16LE(padIdentificationV2.firmwareMinor));
-		std::printf("  Feature flags: %s\n", fmt::format("{:b}", ReadU16LE(padIdentificationV2.features)).c_str());
-		std::printf("  Path: %s\n", devicePath.c_str());
-
-		std::printf("]\n");
+		const PadState& pad = device->State();
+		std::printf("ConnectionManager :: connected '%s' (%s, firmware v%u.%u, %d sensors, %d buttons, features %s) "
+		            "at %s\n",
+		            pad.name.c_str(), pad.boardType.c_str(), pad.firmwareVersion.major, pad.firmwareVersion.minor,
+		            pad.numSensors, pad.numButtons, fmt::format("{:b}", ReadU16LE(identification.features)).c_str(),
+		            devicePath.c_str());
 
 		myPads[devicePath] = std::move(device);
 		return true;
+	}
+
+	void AddPad(unique_ptr<PadDevice> pad)
+	{
+		const string path = pad->Path();
+		myPads[path] = std::move(pad);
 	}
 
 	void DisconnectFailedDevice(const string& path)
@@ -546,6 +421,8 @@ void Device::Shutdown()
 	hid_exit();
 }
 
+static void FollowPlayerRenames(const std::vector<Players::Rename>& renames);
+
 void Device::Update()
 {
 	DeviceChanges changes = 0;
@@ -565,6 +442,8 @@ void Device::Update()
 
 		changes |= padChanges;
 	}
+
+	FollowPlayerRenames(Players::TakeRenames());
 
 	// A lights change (or pads coming/going) means the gated messages are stale.
 	if (changes & (DCF_LIGHTS | DCF_DEVICE))
@@ -592,6 +471,8 @@ void Device::PublishSnapshot()
 		snapshot.numButtons = pad.numButtons;
 		snapshot.featureDigipot = pad.featureDigipot;
 		snapshot.featureLights = pad.featureLights;
+		snapshot.unsaved = device->HasUnsavedChanges();
+		snapshot.saveFailed = device->SaveFailed();
 
 		snapshot.sensors.reserve(pad.numSensors);
 		for (int i = 0; i < pad.numSensors; ++i)
@@ -650,6 +531,8 @@ void Device::SnapshotToJson(const SensorSnapshot& snapshot, json& j)
 	j["numButtons"] = snapshot.numButtons;
 	j["featureDigipot"] = snapshot.featureDigipot;
 	j["featureLights"] = snapshot.featureLights;
+	j["unsaved"] = snapshot.unsaved;
+	j["saveFailed"] = snapshot.saveFailed;
 	j["sensors"] = json::array();
 
 	// Values are averages over the tick, so quantize them to the device's own
@@ -814,6 +697,46 @@ static std::string RenameConflict(const std::string& from, const std::string& to
 	return "";
 }
 
+// A LocalProfiles player was renamed (the scanner already moved their profile
+// dir): follow it in every pad's selection and recent list. Walks the pad
+// states on disk, so pads that aren't plugged in right now follow it too.
+static void FollowPlayerRenames(const std::vector<Players::Rename>& renames)
+{
+	if (renames.empty())
+		return;
+	try
+	{
+		std::error_code ec;
+		for (const auto& entry : std::filesystem::directory_iterator(gProfilesDir / "pads", ec))
+		{
+			const std::string pad = Profiles::UnescapeName(Profiles::PathU8(entry.path().filename()));
+			json& st = PadStateFor(pad);
+			bool changed = false;
+			for (const auto& r : renames)
+			{
+				if (st.contains("player") && st["player"] == r.from)
+				{
+					st["player"] = r.to;
+					changed = true;
+				}
+				if (st.contains("recent") && st["recent"].is_array())
+					for (auto& p : st["recent"])
+						if (p == r.from)
+						{
+							p = r.to;
+							changed = true;
+						}
+			}
+			if (changed)
+				SavePadState(pad);
+		}
+	}
+	catch (const std::exception& e)
+	{
+		std::printf("FollowPlayerRenames :: failed (%s)\n", e.what());
+	}
+}
+
 // ---- Client messages ---------------------------------------------------------------------------------------------
 
 // All of one player's stored profiles, grouped by pad name (msgType 6).
@@ -861,6 +784,46 @@ static bool HasString(const json& op, const char* key)
 	return op.contains(key) && op[key].is_string();
 }
 
+// Why a profile op's name or description can't be stored, or "".
+static std::string TooLong(const json& op)
+{
+	if (HasString(op, "name") && op["name"].get_ref<const std::string&>().size() > Profiles::MAX_NAME_BYTES)
+		return fmt::format("the name is longer than {} bytes", Profiles::MAX_NAME_BYTES);
+	if (HasString(op, "description") &&
+	    op["description"].get_ref<const std::string&>().size() > Profiles::MAX_DESCRIPTION_BYTES)
+		return fmt::format("the description is longer than {} bytes", Profiles::MAX_DESCRIPTION_BYTES);
+	return "";
+}
+
+static constexpr const char* PROFILE_OPS[] = {"loadProfile", "saveProfile", "importProfile", "updateProfile",
+                                              "deleteProfile"};
+
+// The op a pad message asks for, as named in its result (msgType 8), or "".
+static std::string OpNameOf(const json& j)
+{
+	for (const char* key : PROFILE_OPS)
+		if (j.contains(key))
+			return key;
+	if (j.contains("releaseMode"))
+		return "setReleaseMode";
+	if (j.contains("name"))
+		return "rename";
+	if (j.contains("sensors") || j.contains("lightRules") || j.contains("ledMappings"))
+		return "configure";
+	return "";
+}
+
+// Another connected pad named `name`, or nullptr. Profiles and the pad's
+// selection are stored under its name, so two pads sharing one (e.g. both
+// still on the factory default) would share them too.
+static PadDevice* OtherPadNamed(const PadDevice* device, const std::string& name)
+{
+	for (PadDevice* other : connectionManager->Pads())
+		if (other != device && other->State().name == name)
+			return other;
+	return nullptr;
+}
+
 // The op being handled, so a failure can still be answered.
 struct OpContext
 {
@@ -884,8 +847,6 @@ std::vector<ClientReply> Device::HandleClientMessage(const std::string& message)
 	OpContext ctx;
 	try
 	{
-		// Profile ops must not race the player scanner renaming players/<name>.
-		std::lock_guard<std::mutex> lock(Profiles::StoreMutex());
 		return HandleClientMessageImpl(message, ctx);
 	}
 	catch (const std::exception& e)
@@ -905,7 +866,7 @@ static std::vector<ClientReply> HandleClientMessageImpl(const std::string& messa
 	// single-threaded and safe. Parsing is fully defensive: a malformed or
 	// unrecognized message is logged and ignored, never fatal. Returns the
 	// replies: a profile list for the asker, or for everyone after a change,
-	// and a result (msgType 8) for the asker after every profile op.
+	// and a result (msgType 8) for the asker after every op.
 	std::vector<ClientReply> replies;
 	json j;
 	try
@@ -932,47 +893,67 @@ static std::vector<ClientReply> HandleClientMessageImpl(const std::string& messa
 		return replies;
 	}
 
+	// players/ is where the scanner renames player dirs, so whatever reads or
+	// writes it holds the store lock. Sensor and lights edits (slider rate,
+	// HID round-trips) don't.
+	std::unique_lock<std::mutex> storeLock(Profiles::StoreMutex(), std::defer_lock);
+
 	if (j.contains("listProfiles"))
 	{
+		storeLock.lock();
 		if (ValidPlayer(j["listProfiles"], player))
 			replies.push_back({PlayerProfilesJson(player), true});
 		return replies;
 	}
 
-	// Everything else acts on one pad, named by its HID path in `pad`.
-	PadDevice* device = nullptr;
-	if (connectionManager && HasString(j, "pad"))
-		device = connectionManager->Find(j["pad"].get<std::string>());
-	if (!device)
-	{
-		std::printf("HandleClientMessage :: missing or unknown pad, message ignored\n");
-		return replies;
-	}
-	ctx.pad = j["pad"];
-	const std::string padName = device->State().name;
-	const int numSensors = device->State().numSensors;
-	const auto padDir = [&] { return Profiles::PlayerPadDir(gProfilesDir, player, padName); };
-
-	// ---- Profile ops: {pad, <op>:{player, ...}} on <player>/<this pad>/. ----
-	// Profile files are on local disk, so this I/O on the device thread is fast.
-	// Each op answers its sender with {msgType 8, op, pad, ok, error, name}.
+	// Everything else acts on one pad, named by its HID path in `pad`, and is
+	// answered with {msgType 8, op, pad, ok, error, name}.
 	std::string& opName = ctx.op;
-	const json* op = nullptr;
-	for (const char* key : {"loadProfile", "saveProfile", "importProfile", "updateProfile", "deleteProfile"})
-	{
-		if (j.contains(key))
-		{
-			opName = key;
-			op = ValidPlayer(j[key], player) ? &j[key] : nullptr;
-			break;
-		}
-	}
+	opName = OpNameOf(j);
+	if (HasString(j, "pad"))
+		ctx.pad = j["pad"];
 	auto done = [&](bool ok, const std::string& error, const std::string& name = "") {
 		if (!ok)
 			std::printf("%s :: %s\n", opName.c_str(), error.c_str());
 		replies.push_back(OpResult(ctx, ok, error, name));
 		return replies;
 	};
+
+	PadDevice* device = nullptr;
+	if (connectionManager && HasString(j, "pad"))
+		device = connectionManager->Find(j["pad"].get<std::string>());
+	if (!device)
+	{
+		if (opName.empty())
+		{
+			std::printf("HandleClientMessage :: missing or unknown pad, message ignored\n");
+			return replies;
+		}
+		return done(false, "pad not connected");
+	}
+	const std::string padName = device->State().name;
+	const int numSensors = device->State().numSensors;
+	const auto padDir = [&] { return Profiles::PlayerPadDir(gProfilesDir, player, padName); };
+
+	// ---- Profile ops: {pad, <op>:{player, ...}} on <player>/<this pad>/. ----
+	// Profile files are on local disk, so this I/O on the device thread is fast.
+	const bool profileOp = std::find(std::begin(PROFILE_OPS), std::end(PROFILE_OPS), opName) != std::end(PROFILE_OPS);
+	if (profileOp || opName == "rename")
+		storeLock.lock();
+
+	const json* op = nullptr;
+	if (profileOp)
+	{
+		if (!ValidPlayer(j[opName], player))
+			return done(false, "unknown player");
+		op = &j[opName];
+		// This also catches a rename the pad stored differently than asked.
+		if (OtherPadNamed(device, padName))
+			return done(false, fmt::format("another pad here is also named '{}', rename one first", padName));
+		if (const std::string error = TooLong(*op); !error.empty())
+			return done(false, error);
+	}
+
 	auto refreshed = [&] {
 		// Broadcast: other clients may be showing this player's profiles too.
 		replies.push_back({PlayerProfilesJson(player), false});
@@ -981,17 +962,6 @@ static std::vector<ClientReply> HandleClientMessageImpl(const std::string& messa
 	const auto full = [&] {
 		return fmt::format("{} already has {} profiles on this pad", player, Profiles::MAX_PER_PAD);
 	};
-
-	if (!opName.empty() && !op)
-		return done(false, "unknown player");
-
-	// Profiles and the pad's selection are stored under its name, so two pads
-	// sharing one (e.g. both still on the factory default) would share them too.
-	// This also catches a rename the pad stored differently than asked.
-	if (!opName.empty())
-		for (PadDevice* other : connectionManager->Pads())
-			if (other != device && other->State().name == padName)
-				return done(false, fmt::format("another pad here is also named '{}', rename one first", padName));
 
 	if (opName == "loadProfile")
 	{
@@ -1117,38 +1087,26 @@ static std::vector<ClientReply> HandleClientMessageImpl(const std::string& messa
 		return done(true, "");
 	}
 
-	// ---- Device ops. Results (msgType 8) go to the sender like profile ops. ----
+	// ---- Device ops. ----
 
 	// Release mode: 0 = none, 2 = individual (ReleaseMode enum). Global (1) has
 	// been removed, so it is refused like any other unknown value.
-	if (j.contains("releaseMode"))
+	if (opName == "setReleaseMode")
 	{
-		opName = "setReleaseMode";
 		const int mode = j["releaseMode"].is_number_integer() ? j["releaseMode"].get<int>() : -1;
 		if (mode != RELEASE_NONE && mode != RELEASE_INDIVIDUAL)
 			return done(false, "unknown release mode");
 		return device->SetReleaseMode((ReleaseMode)mode) ? done(true, "") : done(false, "the pad didn't accept it");
 	}
 
-	if (j.contains("calibrateSensor"))
-	{
-		opName = "calibrateSensor";
-		if (!j["calibrateSensor"].is_number_integer() || !device->ValidSensorIndex(j["calibrateSensor"].get<int>()))
-			return done(false, "unknown sensor");
-		return device->CalibrateSensor(j["calibrateSensor"].get<int>()) ? done(true, "")
-		                                                                : done(false, "the pad didn't accept it");
-	}
-
 	// A rename. Profiles and pad state are keyed by pad name and move along.
-	if (j.contains("name"))
+	if (opName == "rename")
 	{
-		opName = "rename";
 		if (!HasString(j, "name"))
 			return done(false, "needs a name");
 		const std::string newName = j["name"].get<std::string>();
-		for (PadDevice* other : connectionManager->Pads())
-			if (other != device && other->State().name == newName)
-				return done(false, fmt::format("another pad here is already named '{}'", newName));
+		if (OtherPadNamed(device, newName))
+			return done(false, fmt::format("another pad here is already named '{}'", newName));
 		if (const std::string conflict = RenameConflict(padName, newName); !conflict.empty())
 			return done(false, conflict);
 		if (!device->SendName(newName.c_str()))
@@ -1161,9 +1119,8 @@ static std::vector<ClientReply> HandleClientMessageImpl(const std::string& messa
 	// reuses the hardened LoadProfile path, which validates every index and
 	// group before touching device state. Sent at slider-drag rate, so only a
 	// failure is answered.
-	if (j.contains("sensors") || j.contains("lightRules") || j.contains("ledMappings"))
+	if (opName == "configure")
 	{
-		opName = "configure";
 		if (j.contains("sensors") && (!j["sensors"].is_array() || (int)j["sensors"].size() != numSensors))
 			return done(false, fmt::format("expected {} sensors", numSensors));
 		if (!device->LoadProfile(j, (DeviceProfileGroups)(DGP_ALL & ~DPG_DEVICE)))
@@ -1173,6 +1130,98 @@ static std::vector<ClientReply> HandleClientMessageImpl(const std::string& messa
 
 	std::printf("HandleClientMessage :: unhandled message: %s\n", message.c_str());
 	return replies;
+}
+
+void Device::AddPadForTest(std::unique_ptr<PadDevice> pad)
+{
+	if (!connectionManager)
+		connectionManager = std::make_unique<ConnectionManager>();
+	connectionManager->AddPad(std::move(pad));
+	gPadStatesDirty = true;
+}
+
+void Device::ResetForTest()
+{
+	connectionManager.reset();
+	gPadStates.clear();
+	gPadStatesDirty = true;
+	gLightsDirty = false;
+}
+
+// ---- Lights from a client or profile -------------------------------------------------------------------------------
+
+// A whole number 0..255 at `key` (absent: 0), as the report's byte fields hold.
+static bool ReadByteField(const json& slot, const char* key, int& out)
+{
+	out = 0;
+	if (!slot.contains(key))
+		return true;
+	const json& v = slot[key];
+	if (!v.is_number_integer())
+		return false;
+	const auto n = v.get<int64_t>();
+	if (n < 0 || n > 255)
+		return false;
+	out = (int)n;
+	return true;
+}
+
+static bool ReadBoolField(const json& slot, const char* key, bool& out)
+{
+	out = false;
+	if (!slot.contains(key))
+		return true;
+	if (!slot[key].is_boolean())
+		return false;
+	out = slot[key].get<bool>();
+	return true;
+}
+
+static bool ReadColorField(const json& slot, const char* key, RgbColor& out)
+{
+	out = RgbColor();
+	if (!slot.contains(key))
+		return true;
+	if (!slot[key].is_string())
+		return false;
+	out = RgbColor(slot[key].get<std::string>());
+	return true;
+}
+
+static bool ParseLedMapping(const json& slot, LedMapping& m)
+{
+	return ReadByteField(slot, "lightRuleIndex", m.lightRuleIndex) &&
+	       ReadByteField(slot, "sensorIndex", m.sensorIndex) && ReadByteField(slot, "ledIndexBegin", m.ledIndexBegin) &&
+	       ReadByteField(slot, "ledIndexEnd", m.ledIndexEnd);
+}
+
+static bool ParseLightRule(const json& slot, LightRule& r)
+{
+	return ReadBoolField(slot, "fadeOn", r.fadeOn) && ReadBoolField(slot, "fadeOff", r.fadeOff) &&
+	       ReadColorField(slot, "onColor", r.onColor) && ReadColorField(slot, "offColor", r.offColor) &&
+	       ReadColorField(slot, "onFadeColor", r.onFadeColor) && ReadColorField(slot, "offFadeColor", r.offFadeColor);
+}
+
+// Slot i of a lights array configures slot i on the pad; a slot that is
+// missing or not an object (profiles from pads with gaps between enabled slots
+// carry nulls there) is disabled (nullopt). False if any slot is malformed or
+// the array has more slots than a pad.
+template <typename T, typename Parse>
+static bool ParseSlots(const json& arr, int max, std::vector<std::optional<T>>& out, Parse parse)
+{
+	if ((int)arr.size() > max)
+		return false;
+	out.assign(max, std::nullopt);
+	for (int i = 0; i < (int)arr.size(); ++i)
+	{
+		if (!arr[i].is_object())
+			continue;
+		T v{};
+		if (!parse(arr[i], v))
+			return false;
+		out[i] = v;
+	}
+	return true;
 }
 
 void Device::DiscoverNewDevices()
@@ -1218,67 +1267,49 @@ bool PadDevice::LoadProfile(const json& j, DeviceProfileGroups groups)
 
 	if ((groups & DPG_LIGHTS) && pad->featureLights)
 	{
-		// Slot i of each array configures slot i on the pad. A slot that is
-		// missing or not an object (profiles from pads with gaps between enabled
-		// slots carry nulls there) is disabled. Only slots that differ from the
+		// Every slot is parsed and checked before anything is sent, so a bad one
+		// can't leave the lights half applied. Only slots that differ from the
 		// pad are sent: each report is a HID round-trip that stalls polling of
 		// every pad, and a full rewrite is 32 of them.
-		bool touched = false;
-
-		if (j.contains("ledMappings") && j["ledMappings"].is_array())
+		const bool hasMappings = j.contains("ledMappings") && j["ledMappings"].is_array();
+		const bool hasRules = j.contains("lightRules") && j["lightRules"].is_array();
+		std::vector<std::optional<LedMapping>> mappings;
+		std::vector<std::optional<LightRule>> rules;
+		if ((hasMappings && !ParseSlots(j["ledMappings"], MAX_LED_MAPPINGS, mappings, ParseLedMapping)) ||
+		    (hasRules && !ParseSlots(j["lightRules"], MAX_LIGHT_RULES, rules, ParseLightRule)))
 		{
-			touched = true;
-			const auto& ledMappings = j["ledMappings"];
-			for (int i = 0; i < MAX_LED_MAPPINGS; ++i)
+			std::printf("LoadProfile :: malformed lights, none applied\n");
+			ok = false;
+		}
+		else
+		{
+			for (int i = 0; i < (int)mappings.size(); ++i)
 			{
 				const auto current = myLights.ledMappings.find(i);
 				const bool enabled = current != myLights.ledMappings.end();
-				if (i >= (int)ledMappings.size() || !ledMappings[i].is_object())
+				if (!mappings[i])
 				{
 					if (enabled)
 						ok &= DisableLedMapping(i);
-					continue;
 				}
-
-				const auto& value = ledMappings[i];
-				LedMapping lm = {value.value("lightRuleIndex", 0), value.value("sensorIndex", 0),
-				                 value.value("ledIndexBegin", 0), value.value("ledIndexEnd", 0)};
-				if (!enabled || !(current->second == lm))
-					ok &= SendLedMapping(i, lm);
+				else if (!enabled || !(current->second == *mappings[i]))
+					ok &= SendLedMapping(i, *mappings[i]);
 			}
-		}
-
-		if (j.contains("lightRules") && j["lightRules"].is_array())
-		{
-			touched = true;
-			const auto& lightRules = j["lightRules"];
-			for (int i = 0; i < MAX_LIGHT_RULES; ++i)
+			for (int i = 0; i < (int)rules.size(); ++i)
 			{
 				const auto current = myLights.lightRules.find(i);
 				const bool enabled = current != myLights.lightRules.end();
-				if (i >= (int)lightRules.size() || !lightRules[i].is_object())
+				if (!rules[i])
 				{
 					if (enabled)
 						ok &= DisableLightRule(i);
-					continue;
 				}
-
-				const auto& value = lightRules[i];
-				auto color = [&value](const char* name) {
-					return (value.contains(name) && value[name].is_string()) ? RgbColor((string)value[name])
-					                                                         : RgbColor(0, 0, 0);
-				};
-
-				LightRule lr = {
-				    value.value("fadeOn", false), value.value("fadeOff", false), color("onColor"), color("offColor"),
-				    color("onFadeColor"),         color("offFadeColor")};
-				if (!enabled || !(current->second == lr))
-					ok &= SendLightRule(i, lr);
+				else if (!enabled || !(current->second == *rules[i]))
+					ok &= SendLightRule(i, *rules[i]);
 			}
+			if (hasMappings || hasRules)
+				TriggerChange(DCF_LIGHTS);
 		}
-
-		if (touched)
-			TriggerChange(DCF_LIGHTS);
 	}
 
 	if (j.contains("sensors") && j["sensors"].is_array())

@@ -72,6 +72,15 @@
 				{#if loadedProfile && modified}
 					<Badge variant="secondary">modified</Badge>
 				{/if}
+				{#if snap?.saveFailed}
+					<Badge variant="destructive" title="The server keeps retrying every 2 seconds"
+						>not saved to the pad</Badge
+					>
+				{:else if snap?.unsaved}
+					<Badge variant="outline" title="Edits reach the pad's memory ~2s after the last one"
+						>saving…</Badge
+					>
+				{/if}
 			{/if}
 
 			{#if step === 'tune' && snap}

@@ -19,7 +19,6 @@ TEST_CASE("HandleClientMessage ignores bad input without throwing", "[handlemess
 	CHECK_NOTHROW(Device::HandleClientMessage("{\"sensors\":[]}")); // object, but no device
 	CHECK_NOTHROW(Device::HandleClientMessage("{\"releaseMode\":1}"));
 	CHECK_NOTHROW(Device::HandleClientMessage("{\"releaseMode\":99}")); // out of range
-	CHECK_NOTHROW(Device::HandleClientMessage("{\"calibrateSensor\":0}"));
 	CHECK_NOTHROW(Device::HandleClientMessage("{\"unhandled\":true}"));
 	CHECK_NOTHROW(Device::HandleClientMessage("{\"pad\":\"nope\",\"releaseMode\":1}")); // unknown pad
 	CHECK_NOTHROW(Device::HandleClientMessage("{\"pad\":42,\"sensors\":[]}"));          // non-string pad
@@ -27,12 +26,17 @@ TEST_CASE("HandleClientMessage ignores bad input without throwing", "[handlemess
 
 TEST_CASE("HandleClientMessage only builds paths for known players", "[handlemessage]")
 {
-	// No scan has run, so no player is known: path-bearing requests are dropped
-	// without a reply, including traversal attempts.
+	// No scan has run, so no player is known: path-bearing requests are dropped,
+	// including traversal attempts. An op on an unknown pad is answered.
 	CHECK(Device::HandleClientMessage("{\"listProfiles\":{\"player\":\"../../etc\"}}").empty());
 	CHECK(Device::HandleClientMessage("{\"listProfiles\":{\"player\":42}}").empty());
 	CHECK(Device::HandleClientMessage("{\"listProfiles\":\"Mike\"}").empty());
-	CHECK(Device::HandleClientMessage("{\"pad\":\"x\",\"loadProfile\":{\"player\":\"Mike\",\"id\":\"a\"}}").empty());
+	const auto replies =
+	    Device::HandleClientMessage("{\"pad\":\"x\",\"loadProfile\":{\"player\":\"Mike\",\"id\":\"a\"}}");
+	REQUIRE(replies.size() == 1);
+	CHECK(replies[0].message["msgType"] == 8);
+	CHECK(replies[0].message["ok"] == false);
+	CHECK(replies[0].message["error"] == "pad not connected");
 	CHECK_NOTHROW(Device::HandleClientMessage("{\"rescanPlayers\":true}"));
 }
 
@@ -54,4 +58,11 @@ TEST_CASE("AccessAllowed checks the Origin allowlist and the token", "[websocket
 	CHECK_FALSE(AccessAllowed(token, "", "/"));
 	CHECK_FALSE(AccessAllowed(token, "", "/?token=s3cretX"));
 	CHECK_FALSE(AccessAllowed(token, "", "/?xtoken=s3cret"));
+	CHECK_FALSE(AccessAllowed(token, "", "/?token="));
+
+	WebsocketAccess encoded;
+	encoded.token = "a b&c%";
+	CHECK(AccessAllowed(encoded, "", "/?token=a%20b%26c%25"));
+	CHECK(AccessAllowed(encoded, "", "/?token=a+b%26c%25#frag"));
+	CHECK_FALSE(AccessAllowed(encoded, "", "/?token=a b&c%"));
 }

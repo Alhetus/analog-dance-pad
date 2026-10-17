@@ -11,6 +11,7 @@
 #include <set>
 #include <sstream>
 #include <thread>
+#include <utility>
 
 namespace fs = std::filesystem;
 
@@ -121,8 +122,10 @@ static bool ReadFile(const Path& p, std::string& out, size_t maxBytes)
 // Renames players/<from> -> players/<to> in this server's local profile store
 // where it is safe, and remembers the folder -> name map next to it, so a
 // rename that happened while this server was off is still followed.
-static void FollowRenames(const Path& profilesDir, const std::map<std::string, std::string>& now)
+// Returns the renames that took effect.
+static std::vector<Rename> FollowRenames(const Path& profilesDir, const std::map<std::string, std::string>& now)
 {
+	std::vector<Rename> followed;
 	json before;
 	Profiles::Read(profilesDir, "player-names", before);
 	std::map<std::string, std::string> prev;
@@ -141,7 +144,10 @@ static void FollowRenames(const Path& profilesDir, const std::map<std::string, s
 		const Path from = profilesDir / "players" / Profiles::U8Path(Profiles::EscapeName(r.from));
 		const Path to = profilesDir / "players" / Profiles::U8Path(Profiles::EscapeName(r.to));
 		if (!fs::is_directory(from, ec))
-			continue; // no profiles to move
+		{
+			followed.push_back(r); // no profiles to move
+			continue;
+		}
 		if (fs::exists(to, ec))
 		{
 			// ponytail: no merging; both dirs are kept and the move retried each scan.
@@ -153,12 +159,15 @@ static void FollowRenames(const Path& profilesDir, const std::map<std::string, s
 		            ec ? "NOT moved, will retry" : "moved");
 		if (ec)
 			remembered[r.folder] = r.from;
+		else
+			followed.push_back(r);
 	}
 
 	// An empty map is never a real venue state; skip it so a scan that read
 	// nothing (share flaking mid-scan) can't wipe the remembered names.
 	if (prev != remembered && !remembered.empty())
 		Profiles::Write(profilesDir, "player-names", json(remembered));
+	return followed;
 }
 
 static std::map<std::string, int> CountProfiles(const Path& playerDir)
@@ -262,7 +271,7 @@ PlayerList Scan(const Path& localProfilesDir, const Path& profilesDir, const Pla
 	{
 		// Local disk only (the share was read above), so this is held briefly.
 		std::lock_guard<std::mutex> lock(Profiles::StoreMutex());
-		FollowRenames(profilesDir, folderNames);
+		list.renamed = FollowRenames(profilesDir, folderNames);
 		for (auto& [name, p] : byName)
 			p.profileCounts = CountProfiles(profilesDir / "players" / Profiles::U8Path(Profiles::EscapeName(name)));
 	}
@@ -275,6 +284,7 @@ PlayerList Scan(const Path& localProfilesDir, const Path& profilesDir, const Pla
 PlayerList Recount(const Path& profilesDir, const PlayerList& previous)
 {
 	PlayerList list = previous;
+	list.renamed.clear();
 	if (profilesDir.empty())
 		return list;
 	std::lock_guard<std::mutex> lock(Profiles::StoreMutex());
@@ -304,6 +314,7 @@ static bool gStop = false;
 static bool gRescan = false;
 static bool gRecount = false;
 static std::thread gThread;
+static std::vector<Rename> gRenames; // followed, not yet taken by the device thread
 
 void Start(const Path& localProfilesDir, const Path& profilesDir, std::chrono::seconds interval)
 {
@@ -334,6 +345,8 @@ void Start(const Path& localProfilesDir, const Path& profilesDir, std::chrono::s
 				next = *prev;
 				next.localOk = false;
 			}
+			std::vector<Rename> renamed = std::move(next.renamed);
+			next.renamed.clear();
 			if (next.localOk != prev->localOk || gVersion == 0)
 				std::printf("Players :: LocalProfiles %s\n", next.localOk ? "reachable" : "UNREACHABLE, retrying");
 			const bool healthy = next.localOk;
@@ -344,6 +357,7 @@ void Start(const Path& localProfilesDir, const Path& profilesDir, std::chrono::s
 			gList = std::make_shared<const PlayerList>(std::move(next));
 			if (changed)
 				gVersion++;
+			gRenames.insert(gRenames.end(), renamed.begin(), renamed.end());
 			gCv.wait_for(lock, healthy ? interval : retryInterval, [] { return gStop || gRescan || gRecount; });
 			recountOnly = gRecount && !gRescan; // a full scan recounts too
 			gRescan = gRecount = false;
@@ -380,6 +394,21 @@ void RequestRecount()
 	gCv.notify_all();
 }
 
+std::vector<Rename> TakeRenames()
+{
+	std::lock_guard lock(gMutex);
+	return std::exchange(gRenames, {});
+}
+
+void SetForTest(PlayerList list)
+{
+	std::lock_guard lock(gMutex);
+	gRenames.insert(gRenames.end(), list.renamed.begin(), list.renamed.end());
+	list.renamed.clear();
+	gList = std::make_shared<const PlayerList>(std::move(list));
+	gVersion++;
+}
+
 std::shared_ptr<const PlayerList> Get()
 {
 	std::lock_guard lock(gMutex);
@@ -397,19 +426,64 @@ bool Has(const std::string& name)
 	return std::any_of(list->players.begin(), list->players.end(), [&](const Player& p) { return p.name == name; });
 }
 
+// Avatar messages by file, valid while the file's mtime and size are unchanged.
+struct CachedAvatar
+{
+	fs::file_time_type mtime;
+	uintmax_t size = 0;
+	std::shared_ptr<const std::string> message;
+};
+static std::mutex gAvatarMutex;
+static std::map<Path, CachedAvatar> gAvatars;
+static size_t gAvatarBytes = 0;
+// ponytail: dropped wholesale when full; per-entry LRU if venues have many large avatars.
+constexpr size_t MAX_AVATAR_CACHE_BYTES = 64 * 1024 * 1024;
+constexpr uintmax_t MAX_AVATAR_BYTES = 4 * 1024 * 1024;
+
 std::string AvatarMessage(const std::string& name)
 {
-	json j = {{"msgType", 7}, {"name", name}, {"mime", ""}, {"data", ""}};
+	const json none = {{"msgType", 7}, {"name", name}, {"mime", ""}, {"data", ""}};
 	const auto list = Get();
-	for (const auto& p : list->players)
+	const auto it = std::find_if(list->players.begin(), list->players.end(),
+	                             [&](const Player& p) { return p.name == name && !p.avatar.empty(); });
+	if (it == list->players.end())
+		return none.dump();
+	const Path& path = it->avatar;
+
+	// Only a stat on the share for a cached avatar, not a re-read of up to 4MB.
+	std::error_code ec;
+	const auto mtime = fs::last_write_time(path, ec);
+	const auto size = ec ? 0 : fs::file_size(path, ec);
+	if (ec || size > MAX_AVATAR_BYTES)
+		return none.dump();
 	{
-		std::string bytes;
-		if (p.name != name || p.avatar.empty() || !ReadFile(p.avatar, bytes, 4 * 1024 * 1024))
-			continue;
-		j["mime"] = AvatarMime(Profiles::PathU8(p.avatar.filename()));
-		j["data"] = Base64(bytes);
-		break;
+		std::lock_guard lock(gAvatarMutex);
+		const auto cached = gAvatars.find(path);
+		if (cached != gAvatars.end() && cached->second.mtime == mtime && cached->second.size == size)
+			return *cached->second.message;
 	}
-	return j.dump();
+
+	std::string bytes;
+	if (!ReadFile(path, bytes, MAX_AVATAR_BYTES))
+		return none.dump();
+	json j = none;
+	j["mime"] = AvatarMime(Profiles::PathU8(path.filename()));
+	j["data"] = Base64(bytes);
+	auto message = std::make_shared<const std::string>(j.dump());
+
+	std::lock_guard lock(gAvatarMutex);
+	if (const auto old = gAvatars.find(path); old != gAvatars.end())
+	{
+		gAvatarBytes -= old->second.message->size();
+		gAvatars.erase(old);
+	}
+	if (gAvatarBytes + message->size() > MAX_AVATAR_CACHE_BYTES)
+	{
+		gAvatars.clear();
+		gAvatarBytes = 0;
+	}
+	gAvatars[path] = {mtime, size, message};
+	gAvatarBytes += message->size();
+	return *message;
 }
 } // namespace adp::Players

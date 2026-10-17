@@ -3,7 +3,8 @@ cmake_minimum_required (VERSION 3.21)
 
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_SOURCE_DIR}/cmake/modules/")
 project(adp-tool VERSION 2.0)
-configure_file("${CMAKE_CURRENT_SOURCE_DIR}/src/Adp.h.in" "${CMAKE_CURRENT_SOURCE_DIR}/src/Adp.h")
+# Generated into the build tree (not committed): the version comes from project().
+configure_file("${CMAKE_CURRENT_SOURCE_DIR}/src/Adp.h.in" "${CMAKE_CURRENT_BINARY_DIR}/generated/Adp.h")
 
 option(ADP_BUILD_TESTS "Build the adp-tool unit tests" ON)
 option(ADP_WERROR "Treat first-party compiler warnings as errors" ON)
@@ -38,10 +39,10 @@ if(WIN32 OR MINGW)
 	list(APPEND GLOBAL_LIBS setupapi ws2_32)
 elseif(APPLE)
 	# hidapi's mac backend needs these frameworks
-	# (the udev/X11 the Linux branch links do not exist on macOS).
+	# (the udev the Linux branch links does not exist on macOS).
 	list(APPEND GLOBAL_LIBS "-framework IOKit" "-framework CoreFoundation" "-framework AppKit")
 elseif(UNIX)
-	list(APPEND GLOBAL_LIBS udev X11)
+	list(APPEND GLOBAL_LIBS udev)
 endif()
 # Load dependencies end
 
@@ -68,7 +69,6 @@ endif()
 # the executable and the unit-test target.
 set(CORE_SOURCES
 	"src/Model/Device.cpp"
-	"src/Model/Firmware.cpp"
 	"src/Model/Players.cpp"
 	"src/Model/Profiles.cpp"
 	"src/Model/Reporter.cpp"
@@ -77,7 +77,7 @@ set(CORE_SOURCES
 )
 
 add_library(adp-core STATIC ${CORE_SOURCES})
-target_include_directories(adp-core PUBLIC "src")
+target_include_directories(adp-core PUBLIC "src" "${CMAKE_CURRENT_BINARY_DIR}/generated")
 target_link_libraries(adp-core PUBLIC ${GLOBAL_LIBS})
 target_link_libraries(adp-core PRIVATE adp_warnings)
 set_target_properties(adp-core PROPERTIES

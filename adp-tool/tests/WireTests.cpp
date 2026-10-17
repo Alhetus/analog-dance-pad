@@ -1,6 +1,8 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/catch_approx.hpp>
 
+#include <cmath>
+
 #include <Model/Wire.h>
 
 using namespace adp;
@@ -30,14 +32,6 @@ TEST_CASE("little-endian 32-bit round-trips", "[wire]")
 	CHECK(v.bytes[3] == 0x80);
 }
 
-TEST_CASE("float32 round-trips via bit_cast", "[wire]")
-{
-	CHECK(ReadF32LE(WriteF32LE(0.0f)) == 0.0f);
-	CHECK(ReadF32LE(WriteF32LE(1.0f)) == 1.0f);
-	CHECK(ReadF32LE(WriteF32LE(-3.5f)) == -3.5f);
-	CHECK(ReadF32LE(WriteF32LE(1234.5f)) == 1234.5f);
-}
-
 TEST_CASE("sensor value normalization clamps to [0,1]", "[wire]")
 {
 	CHECK(ToNormalizedSensorValue(0) == 0.0);
@@ -55,6 +49,10 @@ TEST_CASE("device sensor value mapping clamps to [0,MAX]", "[wire]")
 	CHECK(ToDeviceSensorValue(1.0) == MAX_SENSOR_VALUE);
 	CHECK(ToDeviceSensorValue(-1.0) == 0);
 	CHECK(ToDeviceSensorValue(2.0) == MAX_SENSOR_VALUE);
+	// Values lround can't represent (from a hostile client) are clamped first.
+	CHECK(ToDeviceSensorValue(1e300) == MAX_SENSOR_VALUE);
+	CHECK(ToDeviceSensorValue(-1e300) == 0);
+	CHECK(ToDeviceSensorValue(std::nan("")) == 0);
 }
 
 TEST_CASE("raw little-endian bytes decode with the right weights", "[wire]")

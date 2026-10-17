@@ -39,7 +39,7 @@ workload, plus CMake (`choco install cmake`, or bundled with Visual Studio).
 **Linux** (Debian/Ubuntu):
 
 ```
-sudo apt update && sudo apt install -y build-essential cmake ninja-build libudev-dev libx11-dev
+sudo apt update && sudo apt install -y build-essential cmake ninja-build libudev-dev
 ```
 
 **macOS** — Xcode Command Line Tools (`xcode-select --install`) plus CMake:
@@ -102,6 +102,16 @@ journalctl --user -u adp-server -f   # logs
 - While the share is unmounted everything keeps working with the last known
   player list, and it refreshes automatically within a few seconds of the share
   coming back.
+
+### Security model
+
+The server is open by design: any client that can reach port 8008 may connect,
+drive the pads, and create, edit or delete profiles. It runs on a trusted venue
+LAN for trusted users, so there is no authentication, and the shipped systemd
+unit uses none. This is a deliberate choice, not an oversight.
+
+`--allowed-origin <origin>` (repeatable) and `--token <secret>` (clients then
+connect with `?token=<secret>`) exist if a venue ever wants to restrict access.
 
 ## Test
 

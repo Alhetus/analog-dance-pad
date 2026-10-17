@@ -21,6 +21,10 @@ using Path = std::filesystem::path;
 // Most profiles a player may keep per pad.
 constexpr size_t MAX_PER_PAD = 5;
 
+// Longest profile name and description stored, in UTF-8 bytes.
+constexpr size_t MAX_NAME_BYTES = 64;
+constexpr size_t MAX_DESCRIPTION_BYTES = 1000;
+
 // A path from a UTF-8 string. std::filesystem::path(std::string) uses the ANSI
 // codepage on Windows and would mangle names like "Åsa", so always go via u8.
 Path U8Path(const std::string& utf8);
@@ -71,9 +75,12 @@ bool Delete(const Path& dir, const std::string& id);
 // and around profile reads/writes, so neither sees the other half-done.
 std::mutex& StoreMutex();
 
-// The storable settings of a client-supplied profile (importProfile): keeps
-// only the known fields, each with its expected type. Returns null unless it
-// has a sensorCount and a sensors array of that length, and its lights arrays
-// fit a pad's slots. id/name/savedAt are set by the caller.
+// The storable settings of a client-supplied profile (importProfile), rebuilt
+// field by field: only known fields of the expected type are kept (sensor
+// thresholds clamped to 0..1, gain and light indices to one byte, colors as
+// lowercase #rrggbb, the shape a live pad reports). Returns null unless it has
+// a sensorCount and a sensors array of that length, its lights arrays fit a
+// pad's slots, and its description fits MAX_DESCRIPTION_BYTES. id/name/savedAt
+// are set by the caller.
 json Sanitize(const json& profile);
 } // namespace adp::Profiles

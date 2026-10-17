@@ -1,4 +1,5 @@
 #include "Adp.h"
+#include <cctype>
 #include <cstdio>
 #include <string>
 #include <ixwebsocket/IXWebSocketServer.h>
@@ -12,18 +13,73 @@ namespace adp
 // snapshots until it catches up (~2s of 60Hz snapshots for a few pads).
 constexpr size_t MAX_BUFFERED_BYTES = 256 * 1024;
 
+// Above this (a few avatars' worth) a client that isn't reading at all is
+// disconnected rather than buffered for without bound; it gets everything
+// again from the replay when it reconnects.
+constexpr size_t MAX_STALLED_BYTES = 16 * 1024 * 1024;
+
+// Sends `message` unless the client is stalled, which is then disconnected.
+static void Deliver(ix::WebSocket& socket, const std::string& message)
+{
+	if (socket.bufferedAmount() > MAX_STALLED_BYTES)
+	{
+		socket.close(4008, "Too slow");
+		return;
+	}
+	socket.send(message);
+}
+
+// %XX and '+' decoded, as browsers encode query values.
+static std::string PercentDecode(const std::string& s)
+{
+	std::string out;
+	for (size_t i = 0; i < s.size(); ++i)
+	{
+		if (s[i] == '%' && i + 2 < s.size() && std::isxdigit((unsigned char)s[i + 1]) &&
+		    std::isxdigit((unsigned char)s[i + 2]))
+		{
+			out.push_back((char)std::stoi(s.substr(i + 1, 2), nullptr, 16));
+			i += 2;
+		}
+		else
+			out.push_back(s[i] == '+' ? ' ' : s[i]);
+	}
+	return out;
+}
+
+// Compares in time independent of where the strings first differ.
+static bool ConstantTimeEquals(const std::string& a, const std::string& b)
+{
+	if (a.size() != b.size())
+		return false;
+	unsigned char diff = 0;
+	for (size_t i = 0; i < a.size(); ++i)
+		diff |= (unsigned char)(a[i] ^ b[i]);
+	return diff == 0;
+}
+
 bool AccessAllowed(const WebsocketAccess& access, const std::string& origin, const std::string& uri)
 {
 	if (!access.allowedOrigins.empty() && !access.allowedOrigins.contains(origin))
 		return false;
 	if (access.token.empty())
 		return true;
-	// ?token=<t> anywhere in the query string.
 	const auto q = uri.find('?');
 	if (q == std::string::npos)
 		return false;
-	const std::string query = "&" + uri.substr(q + 1) + "&";
-	return query.find("&token=" + access.token + "&") != std::string::npos;
+	const std::string query = uri.substr(q + 1, uri.find('#', q) - q - 1);
+	bool ok = false;
+	for (size_t start = 0; start <= query.size();)
+	{
+		size_t end = query.find('&', start);
+		if (end == std::string::npos)
+			end = query.size();
+		const std::string param = query.substr(start, end - start);
+		if (param.rfind("token=", 0) == 0)
+			ok |= ConstantTimeEquals(PercentDecode(param.substr(6)), access.token);
+		start = end + 1;
+	}
+	return ok;
 }
 
 WebsocketServer::WebsocketServer() = default;
@@ -52,6 +108,9 @@ void WebsocketServer::Init(MSGQ<QueueMessage>& queue, std::string host, Websocke
 			}
 			std::printf("New connection from %s (id: %s)\n", connectionState->getRemoteIp().c_str(),
 			            connectionState->getId().c_str());
+
+			webSocket.send(
+			    nlohmann::json{{"msgType", 0}, {"protocol", PROTOCOL_VERSION}, {"server", ADP_VERSION_STR}}.dump());
 
 			// Admit, then send the current device list, pad states, players and
 			// lights so the client doesn't wait for the next change to see them.
@@ -88,7 +147,7 @@ void WebsocketServer::Init(MSGQ<QueueMessage>& queue, std::string host, Websocke
 				const auto j = nlohmann::json::parse(msg->str, nullptr, false);
 				if (j.is_object() && j.contains("getAvatar") && j["getAvatar"].is_string())
 				{
-					webSocket.send(Players::AvatarMessage(j["getAvatar"].get<std::string>()));
+					Deliver(webSocket, Players::AvatarMessage(j["getAvatar"].get<std::string>()));
 					return;
 				}
 				if (j.is_object() && j.contains("subscribe") && j["subscribe"].is_string())
@@ -147,7 +206,7 @@ void WebsocketServer::SendMessageToClients(const std::string& message)
 			if (!clients.contains(socket.get()))
 				continue;
 		}
-		socket->send(message);
+		Deliver(*socket, message);
 	}
 }
 
@@ -163,7 +222,7 @@ void WebsocketServer::SendTo(const std::string& clientId, const std::string& mes
 		auto it = clients.find(socket.get());
 		if (it != clients.end() && it->second.id == clientId)
 		{
-			socket->send(message);
+			Deliver(*socket, message);
 			return;
 		}
 	}

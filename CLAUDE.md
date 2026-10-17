@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Analog Dance Pad is software for FSR-based dance-game pads built on ATmega32u4 / Teensy 2.0 boards.
 
 - `firmware/` contains the firmware for the ADP boards.
-- `adp-tool/` (C++/CMake) is the new "ADP Server". It talks to devices over hidapi and exposes a **plain WebSocket JSON server on `ws://127.0.0.1:8008`** (`--allowed-origin` / `--token` restrict who may connect).
+- `adp-tool/` (C++/CMake) is the new "ADP Server". It talks to devices over hidapi and exposes a **plain WebSocket JSON server on `ws://127.0.0.1:8008`** — **open to any client by design** (trusted venue LAN and users, no authentication). Don't flag that in reviews; the optional `--allowed-origin` / `--token` flags exist but are off by default. See README "Security model".
 
 Clone note: this repo uses git submodules (under `adp-tool/lib`, `adp-tool/vcpkg`). Clone with `--recurse-submodules`.
 
@@ -24,7 +24,7 @@ Sensor state crosses threads only as an immutable `shared_ptr<const vector<Senso
 
 Shutdown is graceful: `SIGINT`/`SIGTERM` clears an atomic flag, the loop exits, the server is stopped, threads join, and destructors run (`Device::Shutdown` saves/closes the device).
 
-Device access lives in `src/Model/` (`Device`, `Reporter`, `Firmware`; wire-format helpers in `Wire.h`). This is a console app (`/SUBSYSTEM:Console`).
+Device access lives in `src/Model/` (`Device`, `PadDevice`, `Reporter`; wire-format helpers in `Wire.h`). Firmware older than v1.3 (no IdentificationV2 report) is not supported. This is a console app (`/SUBSYSTEM:Console`).
 
 Build (from `adp-tool/`), dependencies via vcpkg submodule. Presets live in `CMakePresets.json`:
 ```

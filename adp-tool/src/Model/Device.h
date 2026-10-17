@@ -8,13 +8,14 @@
 #include <vector>
 
 #include <nlohmann/json.hpp>
-using json = nlohmann::json;
 
-#include <Model/Firmware.h>
 #include <Model/Reporter.h>
 
 namespace adp
 {
+using json = nlohmann::json;
+
+class PadDevice;
 
 enum DeviceChangeFlags
 {
@@ -108,31 +109,16 @@ struct SensorSnapshot
 	int numButtons = 0;
 	bool featureDigipot = false;
 	bool featureLights = false;
+	bool unsaved = false;    // edits not yet in the pad's EEPROM (saved ~2s after the last one)
+	bool saveFailed = false; // the last save attempt failed; retried every 2s
 	std::vector<SensorState> sensors;
 };
 
 struct VersionType
 {
-	uint16_t major;
-	uint16_t minor;
-
-	bool IsNewer(VersionType then) const
-	{
-		if (major > then.major)
-		{
-			return true;
-		}
-
-		if (major == then.major && minor > then.minor)
-		{
-			return true;
-		}
-
-		return false;
-	}
+	uint16_t major = 0;
+	uint16_t minor = 0;
 };
-
-static const VersionType versionTypeUnknown = {0, 0};
 
 struct PadState
 {
@@ -140,12 +126,10 @@ struct PadState
 	int maxNameLength = 0;
 	int numButtons = 0;
 	int numSensors = 0;
-	double releaseThreshold = 1.0;
-	BoardTypeStruct boardType;
-	bool featureDebug = false;
+	std::string boardType; // e.g. "avr_fsrio1", as the firmware reports it
 	bool featureDigipot = false;
 	bool featureLights = false;
-	VersionType firmwareVersion = versionTypeUnknown;
+	VersionType firmwareVersion;
 	ReleaseMode releaseMode = ReleaseMode::RELEASE_INDIVIDUAL;
 };
 
@@ -210,6 +194,11 @@ class Device
 	static void SetProfilesDir(const std::filesystem::path& dir);
 
 	static void DiscoverNewDevices();
+
+	// Tests only: put a pad (on a fake backend) in the device map, and drop all
+	// pads and cached pad states again. No HID access.
+	static void AddPadForTest(std::unique_ptr<PadDevice> pad);
+	static void ResetForTest();
 };
 
 } // namespace adp

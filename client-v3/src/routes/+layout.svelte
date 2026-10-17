@@ -16,6 +16,11 @@
 </script>
 
 <svelte:head><link rel="icon" href={favicon} /></svelte:head>
+{#if pads.protocolError}
+	<div role="alert" class="bg-destructive text-white px-4 py-2 text-center text-sm">
+		{pads.protocolError}
+	</div>
+{/if}
 {@render children()}
 
 {#if pads.notice}

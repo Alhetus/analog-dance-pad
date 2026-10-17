@@ -1,7 +1,9 @@
 #include <Model/Profiles.h>
 #include <Model/Reporter.h> // slot counts
 
+#include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -260,6 +262,59 @@ bool Write(const Path& dir, const std::string& id, const json& profile)
 	return true;
 }
 
+// "#rrggbb" in lowercase, as a live pad's lights serialize, from "#RRGGBB" or
+// "rrggbb"; black for anything else (what the pad itself would make of it).
+static std::string NormalizeColor(const json& v)
+{
+	std::string hex = v.is_string() ? v.get<std::string>() : "";
+	if (!hex.empty() && hex[0] == '#')
+		hex.erase(0, 1);
+	if (hex.size() != 6 || !std::all_of(hex.begin(), hex.end(), [](char c) { return std::isxdigit((unsigned char)c); }))
+		return "#000000";
+	for (auto& c : hex)
+		c = (char)std::tolower((unsigned char)c);
+	return "#" + hex;
+}
+
+// Copies `key` from `in` to `out` if it is a number, clamped to [lo, hi]
+// (integers rounded).
+static void CopyNumber(const json& in, json& out, const char* key, double lo, double hi, bool integer)
+{
+	if (!in.contains(key) || !in[key].is_number())
+		return;
+	const double v = std::clamp(in[key].get<double>(), lo, hi);
+	if (integer)
+		out[key] = (int)std::lround(v);
+	else
+		out[key] = v;
+}
+
+// One lights slot rebuilt from its known fields; null stays null (a disabled slot).
+static json SanitizeLightRule(const json& in)
+{
+	if (!in.is_object())
+		return nullptr;
+	json out = json::object();
+	for (const char* key : {"fadeOn", "fadeOff"})
+		out[key] = in.contains(key) && in[key].is_boolean() && in[key].get<bool>();
+	for (const char* key : {"onColor", "offColor", "onFadeColor", "offFadeColor"})
+		out[key] = NormalizeColor(in.contains(key) ? in[key] : json());
+	return out;
+}
+
+static json SanitizeLedMapping(const json& in)
+{
+	if (!in.is_object())
+		return nullptr;
+	json out = json::object();
+	for (const char* key : {"lightRuleIndex", "sensorIndex", "ledIndexBegin", "ledIndexEnd"})
+	{
+		out[key] = 0;
+		CopyNumber(in, out, key, 0, 255, true);
+	}
+	return out;
+}
+
 json Sanitize(const json& profile)
 {
 	if (!profile.is_object() || !profile.contains("sensorCount") || !profile["sensorCount"].is_number_integer() ||
@@ -274,17 +329,41 @@ json Sanitize(const json& profile)
 
 	json out = json::object();
 	out["sensorCount"] = sensorCount;
-	out["sensors"] = profile["sensors"];
-	for (const auto& [key, max] : {std::pair{"lightRules", MAX_LIGHT_RULES}, {"ledMappings", MAX_LED_MAPPINGS}})
+	out["sensors"] = json::array();
+	for (const auto& in : profile["sensors"])
+	{
+		json sensor = json::object();
+		if (in.is_object())
+		{
+			CopyNumber(in, sensor, "threshold", 0, 1, false);
+			CopyNumber(in, sensor, "releaseThreshold", 0, 1, false);
+			CopyNumber(in, sensor, "resistorValue", 0, 255, true);
+		}
+		out["sensors"].push_back(std::move(sensor));
+	}
+
+	const struct
+	{
+		const char* key;
+		int max;
+		json (*slot)(const json&);
+	} lights[] = {{"lightRules", MAX_LIGHT_RULES, SanitizeLightRule},
+	              {"ledMappings", MAX_LED_MAPPINGS, SanitizeLedMapping}};
+	for (const auto& [key, max, slot] : lights)
 	{
 		if (!profile.contains(key) || !profile[key].is_array())
 			continue;
 		if ((int)profile[key].size() > max)
 			return nullptr;
-		out[key] = profile[key];
+		out[key] = json::array();
+		for (const auto& in : profile[key])
+			out[key].push_back(slot(in));
 	}
-	out["description"] =
-	    profile.contains("description") && profile["description"].is_string() ? profile["description"] : json("");
+
+	const bool hasDescription = profile.contains("description") && profile["description"].is_string();
+	out["description"] = hasDescription ? profile["description"] : json("");
+	if (out["description"].get_ref<const std::string&>().size() > MAX_DESCRIPTION_BYTES)
+		return nullptr;
 	return out;
 }
 

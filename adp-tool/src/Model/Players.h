@@ -36,16 +36,17 @@ struct Player
 	std::map<std::string, int> profileCounts; // pad name -> stored profiles for it
 };
 
-struct PlayerList
-{
-	std::vector<Player> players; // sorted by name, deduplicated
-	bool localOk = true;         // LocalProfiles was reachable on the last scan (else players are stale)
-};
-
 struct Rename
 {
 	std::string from, to;
 	std::string folder; // the LocalProfiles folder whose DisplayName changed
+};
+
+struct PlayerList
+{
+	std::vector<Player> players; // sorted by name, deduplicated
+	bool localOk = true;         // LocalProfiles was reachable on the last scan (else players are stale)
+	std::vector<Rename> renamed; // players this scan followed to a new name (their profiles moved along)
 };
 
 // DisplayName from Editable.ini contents ("" if missing). Tolerates a UTF-8
@@ -83,6 +84,13 @@ void RequestRecount();
 // `previous` with every player's profile counts read again from `profilesDir`.
 PlayerList Recount(const Path& profilesDir, const PlayerList& previous);
 
+// Renames followed since the last call, for the pad selections to follow
+// too. Thread-safe.
+std::vector<Rename> TakeRenames();
+
+// Tests only: publish `list` (and its renames) as if a scan had found it.
+void SetForTest(PlayerList list);
+
 // Latest published list (empty before the first scan). Thread-safe.
 std::shared_ptr<const PlayerList> Get();
 
@@ -94,6 +102,7 @@ uint64_t Version();
 bool Has(const std::string& name);
 
 // msgType 7 {name, mime, data(base64)} for one player's avatar. mime/data are
-// empty if there is none or it exceeds the size cap. Thread-safe.
+// empty if there is none or it exceeds the size cap. Cached per file (until it
+// changes), so repeated requests don't re-read the share. Thread-safe.
 std::string AvatarMessage(const std::string& name);
 } // namespace adp::Players

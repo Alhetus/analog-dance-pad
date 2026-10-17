@@ -5,7 +5,6 @@
 // normalized <-> device sensor-value mapping.
 
 #include <algorithm>
-#include <bit>
 #include <cmath>
 #include <cstdint>
 
@@ -22,11 +21,6 @@ inline int ReadU16LE(uint16_le u16)
 inline uint32_t ReadU32LE(uint32_le u32)
 {
 	return u32.bytes[0] | (u32.bytes[1] << 8) | (u32.bytes[2] << 16) | (uint32_t(u32.bytes[3]) << 24);
-}
-
-inline float ReadF32LE(float32_le f32)
-{
-	return std::bit_cast<float>(ReadU32LE(f32.bits));
 }
 
 inline uint16_le WriteU16LE(int value)
@@ -47,11 +41,6 @@ inline uint32_le WriteU32LE(uint32_t value)
 	return u32;
 }
 
-inline float32_le WriteF32LE(float value)
-{
-	return {WriteU32LE(std::bit_cast<uint32_t>(value))};
-}
-
 template <typename T> inline double ToNormalizedSensorValue(T deviceValue)
 {
 	constexpr double scalar = 1.0 / static_cast<double>(MAX_SENSOR_VALUE);
@@ -60,8 +49,13 @@ template <typename T> inline double ToNormalizedSensorValue(T deviceValue)
 
 inline int ToDeviceSensorValue(double normalizedValue)
 {
-	int mapped = static_cast<int>(std::lround(normalizedValue * MAX_SENSOR_VALUE));
-	return std::clamp(mapped, 0, MAX_SENSOR_VALUE);
+	// Clamp before rounding: lround of a huge client value (or NaN) is
+	// unspecified. !(v > 0) also catches NaN.
+	if (!(normalizedValue > 0.0))
+		return 0;
+	if (normalizedValue >= 1.0)
+		return MAX_SENSOR_VALUE;
+	return static_cast<int>(std::lround(normalizedValue * MAX_SENSOR_VALUE));
 }
 
 } // namespace adp

@@ -85,13 +85,13 @@ template <typename T> ReadDataResult Reporter::ReadData(T& report, const char* n
 	return ReadDataResult::SUCCESS;
 }
 
-bool Reporter::WriteData(uint8_t reportId, const char* name, bool performErrorCheck)
+bool Reporter::WriteData(uint8_t reportId, const char* name)
 {
 	// Linux wants reports of at leats 2 bytes
 	uint8_t buf[2] = {reportId, 0};
 
 	int bytesWritten = backend->write(buf, sizeof(buf));
-	if (bytesWritten > 0 || !performErrorCheck)
+	if (bytesWritten > 0)
 	{
 		std::printf("%s :: done\n", name);
 		return true;
@@ -151,19 +151,9 @@ ReadDataResult Reporter::Get(SensorValuesReport& report, int numSensors)
 	return ReadData(report, "GetSensorValuesReport", expectedSize);
 }
 
-bool Reporter::Get(PadConfigurationReport& report)
-{
-	return GetFeatureReport(report, "GetPadConfigurationReport");
-}
-
 bool Reporter::Get(NameReport& report)
 {
 	return GetFeatureReport(report, "GetNameReport");
-}
-
-bool Reporter::Get(IdentificationReport& report)
-{
-	return GetFeatureReport(report, "GetIdentificationReport");
 }
 
 bool Reporter::Get(IdentificationV2Report& report)
@@ -186,34 +176,14 @@ bool Reporter::Get(SensorReport& report)
 	return GetFeatureReport(report, "GetSensorReport");
 }
 
-bool Reporter::Get(DebugReport& report)
-{
-	return GetFeatureReport(report, "GetDebugReport");
-}
-
 bool Reporter::Get(SetPropertyReport& report)
 {
 	return GetFeatureReport(report, "SetPropertyReport");
 }
 
-void Reporter::SendReset()
-{
-	WriteData(REPORT_RESET, "SendResetReport", false);
-}
-
-void Reporter::SendFactoryReset()
-{
-	WriteData(REPORT_FACTORY_RESET, "SendFactoryResetReport", false);
-}
-
 bool Reporter::SendSaveConfiguration()
 {
-	return WriteData(REPORT_SAVE_CONFIGURATION, "SendSaveConfigurationReport", true);
-}
-
-bool Reporter::Send(const PadConfigurationReport& report)
-{
-	return SendFeatureReport(report, "SendPadConfigurationReport");
+	return WriteData(REPORT_SAVE_CONFIGURATION, "SendSaveConfigurationReport");
 }
 
 bool Reporter::Send(const NameReport& report)
@@ -242,20 +212,6 @@ bool Reporter::Send(const SetPropertyReport& report)
 }
 
 bool Reporter::SendAndGet(NameReport& report)
-{
-	if (!Send(report))
-		return false;
-
-	// Wait for the controller to get into a ready state
-	std::this_thread::sleep_for(2ms);
-
-	if (!Get(report))
-		return false;
-
-	return true;
-}
-
-bool Reporter::SendAndGet(PadConfigurationReport& report)
 {
 	if (!Send(report))
 		return false;

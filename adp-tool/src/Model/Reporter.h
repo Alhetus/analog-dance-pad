@@ -15,7 +15,6 @@ namespace adp
 #pragma pack(1)
 
 constexpr int SENSOR_COUNT_MAX = 32;
-constexpr int SENSOR_COUNT_V1 = 12;
 constexpr int MAX_BUTTON_COUNT = 16;
 constexpr int MAX_NAME_LENGTH = 50;
 constexpr int MAX_SENSOR_VALUE = 850;
@@ -65,24 +64,11 @@ struct color24
 	uint8_t red, green, blue;
 };
 
-struct float32_le
-{
-	uint32_le bits;
-};
-
 struct SensorValuesReport
 {
 	uint8_t reportId = REPORT_SENSOR_VALUES;
 	uint16_le buttonBits;
 	uint16_le sensorValues[SENSOR_COUNT_MAX];
-};
-
-struct PadConfigurationReport
-{
-	uint8_t reportId = REPORT_PAD_CONFIGURATION;
-	uint16_le sensorThresholds[SENSOR_COUNT_V1];
-	float32_le releaseThreshold;
-	int8_t sensorToButtonMapping[SENSOR_COUNT_V1];
 };
 
 struct NameReport
@@ -163,7 +149,7 @@ struct SetPropertyReport
 		SELECTED_LIGHT_RULE_INDEX = 0,
 		SELECTED_LED_MAPPING_INDEX = 1,
 		SELECTED_SENSOR_INDEX = 2,
-		CALIBRATE_SENSOR = 3,
+		// 3 was CALIBRATE_SENSOR, which no firmware implements.
 		SPID_RELEASE_MODE = 4,
 		SPID_SELECTED_PROPERTY = 5
 	};
@@ -177,13 +163,6 @@ enum ReleaseMode
 	RELEASE_NONE = 0,
 	RELEASE_GLOBAL = 1,
 	RELEASE_INDIVIDUAL = 2
-};
-
-struct DebugReport
-{
-	uint8_t reportId = REPORT_DEBUG;
-	uint16_le messageSize;
-	char messagePacket[32];
 };
 
 #pragma pack()
@@ -209,20 +188,14 @@ class Reporter
 	~Reporter();
 
 	ReadDataResult Get(SensorValuesReport& report, int numSensors);
-	bool Get(PadConfigurationReport& report);
 	bool Get(NameReport& report);
-	bool Get(IdentificationReport& report);
 	bool Get(IdentificationV2Report& report);
 	bool Get(LightRuleReport& report);
 	bool Get(LedMappingReport& report);
 	bool Get(SensorReport& report);
-	bool Get(DebugReport& report);
 	bool Get(SetPropertyReport& report);
 
-	void SendReset();
-	void SendFactoryReset();
 	bool SendSaveConfiguration();
-	bool Send(const PadConfigurationReport& report);
 	bool Send(const NameReport& report);
 	bool Send(const LightRuleReport& report);
 	bool Send(const LedMappingReport& report);
@@ -230,7 +203,6 @@ class Reporter
 	bool Send(const SetPropertyReport& report);
 
 	bool SendAndGet(NameReport& report);
-	bool SendAndGet(PadConfigurationReport& report);
 	bool SendAndGet(SetPropertyReport& report);
 
   private:
@@ -242,7 +214,7 @@ class Reporter
 
 	template <typename T> ReadDataResult ReadData(T& report, const char* name, int expectedSize);
 
-	bool WriteData(uint8_t reportId, const char* name, bool performErrorCheck);
+	bool WriteData(uint8_t reportId, const char* name);
 };
 
 } // namespace adp

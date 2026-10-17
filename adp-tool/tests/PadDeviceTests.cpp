@@ -66,7 +66,7 @@ TEST_CASE("PadDevice writes the device's sensor flags back unchanged", "[paddevi
 	PadDevice pad(rep, "t", makeName("x"), makeIdent(1, 3, 8, 1), {}, {}, {sensor});
 	raw->sent.clear();
 
-	REQUIRE(pad.SetThreshold(0, 0.5, 0.4));
+	REQUIRE(SetThreshold(pad, 0, 0.5, 0.4));
 	REQUIRE(raw->sent.size() == 1);
 	REQUIRE(raw->sent[0].size() == sizeof(SensorReport));
 	SensorReport out;
@@ -98,41 +98,35 @@ TEST_CASE("PadDevice rejects out-of-range sensor indices without touching the wi
 	PadDevice pad(rep, "t", makeName("x"), makeIdent(1, 0, 8, 4), {}, {}, {});
 	raw->sent.clear(); // drop the ctor's release-mode probe
 
-	CHECK_FALSE(pad.SetThreshold(99, 0.5, 0.4));
-	CHECK_FALSE(pad.SetThreshold(-1, 0.5, 0.4));
-	CHECK_FALSE(pad.SetAdcConfig(99, 5));
+	CHECK_FALSE(SetThreshold(pad, 99, 0.5, 0.4));
+	CHECK_FALSE(SetThreshold(pad, -1, 0.5, 0.4));
+	CHECK_FALSE(SetGain(pad, 99, 5));
 	CHECK(raw->sent.empty());
 }
 
-TEST_CASE("PadDevice picks the report by firmware version", "[paddevice]")
+TEST_CASE("PadDevice sends a sensor edit as one SensorReport", "[paddevice]")
 {
-	std::vector<SensorReport> sensors = {makeSensor(0, 400, 0), makeSensor(1, 400, 1)};
+	RecordingBackend* raw = nullptr;
+	auto rep = makeReporter(raw);
+	PadDevice pad(rep, "t", makeName("x"), makeIdent(1, 3, 8, 2), {}, {},
+	              {makeSensor(0, 400, 0), makeSensor(1, 400, 1)});
+	raw->sent.clear();
 
-	SECTION("v1.3+ sends a SensorReport")
-	{
-		RecordingBackend* raw = nullptr;
-		auto rep = makeReporter(raw);
-		PadDevice pad(rep, "t", makeName("x"), makeIdent(1, 3, 8, 2), {}, {}, sensors);
-		raw->sent.clear();
+	CHECK(SetThreshold(pad, 0, 0.5, 0.4)); // Send() alone, no device echo needed
+	REQUIRE(raw->sent.size() == 1);
+	CHECK(raw->sent[0][0] == REPORT_SENSOR);
+}
 
-		CHECK(pad.SetThreshold(0, 0.5, 0.4)); // Send() alone, no device echo needed
-		REQUIRE(raw->sent.size() == 1);
-		CHECK(raw->sent[0][0] == REPORT_SENSOR);
-	}
+TEST_CASE("A release mode change is saved to the pad", "[paddevice]")
+{
+	// The firmware keeps the mode in RAM until the next save-configuration.
+	RecordingBackend* raw = nullptr;
+	auto rep = makeReporter(raw);
+	PadDevice pad(rep, "t", makeName("x"), makeIdent(1, 3, 8, 1), {}, {}, {makeSensor(0, 425, 0)});
+	REQUIRE_FALSE(pad.HasUnsavedChanges());
 
-	SECTION("pre-v1.3 sends a PadConfigurationReport")
-	{
-		RecordingBackend* raw = nullptr;
-		auto rep = makeReporter(raw);
-		PadDevice pad(rep, "t", makeName("x"), makeIdent(1, 1, 8, 2), {}, {}, sensors);
-		raw->sent.clear();
-
-		PadConfigurationReport echo;
-		raw->QueueGet(echo); // SendAndGet needs a device echo to succeed
-		CHECK(pad.SetThreshold(0, 0.5, 0.4));
-		REQUIRE(raw->sent.size() == 1);
-		CHECK(raw->sent[0][0] == REPORT_PAD_CONFIGURATION);
-	}
+	CHECK(pad.SetReleaseMode(RELEASE_INDIVIDUAL));
+	CHECK(pad.HasUnsavedChanges());
 }
 
 TEST_CASE("Release mode governs the stored release threshold", "[paddevice]")
@@ -148,7 +142,7 @@ TEST_CASE("Release mode governs the stored release threshold", "[paddevice]")
 		CHECK(pad.SetReleaseMode(RELEASE_INDIVIDUAL));
 		// 0.2*850=170 survives quantization exactly and differs from the ctor ratio
 		// (0.5*~0.499=~0.25), proving the requested value is kept verbatim.
-		CHECK(pad.SetThreshold(0, 0.5, 0.2));
+		CHECK(SetThreshold(pad, 0, 0.5, 0.2));
 		CHECK(pad.Sensor(0)->threshold == Approx(0.5));
 		CHECK(pad.Sensor(0)->releaseThreshold == Approx(0.2));
 	}
@@ -160,7 +154,7 @@ TEST_CASE("Release mode governs the stored release threshold", "[paddevice]")
 		CHECK(pad.Sensor(0)->releaseThreshold == Approx(pad.Sensor(0)->threshold));
 		// A later threshold edit keeps release pinned to the threshold, ignoring
 		// whatever release the caller passes.
-		CHECK(pad.SetThreshold(0, 0.7, 0.2));
+		CHECK(SetThreshold(pad, 0, 0.7, 0.2));
 		CHECK(pad.Sensor(0)->threshold == Approx(0.7));
 		CHECK(pad.Sensor(0)->releaseThreshold == Approx(0.7));
 	}
@@ -170,7 +164,7 @@ TEST_CASE("Release mode governs the stored release threshold", "[paddevice]")
 		// Global mode was removed; a device still reporting it must honor per-sensor
 		// release edits rather than deriving from a shared ratio.
 		CHECK(pad.SetReleaseMode(RELEASE_GLOBAL));
-		CHECK(pad.SetThreshold(0, 0.5, 0.2));
+		CHECK(SetThreshold(pad, 0, 0.5, 0.2));
 		CHECK(pad.Sensor(0)->releaseThreshold == Approx(0.2));
 	}
 
@@ -178,7 +172,7 @@ TEST_CASE("Release mode governs the stored release threshold", "[paddevice]")
 	{
 		CHECK(pad.SetReleaseMode(RELEASE_INDIVIDUAL));
 		// Request a release above the threshold; it must be pinned to the threshold.
-		CHECK(pad.SetThreshold(0, 0.5, 0.9));
+		CHECK(SetThreshold(pad, 0, 0.5, 0.9));
 		CHECK(pad.Sensor(0)->releaseThreshold == Approx(0.5));
 	}
 }
@@ -190,8 +184,8 @@ TEST_CASE("PadDevice clamps a hostile button count to the 16-bit button mask", "
 	PadDevice pad(rep, "t", makeName("x"), makeIdent(1, 3, 200, 1), {}, {}, {makeSensor(0, 425, 0)});
 
 	CHECK(pad.State().numButtons == MAX_BUTTON_COUNT);
-	CHECK(pad.SetButtonMapping(0, MAX_BUTTON_COUNT));
-	CHECK_FALSE(pad.SetButtonMapping(0, MAX_BUTTON_COUNT + 1));
+	CHECK(SetButton(pad, 0, MAX_BUTTON_COUNT));
+	CHECK_FALSE(SetButton(pad, 0, MAX_BUTTON_COUNT + 1));
 }
 
 TEST_CASE("PadDevice clamps gain to one digipot byte", "[paddevice]")
@@ -200,9 +194,9 @@ TEST_CASE("PadDevice clamps gain to one digipot byte", "[paddevice]")
 	auto rep = makeReporter(raw);
 	PadDevice pad(rep, "t", makeName("x"), makeIdent(1, 3, 8, 1), {}, {}, {makeSensor(0, 425, 0)});
 
-	CHECK(pad.SetAdcConfig(0, 300));
+	CHECK(SetGain(pad, 0, 300));
 	CHECK(pad.Sensor(0)->resistorValue == 255);
-	CHECK(pad.SetAdcConfig(0, -5));
+	CHECK(SetGain(pad, 0, -5));
 	CHECK(pad.Sensor(0)->resistorValue == 0);
 }
 
@@ -213,9 +207,9 @@ TEST_CASE("PadDevice keeps its state when the device refuses a sensor report", "
 	PadDevice pad(rep, "t", makeName("x"), makeIdent(1, 3, 8, 1), {}, {}, {makeSensor(0, 425, 0)});
 	raw->sendFeatureReturn = -1;
 
-	CHECK_FALSE(pad.SetThreshold(0, 0.2, 0.1));
+	CHECK_FALSE(SetThreshold(pad, 0, 0.2, 0.1));
 	CHECK(pad.Sensor(0)->threshold == Approx(0.5));
-	CHECK_FALSE(pad.SetButtonMapping(0, 4));
+	CHECK_FALSE(SetButton(pad, 0, 4));
 	CHECK(pad.Sensor(0)->button == 1);
 	CHECK_FALSE(pad.HasUnsavedChanges());
 }
@@ -228,7 +222,7 @@ TEST_CASE("PadDevice sends nothing for a sensor edit the device already holds", 
 	raw->sent.clear();
 
 	const SensorState s = *pad.Sensor(0);
-	CHECK(pad.SetThreshold(0, s.threshold, s.releaseThreshold));
+	CHECK(SetThreshold(pad, 0, s.threshold, s.releaseThreshold));
 	CHECK(raw->sent.empty());
 }
 
@@ -266,26 +260,6 @@ TEST_CASE("PadDevice averages polled samples and derives pressed state", "[padde
 	CHECK_FALSE(pad.Sensor(1)->pressed);
 }
 
-TEST_CASE("SendPadConfiguration never writes past the legacy sensor count", "[paddevice]")
-{
-	RecordingBackend* raw = nullptr;
-	auto rep = makeReporter(raw);
-
-	std::vector<SensorReport> sensors;
-	for (int i = 0; i < 20; ++i) // more than SENSOR_COUNT_V1 (12)
-		sensors.push_back(makeSensor(i, 400, 0));
-
-	PadDevice pad(rep, "t", makeName("x"), makeIdent(1, 1, 8, 20), {}, {}, sensors);
-	raw->sent.clear();
-
-	PadConfigurationReport echo;
-	raw->QueueGet(echo);
-	CHECK(pad.SendPadConfiguration());
-	REQUIRE(raw->sent.size() == 1);
-	CHECK(raw->sent[0].size() == sizeof(PadConfigurationReport));
-	CHECK(raw->sent[0][0] == REPORT_PAD_CONFIGURATION);
-}
-
 TEST_CASE("PollSensors skips a foreign report instead of disconnecting", "[paddevice]")
 {
 	RecordingBackend* raw = nullptr;
@@ -313,14 +287,16 @@ TEST_CASE("SaveChanges keeps the change unsaved when the save fails", "[paddevic
 	RecordingBackend* raw = nullptr;
 	auto rep = makeReporter(raw);
 	PadDevice pad(rep, "t", makeName("x"), makeIdent(1, 3, 8, 1), {}, {}, {makeSensor(0, 425, 0)});
-	CHECK(pad.SetThreshold(0, 0.7, 0.2));
+	CHECK(SetThreshold(pad, 0, 0.7, 0.2));
 	REQUIRE(pad.HasUnsavedChanges());
 
 	raw->writeReturn = -1;
 	pad.SaveChanges();
 	CHECK(pad.HasUnsavedChanges());
+	CHECK(pad.SaveFailed());
 
 	raw->writeReturn.reset();
 	pad.SaveChanges();
 	CHECK_FALSE(pad.HasUnsavedChanges());
+	CHECK_FALSE(pad.SaveFailed());
 }

@@ -6,12 +6,12 @@ add_executable(adp-tool-tests
 	ColorTests.cpp
 	SensorReportTests.cpp
 	SnapshotJsonTests.cpp
-	FirmwareTests.cpp
 	ReporterTests.cpp
 	PadDeviceTests.cpp
 	ProfileTests.cpp
 	ProfilesStoreTests.cpp
 	HandleMessageTests.cpp
+	DeviceOpsTests.cpp
 	PlayersTests.cpp
 )
 

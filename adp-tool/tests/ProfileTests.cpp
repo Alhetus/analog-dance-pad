@@ -257,6 +257,35 @@ TEST_CASE("LoadProfile treats null light slots as disabled and skips unchanged o
 	CHECK_FALSE(pad.Lights().lightRules.contains(2));
 }
 
+TEST_CASE("LoadProfile refuses malformed lights without sending any", "[profile]")
+{
+	RecordingBackend* raw = nullptr;
+	auto rep = makeReporter(raw);
+	PadDevice pad(rep, "t", makeName("x"), makeIdent(1, 3, 8, 1, IdentificationV2Report::FEATURE_LIGHTS), {}, {},
+	              {makeSensor(0, 425, 0)});
+	raw->sent.clear();
+
+	const json good = {{"lightRuleIndex", 0}, {"sensorIndex", 0}, {"ledIndexBegin", 0}, {"ledIndexEnd", 4}};
+	json bad = good;
+	SECTION("an index that doesn't fit the report's byte")
+	{
+		bad["ledIndexEnd"] = 256; // used to wrap to 0
+	}
+	SECTION("a field of the wrong type")
+	{
+		bad["sensorIndex"] = "0"; // used to throw after earlier slots were sent
+	}
+	SECTION("more slots than the pad has")
+	{
+		bad = nullptr;
+	}
+	json j;
+	j["ledMappings"] = bad.is_null() ? json(std::vector<json>(MAX_LED_MAPPINGS + 1, good)) : json::array({good, bad});
+	CHECK_FALSE(pad.LoadProfile(j, DPG_LIGHTS));
+	CHECK(raw->sent.empty());
+	CHECK(pad.Lights().ledMappings.empty());
+}
+
 TEST_CASE("A pad can't be renamed to an empty name", "[profile]")
 {
 	// Profiles and pad state live under the pad name: an empty one would put
@@ -297,13 +326,13 @@ TEST_CASE("LoadProfile sends one report per changed sensor", "[profile]")
 	CHECK(pad.Sensor(0)->resistorValue == 42);
 }
 
-TEST_CASE("SetButtonMapping rejects buttons the pad doesn't have", "[profile]")
+TEST_CASE("SetSensor rejects buttons the pad doesn't have", "[profile]")
 {
 	RecordingBackend* raw = nullptr;
 	auto rep = makeReporter(raw);
 	PadDevice pad(rep, "t", makeName("x"), makeIdent(1, 0, 8, 1), {}, {}, {makeSensor(0, 425, 0)});
 
-	CHECK_FALSE(pad.SetButtonMapping(0, 9));
-	CHECK_FALSE(pad.SetButtonMapping(0, -1));
+	CHECK_FALSE(SetButton(pad, 0, 9));
+	CHECK_FALSE(SetButton(pad, 0, -1));
 	CHECK(pad.Sensor(0)->button == 1);
 }

@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <format>
@@ -67,6 +68,11 @@ void Application::UpdateLoop(MSGQ<QueueMessage>& queue, WebsocketServer& websock
 				websocketServer.SendSnapshot(snapshot.path, message);
 				last = {std::move(message), now};
 			}
+			// Forget pads that are gone (a replug gets a fresh path).
+			std::erase_if(lastSnapshot, [&](const auto& entry) {
+				return std::none_of(snapshots->begin(), snapshots->end(),
+				                    [&](const SensorSnapshot& s) { return s.path == entry.first; });
+			});
 		}
 
 		// Everything below is sent on change only; Publish() replays the latest

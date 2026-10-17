@@ -11,7 +11,16 @@
 #include <windows.h>
 #endif
 
+#ifdef _MSC_VER
+// C4702 (unreachable code) inside argparse's templates, reported at
+// code generation where /external can't silence it.
+#pragma warning(push)
+#pragma warning(disable : 4702)
+#endif
 #include <argparse/argparse.hpp>
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
 #include <ixwebsocket/IXNetSystem.h>
 #include "Adp.h"
 #include "Application.h"
@@ -98,10 +107,9 @@ int main(int argc, char** argv)
 	     args.present<std::vector<std::string>>("--allowed-origin").value_or(std::vector<std::string>{}))
 		access.allowedOrigins.insert(o);
 	access.token = opt("--token", "");
-	// Browsers let any page open a WebSocket to any host, localhost included.
+	// Open by design (README, "Security model"): the venue LAN and its users are trusted.
 	if (access.allowedOrigins.empty() && access.token.empty())
-		std::printf("WARNING: neither --allowed-origin nor --token is set: any web page opened on a machine that can "
-		            "reach this server can drive the pads and edit or delete profiles\n");
+		std::printf("Any client may connect (no --allowed-origin / --token)\n");
 
 	// Must be set before Application (which constructs Device) is created below.
 	adp::Device::SetProfilesDir(adp::Profiles::U8Path(profilesDir));

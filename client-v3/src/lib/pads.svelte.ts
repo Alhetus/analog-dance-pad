@@ -45,6 +45,8 @@ export interface Snapshot {
 	numButtons: number; // mappable buttons this pad exposes
 	featureDigipot: boolean; // pad supports per-sensor gain
 	featureLights: boolean; // pad has configurable lights
+	unsaved: boolean; // edits not yet in the pad's EEPROM (saved ~2s after the last one)
+	saveFailed: boolean; // the last save to the pad failed; the server retries every 2s
 	sensors: Sensor[];
 }
 
@@ -99,7 +101,6 @@ export type Op =
 	| 'deleteProfile'
 	| 'rename'
 	| 'setReleaseMode'
-	| 'calibrateSensor'
 	| 'configure';
 
 /** The server's answer to one of this client's ops (msgType 8). */
@@ -154,7 +155,9 @@ const SEND_THROTTLE_MS = 40;
 // An optimistic edit the pad hasn't echoed back by then was refused or clamped
 // by the server; drop it so the UI shows the pad's real value again.
 const PENDING_TTL_MS = 1000;
-const STALE_MS = 1000; // no snapshot for this long while open => pad considered gone
+const STALE_MS = 1000;
+/** The adp-tool protocol this client speaks (WebsocketServer.h PROTOCOL_VERSION). */
+const PROTOCOL_VERSION = 1; // no snapshot for this long while open => pad considered gone
 const MAX_BACKOFF_MS = 5000;
 const NOTICE_MS = 4000;
 
@@ -189,6 +192,8 @@ class Conn {
 	profiles: Record<string, Record<string, Profile[]>> = $state({});
 	/** player -> avatar; null while requested. */
 	avatars: Record<string, Avatar | null> = $state({});
+	/** Set when the server speaks another protocol version than this client. */
+	protocolError: string | null = $state(null);
 
 	#ws: WebSocket | null = null;
 	#backoff = 500;
@@ -237,7 +242,14 @@ class Conn {
 		}
 		if (typeof m !== 'object' || m === null) return;
 		const msg = m as { msgType?: number; pad?: string };
-		if (msg.msgType === 1) {
+		if (msg.msgType === 0) {
+			const h = m as { protocol?: number; server?: string };
+			this.protocolError =
+				h.protocol === PROTOCOL_VERSION
+					? null
+					: `${this.name} runs ADP Server ${h.server ?? '?'} (protocol ${h.protocol ?? '?'}), ` +
+						`this page speaks protocol ${PROTOCOL_VERSION}: reload the page or update the server`;
+		} else if (msg.msgType === 1) {
 			const s = m as Snapshot;
 			this.snapshotAt[s.pad] = Date.now();
 			this.snapshots = { ...this.snapshots, [s.pad]: s };
@@ -499,6 +511,11 @@ class PadsStore {
 		return this.pad ? this.padStateOf(this.pad) : undefined;
 	}
 
+	/** Why the selected server can't be used by this page, if it can't. */
+	get protocolError(): string | null {
+		return this.conn?.protocolError ?? null;
+	}
+
 	get localProfilesOk(): boolean {
 		return this.conn?.localProfilesOk ?? true;
 	}
@@ -737,11 +754,6 @@ class PadsStore {
 		this.#sendPad({ releaseMode: mode });
 	}
 
-	/** Recalibrate one sensor's baseline. */
-	calibrate(sensorIndex: number) {
-		this.#sendPad({ calibrateSensor: sensorIndex });
-	}
-
 	/**
 	 * Set threshold = live value + offset (percent points) across mapped sensors.
 	 * Re-reads each sensor's current live value as the baseline on every call, so
@@ -841,7 +853,6 @@ const OP_VERBS: Record<Op, string> = {
 	deleteProfile: 'delete the profile',
 	rename: 'rename the pad',
 	setReleaseMode: 'change the release mode',
-	calibrateSensor: 'calibrate the sensor',
 	configure: 'apply the change'
 };
 
@@ -853,7 +864,6 @@ const OP_DONE: Record<Op, (name: string) => string> = {
 	deleteProfile: () => 'Profile deleted',
 	rename: (n) => `Pad renamed to ${n}`,
 	setReleaseMode: () => 'Release mode changed',
-	calibrateSensor: () => 'Sensor calibrated',
 	configure: () => 'Applied'
 };
 

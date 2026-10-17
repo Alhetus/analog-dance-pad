@@ -39,7 +39,7 @@ jobs:
           submodules: 'recursive'
 
       - name: Install dependencies
-        run: sudo apt update && sudo apt install -y build-essential cmake ninja-build libudev-dev libx11-dev
+        run: sudo apt update && sudo apt install -y build-essential cmake ninja-build libudev-dev
 
       - name: Configure and build
         run: |
@@ -68,7 +68,7 @@ jobs:
           submodules: 'recursive'
 
       - name: Install dependencies
-        run: sudo apt update && sudo apt install -y build-essential cmake ninja-build libudev-dev libx11-dev
+        run: sudo apt update && sudo apt install -y build-essential cmake ninja-build libudev-dev
 
       - name: ThreadSanitizer tests
         run: |

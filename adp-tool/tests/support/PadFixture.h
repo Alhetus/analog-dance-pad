@@ -60,4 +60,34 @@ inline SensorReport makeSensor(int index, int thresholdRaw, int buttonMapping)
 	return s;
 }
 
+// One-field sensor edits through PadDevice::SetSensor (what a client's
+// {sensors:[...]} patch does), keeping the sensor's other fields.
+inline bool SetThreshold(PadDevice& pad, int index, double threshold, double releaseThreshold)
+{
+	if (!pad.ValidSensorIndex(index))
+		return false;
+	SensorState s = *pad.Sensor(index);
+	s.threshold = threshold;
+	s.releaseThreshold = releaseThreshold;
+	return pad.SetSensor(index, s);
+}
+
+inline bool SetGain(PadDevice& pad, int index, int resistorValue)
+{
+	if (!pad.ValidSensorIndex(index))
+		return false;
+	SensorState s = *pad.Sensor(index);
+	s.resistorValue = resistorValue;
+	return pad.SetSensor(index, s);
+}
+
+inline bool SetButton(PadDevice& pad, int index, int button)
+{
+	if (!pad.ValidSensorIndex(index))
+		return false;
+	SensorState s = *pad.Sensor(index);
+	s.button = button;
+	return pad.SetSensor(index, s);
+}
+
 } // namespace adp

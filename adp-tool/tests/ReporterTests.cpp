@@ -156,7 +156,7 @@ TEST_CASE("Send returns false on a short feature-report write", "[reporter]")
 	CHECK_FALSE(rep.Send(report));
 }
 
-TEST_CASE("WriteData honors performErrorCheck", "[reporter]")
+TEST_CASE("SendSaveConfiguration reports write failures", "[reporter]")
 {
 	SECTION("SendSaveConfiguration reports a failed write")
 	{

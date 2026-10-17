@@ -16,7 +16,6 @@
 #include <vector>
 
 #include <Model/Device.h>
-#include <Model/Firmware.h>
 #include <Model/Reporter.h>
 #include <Model/Wire.h>
 
@@ -88,17 +87,13 @@ class PadDevice
 		myPad.numSensors = sensorCount;
 
 		// Board type is a fixed-width, not-necessarily-NUL-terminated field.
-		{
-			char boardType[BOARD_TYPE_LENGTH + 1] = {};
-			std::memcpy(boardType, identification.boardType, BOARD_TYPE_LENGTH);
-			myPad.boardType = BoardTypeStruct(boardType);
-		}
+		const char* board = identification.boardType;
+		myPad.boardType.assign(board, std::find(board, board + BOARD_TYPE_LENGTH, '\0'));
 
 		myPad.firmwareVersion.major = ReadU16LE(identification.firmwareMajor);
 		myPad.firmwareVersion.minor = ReadU16LE(identification.firmwareMinor);
 
 		uint16_t features = ReadU16LE(identification.features);
-		myPad.featureDebug = (features & IdentificationV2Report::FEATURE_DEBUG) != 0;
 		myPad.featureDigipot = (features & IdentificationV2Report::FEATURE_DIGIPOT) != 0;
 		myPad.featureLights = (features & IdentificationV2Report::FEATURE_LIGHTS) != 0;
 
@@ -106,14 +101,6 @@ class PadDevice
 		{
 			UpdateSensor(sensor);
 		}
-
-		// Pre-1.3 firmware keeps one release ratio for the whole pad (its sensors
-		// were built as threshold*ratio); recover it so SendPadConfiguration
-		// writes it back unchanged instead of resetting it.
-		if (sensorCount > 0 && mySensors[0].threshold > 0)
-			myPad.releaseThreshold = mySensors[0].releaseThreshold / mySensors[0].threshold;
-		if (!myPad.firmwareVersion.IsNewer({1, 2}) && myPad.firmwareVersion.IsNewer({1, 1}))
-			myPad.featureLights = (bool)(identification.ledCount > 0);
 
 		try
 		{
@@ -306,6 +293,8 @@ class PadDevice
 		if (!myReporter->Send(report))
 			return false;
 		myPad.releaseMode = mode;
+		// The firmware keeps it in RAM until the next save-configuration.
+		NotifyUnsavedChanges();
 
 		// None derives every sensor's release from its threshold, so switching to it
 		// must re-apply that rule immediately. Per-sensor leaves the existing values
@@ -322,8 +311,8 @@ class PadDevice
 		return true;
 	}
 
-	// Sets one sensor's threshold, release, button and gain in a single report
-	// (pre-1.3 firmware: one PadConfiguration report). Each report is a HID
+	// Sets one sensor's threshold, release, button and gain in a single report.
+	// Each report is a HID
 	// round-trip that stalls polling of every pad, so nothing is sent when the
 	// device already holds these values. Live state only changes once the
 	// device accepted the report.
@@ -348,32 +337,12 @@ class PadDevice
 		cur.button = want.button;
 		cur.resistorValue = want.resistorValue;
 
-		// From v1.3 we have the SensorReport. Before that it's the PadConfiguration report
-		const bool ok = myPad.firmwareVersion.IsNewer({1, 2}) ? SendSensor(idx) : SendPadConfiguration();
+		const bool ok = SendSensor(idx);
 		if (!ok)
 			cur = old;
 		else if (old.button != cur.button)
 			myChanges |= DCF_BUTTON_MAPPING;
 		return ok;
-	}
-
-	bool SetThreshold(int sensorIndex, double threshold, double releaseThreshold)
-	{
-		if (!ValidSensorIndex(sensorIndex))
-			return false;
-		SensorState s = mySensors[sensorIndex];
-		s.threshold = threshold;
-		s.releaseThreshold = releaseThreshold;
-		return SetSensor(sensorIndex, s);
-	}
-
-	bool SetAdcConfig(int sensorIndex, int resistorValue)
-	{
-		if (!ValidSensorIndex(sensorIndex))
-			return false;
-		SensorState s = mySensors[sensorIndex];
-		s.resistorValue = resistorValue;
-		return SetSensor(sensorIndex, s);
 	}
 
 	void UpdateSensor(SensorReport sensor)
@@ -406,17 +375,6 @@ class PadDevice
 		}
 
 		return success;
-	}
-
-	bool SetButtonMapping(int sensorIndex, int button)
-	{
-		// 0 = unmapped, else 1..numButtons; anything else would be truncated into
-		// the report's int8 and shift past the 16-bit button mask in PollSensors.
-		if (!ValidSensorIndex(sensorIndex))
-			return false;
-		SensorState s = mySensors[sensorIndex];
-		s.button = button;
-		return SetSensor(sensorIndex, s);
 	}
 
 	bool SendName(const char* name)
@@ -455,10 +413,6 @@ class PadDevice
 			return false;
 
 		UpdateLedMapping(report);
-
-		// Only set when to update the tab
-		// myChanges |= DCF_LIGHTS;
-
 		NotifyUnsavedChanges();
 		return true;
 	}
@@ -493,10 +447,6 @@ class PadDevice
 			return false;
 
 		UpdateLightRule(report);
-
-		// Only set when to update the tab
-		// myChanges |= DCF_LIGHTS;
-
 		NotifyUnsavedChanges();
 		return true;
 	}
@@ -525,62 +475,27 @@ class PadDevice
 		return SendLightRuleReport(report);
 	}
 
-	bool CalibrateSensor(int sensorIndex)
-	{
-		if (!ValidSensorIndex(sensorIndex))
-			return false;
-
-		SetPropertyReport report;
-		report.propertyId = WriteU32LE(SetPropertyReport::CALIBRATE_SENSOR);
-		report.propertyValue = WriteU32LE(sensorIndex);
-		if (myReporter->Send(report))
-			return true;
-		std::printf("CalibrateSensor :: failed to send calibrate command\n");
-		return false;
-	}
-
-	void Reset() { myReporter->SendReset(); }
-
-	void FactoryReset()
-	{
-		// Have the device load up and save its defaults
-		myReporter->SendFactoryReset();
-	}
-
-	bool SendPadConfiguration()
-	{
-		PadConfigurationReport report{};
-		// The legacy PadConfiguration report has fixed-size arrays; never write
-		// past them even if the device claims more sensors.
-		int count = std::min(myPad.numSensors, SENSOR_COUNT_V1);
-		for (int i = 0; i < count; ++i)
-		{
-			report.sensorThresholds[i] = WriteU16LE(ToDeviceSensorValue(mySensors[i].threshold));
-			report.sensorToButtonMapping[i] = (mySensors[i].button == 0) ? 0xFF : (mySensors[i].button - 1);
-		}
-		report.releaseThreshold = WriteF32LE((float)myPad.releaseThreshold);
-
-		bool result = myReporter->SendAndGet(report);
-		if (result)
-			NotifyUnsavedChanges();
-		return result;
-	}
-
 	void NotifyUnsavedChanges()
 	{
 		myHasUnsavedChanges = true;
 		myLastPendingChange = std::chrono::steady_clock::now();
 	}
 
-	bool HasUnsavedChanges() { return myHasUnsavedChanges; }
+	bool HasUnsavedChanges() const { return myHasUnsavedChanges; }
+
+	// True while the last save attempt failed (it is retried every 2s).
+	bool SaveFailed() const { return mySaveFailed; }
 
 	// Stays unsaved on failure, so the next poll (2s later) retries.
 	void SaveChanges()
 	{
-		if (myHasUnsavedChanges && myReporter->SendSaveConfiguration())
-			myHasUnsavedChanges = false;
-		else if (myHasUnsavedChanges)
+		if (!myHasUnsavedChanges)
+			return;
+		mySaveFailed = !myReporter->SendSaveConfiguration();
+		if (mySaveFailed)
 			myLastPendingChange = std::chrono::steady_clock::now();
+		else
+			myHasUnsavedChanges = false;
 	}
 
 	const DevicePath& Path() const { return myPath; }
@@ -599,32 +514,6 @@ class PadDevice
 		}
 
 		return &mySensors[index];
-	}
-
-	std::string ReadDebug()
-	{
-		if (!myPad.featureDebug)
-		{
-			return "";
-		}
-
-		DebugReport report;
-		if (!myReporter->Get(report))
-		{
-			return "";
-		}
-
-		int messageSize = ReadU16LE(report.messageSize);
-
-		// Bound the length by the actual packet buffer; messagePacket is not
-		// guaranteed to be NUL-terminated, so never construct from a bare char*.
-		messageSize = std::clamp<int>(messageSize, 0, (int)sizeof(report.messagePacket));
-		if (messageSize == 0)
-		{
-			return "";
-		}
-
-		return std::string(report.messagePacket, (size_t)messageSize);
 	}
 
 	DeviceChanges PopChanges()
@@ -652,6 +541,7 @@ class PadDevice
 	std::vector<SensorState> mySensors;
 	DeviceChanges myChanges = 0;
 	bool myHasUnsavedChanges = false;
+	bool mySaveFailed = false;
 	std::chrono::time_point<std::chrono::steady_clock> myLastPendingChange;
 	PollingData myPollingData;
 };
