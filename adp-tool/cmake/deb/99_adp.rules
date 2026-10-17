@@ -1,1 +1,4 @@
-SUBSYSTEM=="hidraw", ACTION=="add", ATTRS{idVendor}=="1209", ATTRS{idProduct}=="b196", MODE="0660", GROUP="plugdev"
+# Lets the logged-in user (uaccess) and the plugdev group open ADP pads over
+# hidraw without root. Covers both USB IDs adp-tool recognizes (HID_IDS).
+SUBSYSTEM=="hidraw", ACTION=="add", ATTRS{idVendor}=="1209", ATTRS{idProduct}=="b196", MODE="0660", GROUP="plugdev", TAG+="uaccess"
+SUBSYSTEM=="hidraw", ACTION=="add", ATTRS{idVendor}=="03eb", ATTRS{idProduct}=="204f", MODE="0660", GROUP="plugdev", TAG+="uaccess"

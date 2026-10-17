@@ -1,0 +1,20 @@
+# systemd *user* unit: runs the ADP server for the cab's desktop user (the one
+# that also runs ITGmania), starts at login and restarts if it dies.
+#   cp adp-server.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload && systemctl --user enable --now adp-server
+# Logs: journalctl --user -u adp-server -f
+#
+# Profiles are stored locally (--profiles-dir, created if missing); only
+# ITGmania's LocalProfiles comes from the network share.
+[Unit]
+Description=ADP pad server (WebSocket on :8008)
+
+[Service]
+ExecStart=/usr/bin/adp-tool --host 0.0.0.0 \
+	--local-profiles-dir /mnt/adp-share/LocalProfiles \
+	--profiles-dir %h/.local/share/adp-tool/profiles
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target

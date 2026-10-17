@@ -73,6 +73,36 @@ cmake --build build
 
 The server binary lands at `adp-tool/build/adp-tool` (`adp-tool.exe` on Windows).
 
+## Venue setup (Ubuntu Studio 24.04 cabs)
+
+Each cab runs one server for its pads. The player list comes from ITGmania's
+`LocalProfiles` on a network share; the pad profiles are stored locally on each
+cab (`--profiles-dir`, default in the unit: `~/.local/share/adp-tool/profiles`),
+so a pad's profiles live on the cab it is plugged into.
+
+```
+# server + pad access without root
+sudo install -m755 adp-tool/build/adp-tool /usr/bin/
+sudo cp adp-tool/cmake/deb/99_adp.rules /etc/udev/rules.d/
+sudo udevadm control --reload-rules && sudo udevadm trigger
+
+# mount the LocalProfiles share (soft + timeouts: an unreachable share fails fast instead of hanging)
+sudo apt install -y cifs-utils && sudo mkdir -p /mnt/adp-share
+echo '//fileserver/itg /mnt/adp-share cifs credentials=/etc/adp-share.cred,uid=1000,gid=1000,iocharset=utf8,soft,_netdev,nofail,x-systemd.automount,x-systemd.mount-timeout=10 0 0' | sudo tee -a /etc/fstab
+
+# run at login as the cab user (edit the paths in the unit first)
+mkdir -p ~/.config/systemd/user && cp adp-tool/cmake/deb/adp-server.service ~/.config/systemd/user/
+systemctl --user daemon-reload && systemctl --user enable --now adp-server
+journalctl --user -u adp-server -f   # logs
+```
+
+- `iocharset=utf8` keeps names like "Åsa" intact; `uid`/`gid` must be the cab user.
+- Back up `~/.local/share/adp-tool/profiles` if the profiles matter: it is the only copy.
+- If `ufw` is enabled: `sudo ufw allow 8008/tcp` so phones/tablets can connect.
+- While the share is unmounted everything keeps working with the last known
+  player list, and it refreshes automatically within a few seconds of the share
+  coming back.
+
 ## Test
 
 Unit tests use Catch2 and run through CTest:
