@@ -19,7 +19,9 @@
 								? 'bg-yellow-500'
 								: 'bg-red-500'}"
 					></span>
-					{c.status === 'open' ? `${c.deviceList.length} pads` : c.status}
+					{c.status === 'open'
+						? `${c.deviceList.length} ${c.deviceList.length === 1 ? 'pad' : 'pads'}`
+						: c.status}
 				</span>
 			</button>
 		{/each}

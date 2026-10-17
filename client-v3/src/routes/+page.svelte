@@ -124,7 +124,8 @@
 		</div>
 	{/if}
 
-	<main class="flex min-h-0 flex-1 flex-col overflow-y-auto">
+	<!-- -mx-1 px-1: room for the cards' outside rings, which overflow-y-auto would clip -->
+	<main class="-mx-1 flex min-h-0 flex-1 flex-col overflow-y-auto px-1">
 		{#if step === 'server'}
 			<ServerPicker />
 		{:else if step === 'pad'}
