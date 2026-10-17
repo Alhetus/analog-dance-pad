@@ -148,7 +148,8 @@ static std::vector<Rename> FollowRenames(const Path& profilesDir, const std::map
 			followed.push_back(r); // no profiles to move
 			continue;
 		}
-		if (fs::exists(to, ec))
+		// A case-only rename on a case-insensitive filesystem finds `to` as `from` itself.
+		if (fs::exists(to, ec) && !fs::equivalent(from, to, ec))
 		{
 			// ponytail: no merging; both dirs are kept and the move retried each scan.
 			remembered[r.folder] = r.from;
@@ -220,6 +221,7 @@ PlayerList Scan(const Path& localProfilesDir, const Path& profilesDir, const Pla
 
 	std::map<std::string, std::string> folderNames;
 	std::map<std::string, Player> byName;
+	std::map<std::string, std::string> byFolded; // FoldName -> the name kept
 	for (const auto& folder : folders)
 	{
 		// Match file names case-insensitively: the share may have been written
@@ -244,13 +246,15 @@ PlayerList Scan(const Path& localProfilesDir, const Path& profilesDir, const Pla
 			continue;
 
 		const std::string folderName = Profiles::PathU8(folder.filename());
-		folderNames[folderName] = name;
-		if (byName.contains(name))
+		if (const auto kept = byFolded.find(Profiles::FoldName(name)); kept != byFolded.end())
 		{
-			std::printf("Players :: duplicate DisplayName '%s' in %s and %s; they share profiles\n", name.c_str(),
-			            byName[name].folder.c_str(), folderName.c_str());
+			std::printf("Players :: duplicate DisplayName '%s' in %s and '%s' in %s; they share profiles\n",
+			            kept->second.c_str(), byName[kept->second].folder.c_str(), name.c_str(), folderName.c_str());
+			folderNames[folderName] = kept->second;
 			continue;
 		}
+		folderNames[folderName] = name;
+		byFolded[Profiles::FoldName(name)] = name;
 
 		Player p;
 		p.name = name;
@@ -283,7 +287,8 @@ PlayerList Scan(const Path& localProfilesDir, const Path& profilesDir, const Pla
 	return list;
 }
 
-PlayerList Recount(const Path& profilesDir, const PlayerList& previous, std::unique_lock<std::mutex>* hold)
+PlayerList Recount(const Path& profilesDir, const PlayerList& previous, std::unique_lock<std::mutex>* hold,
+                   const std::set<std::string>* only)
 {
 	PlayerList list = previous;
 	list.renamed.clear();
@@ -291,7 +296,8 @@ PlayerList Recount(const Path& profilesDir, const PlayerList& previous, std::uni
 		return list;
 	std::unique_lock lock(Profiles::StoreMutex());
 	for (auto& p : list.players)
-		p.profileCounts = CountProfiles(profilesDir / "players" / Profiles::U8Path(Profiles::EscapeName(p.name)));
+		if (!only || only->contains(p.name))
+			p.profileCounts = CountProfiles(profilesDir / "players" / Profiles::U8Path(Profiles::EscapeName(p.name)));
 	if (hold)
 		*hold = std::move(lock);
 	return list;
@@ -316,7 +322,8 @@ static std::shared_ptr<const PlayerList> gList = std::make_shared<PlayerList>();
 static std::atomic<uint64_t> gVersion{0};
 static bool gStop = false;
 static bool gRescan = false;
-static bool gRecount = false;
+static bool gRecountAll = false;
+static std::set<std::string> gRecountPlayers; // recount just these (gRecountAll: everyone)
 static std::thread gThread;
 static std::vector<Rename> gRenames; // followed, not yet taken by the device thread
 
@@ -337,6 +344,7 @@ void Start(const Path& localProfilesDir, const Path& profilesDir, std::chrono::s
 		// This thread is the only writer of gList, so a recount can't be
 		// overwritten by the counts of a scan that started before it.
 		bool recountOnly = false;
+		std::set<std::string> recountPlayers; // empty with recountOnly: everyone
 		// Due time of the next full scan. Recounts don't move it, so frequent
 		// profile ops can't keep new players from ever being picked up.
 		auto nextScan = std::chrono::steady_clock::now();
@@ -349,8 +357,9 @@ void Start(const Path& localProfilesDir, const Path& profilesDir, std::chrono::s
 			std::unique_lock<std::mutex> store;
 			try
 			{
-				next = recountOnly ? Recount(profilesDir, *prev, &store)
-				                   : Scan(localProfilesDir, profilesDir, *prev, &store);
+				next = recountOnly
+				           ? Recount(profilesDir, *prev, &store, recountPlayers.empty() ? nullptr : &recountPlayers)
+				           : Scan(localProfilesDir, profilesDir, *prev, &store);
 			}
 			catch (const std::exception& e)
 			{
@@ -375,11 +384,14 @@ void Start(const Path& localProfilesDir, const Path& profilesDir, std::chrono::s
 			gRenames.insert(gRenames.end(), renamed.begin(), renamed.end());
 			if (store.owns_lock())
 				store.unlock();
-			gCv.wait_until(lock, nextScan, [] { return gStop || gRescan || gRecount; });
+			gCv.wait_until(lock, nextScan, [] { return gStop || gRescan || gRecountAll || !gRecountPlayers.empty(); });
 			// A full scan recounts too, so a recount only runs alone before the
 			// next scan is due.
-			recountOnly = gRecount && !gRescan && std::chrono::steady_clock::now() < nextScan;
-			gRescan = gRecount = false;
+			const bool recount = gRecountAll || !gRecountPlayers.empty();
+			recountOnly = recount && !gRescan && std::chrono::steady_clock::now() < nextScan;
+			recountPlayers = gRecountAll ? std::set<std::string>{} : std::move(gRecountPlayers);
+			gRescan = gRecountAll = false;
+			gRecountPlayers.clear();
 		}
 	});
 }
@@ -404,11 +416,14 @@ void RequestRescan()
 	gCv.notify_all();
 }
 
-void RequestRecount()
+void RequestRecount(const std::string& player)
 {
 	{
 		std::lock_guard lock(gMutex);
-		gRecount = true;
+		if (player.empty())
+			gRecountAll = true;
+		else
+			gRecountPlayers.insert(player);
 	}
 	gCv.notify_all();
 }

@@ -120,6 +120,55 @@ std::string UnescapeName(const std::string& escaped)
 	return out;
 }
 
+// ponytail: the scripts player and pad names use here; full Unicode case
+// folding (ICU) if a venue ever needs more.
+static char32_t FoldChar(char32_t c)
+{
+	if ((c >= 'A' && c <= 'Z') || (c >= 0xC0 && c <= 0xDE && c != 0xD7) || (c >= 0x391 && c <= 0x3AB && c != 0x3A2) ||
+	    (c >= 0x410 && c <= 0x42F))
+		return c + 0x20;
+	if (c >= 0x400 && c <= 0x40F)
+		return c + 0x50;
+	if (c == 0x178) // Ÿ
+		return 0xFF;
+	if ((c >= 0x100 && c <= 0x137) || (c >= 0x14A && c <= 0x177)) // Latin Extended-A: even upper, odd lower
+		return c | 1;
+	if ((c >= 0x139 && c <= 0x148) || (c >= 0x179 && c <= 0x17E)) // ... and odd upper, even lower
+		return (c & 1) ? c + 1 : c;
+	return c;
+}
+
+std::string FoldName(const std::string& name)
+{
+	const std::string s = ValidUtf8(name);
+	std::string out;
+	for (size_t i = 0; i < s.size();)
+	{
+		const unsigned char b = (unsigned char)s[i];
+		const size_t n = b < 0x80 ? 1 : b < 0xE0 ? 2 : b < 0xF0 ? 3 : 4;
+		char32_t c = n == 1 ? b : b & (0x7F >> n);
+		for (size_t k = 1; k < n; ++k)
+			c = (c << 6) | ((unsigned char)s[i + k] & 0x3F);
+		i += n;
+		c = FoldChar(c);
+		if (c < 0x80)
+			out += (char)c;
+		else if (c < 0x800)
+			out += {(char)(0xC0 | (c >> 6)), (char)(0x80 | (c & 0x3F))};
+		else if (c < 0x10000)
+			out += {(char)(0xE0 | (c >> 12)), (char)(0x80 | ((c >> 6) & 0x3F)), (char)(0x80 | (c & 0x3F))};
+		else
+			out += {(char)(0xF0 | (c >> 18)), (char)(0x80 | ((c >> 12) & 0x3F)), (char)(0x80 | ((c >> 6) & 0x3F)),
+			        (char)(0x80 | (c & 0x3F))};
+	}
+	return out;
+}
+
+bool Blank(const std::string& s)
+{
+	return s.find_first_not_of(" \t") == std::string::npos;
+}
+
 std::string ValidUtf8(const std::string& s)
 {
 	std::string out;

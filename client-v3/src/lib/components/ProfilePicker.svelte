@@ -2,6 +2,7 @@
 	import { pads, MAX_PROFILES, type Profile } from '$lib/pads.svelte';
 	import { Button } from '$lib/components/ui/button';
 	import { Input } from '$lib/components/ui/input';
+	import LoaderIcon from '@lucide/svelte/icons/loader-circle';
 
 	let newName = $state('');
 
@@ -15,6 +16,7 @@
 		)
 	);
 	const full = $derived((profiles?.length ?? 0) >= MAX_PROFILES);
+	const loading = $derived(pads.loadingProfile);
 	const sources = $derived(pads.copySources);
 
 	// The store moves on to tuning once the server confirms the load.
@@ -58,10 +60,18 @@
 		<div class="flex flex-col gap-3">
 			{#each sorted as p (p.id)}
 				<div class="bg-card ring-foreground/10 flex items-stretch rounded-xl ring-1">
-					<button class="flex flex-1 flex-col gap-1 p-4 text-left" onclick={() => load(p)}>
+					<button
+						class="flex flex-1 flex-col gap-1 p-4 text-left disabled:opacity-60"
+						disabled={loading !== null}
+						aria-busy={loading === p.id}
+						onclick={() => load(p)}
+					>
 						<span class="flex items-center gap-2 text-lg font-semibold">
 							{p.name}
-							{#if lastUsed(p)}<span class="text-primary text-xs">last used</span>{/if}
+							{#if loading === p.id}
+								<LoaderIcon class="text-primary size-4 animate-spin" />
+								<span class="text-primary text-xs">loading onto the pad…</span>
+							{:else if lastUsed(p)}<span class="text-primary text-xs">last used</span>{/if}
 						</span>
 						{#if p.description}<span class="text-muted-foreground text-sm">{p.description}</span
 							>{/if}

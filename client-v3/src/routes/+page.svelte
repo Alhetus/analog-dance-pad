@@ -72,7 +72,9 @@
 				{#if loadedProfile && modified}
 					<Badge variant="secondary">modified</Badge>
 				{/if}
-				{#if snap?.saveFailed}
+				{#if pads.loadingProfile}
+					<Badge variant="outline">loading profile…</Badge>
+				{:else if snap?.saveFailed}
 					<Badge variant="destructive" title="The server keeps retrying every 2 seconds"
 						>not saved to the pad</Badge
 					>

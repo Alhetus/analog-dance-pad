@@ -5,6 +5,7 @@
 #include <map>
 #include <memory>
 #include <filesystem>
+#include <set>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -104,6 +105,8 @@ struct SensorSnapshot
 {
 	std::string path; // HID path: how clients address this pad in messages
 	std::string name;
+	// Input reports received per second. The 32u4 firmware only sends one when
+	// a value changes, so a pad at rest drops toward 0: not a link-health signal.
 	int pollingRate = 0;
 	int releaseMode = 0;
 	int numButtons = 0;
@@ -112,6 +115,7 @@ struct SensorSnapshot
 	bool featureLights = false;
 	bool unsaved = false;    // edits not yet in the pad's EEPROM (saved ~2s after the last one)
 	bool saveFailed = false; // the last save attempt failed; retried every 2s
+	bool saving = false;     // an EEPROM save is running: values are frozen until it is done (up to ~2s)
 	std::vector<SensorState> sensors;
 
 	bool operator==(const SensorSnapshot&) const = default;
@@ -216,10 +220,16 @@ class Device
 
 	static void DiscoverNewDevices();
 
+	// HID paths of the pads busy with a background save: their messages must
+	// wait (see PadDevice::StartSave). Device-I/O thread only.
+	static std::set<std::string> BusyPads();
+
 	// Tests only: put a pad (on a fake backend) in the device map, and drop all
 	// pads and cached pad states again. No HID access.
 	static void AddPadForTest(std::unique_ptr<PadDevice> pad);
 	static void ResetForTest();
+	// Tests only: true while a background save or connect is still running.
+	static bool BackgroundWorkForTest();
 };
 
 } // namespace adp

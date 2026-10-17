@@ -59,13 +59,16 @@
 
 <div class="flex h-full flex-col items-center gap-1 select-none">
 	<span class="text-muted-foreground text-sm leading-none tabular-nums">
-		{pct(sensor.value)}%
+		{sensor.disabled ? 'off' : `${pct(sensor.value)}%`}
 	</span>
 
 	<!-- tap the track (outside the drag handle) to open the editor -->
 	<div
 		bind:this={trackEl}
-		class="bg-muted relative w-full min-h-0 flex-1 cursor-pointer overflow-hidden rounded-md"
+		class="bg-muted relative w-full min-h-0 flex-1 cursor-pointer overflow-hidden rounded-md {sensor.disabled
+			? 'opacity-40'
+			: ''}"
+		title={sensor.disabled ? "The pad doesn't read this sensor" : undefined}
 		onclick={onedit}
 		role="button"
 		tabindex="0"

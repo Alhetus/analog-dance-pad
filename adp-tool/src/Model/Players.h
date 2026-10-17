@@ -6,6 +6,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -21,8 +22,9 @@
 // (flagged localOk=false) and the scanner retries every few seconds, so
 // everything recovers as soon as it is mounted again.
 //
-// Players are keyed by DisplayName; two folders with the same name collapse to
-// one entry and share profiles. When a folder's name changes between scans the
+// Players are keyed by DisplayName; two folders with the same name (ignoring
+// case: on Windows they would share a profile dir anyway) collapse to one
+// entry and share profiles. When a folder's name changes between scans the
 // player's profile dir is renamed along with it (see PlanRenames).
 namespace adp::Players
 {
@@ -83,11 +85,14 @@ void Start(const Path& localProfilesDir, const Path& profilesDir, std::chrono::s
 void Stop();
 void RequestRescan();
 // Recounts the stored profiles (local disk) without rescanning LocalProfiles
-// (the share): after a profile op or a pad rename.
-void RequestRecount();
+// (the share): of one player after their profile op, of everyone ("") after
+// a pad rename.
+void RequestRecount(const std::string& player = "");
 
-// `previous` with every player's profile counts read again from `profilesDir`.
-PlayerList Recount(const Path& profilesDir, const PlayerList& previous, std::unique_lock<std::mutex>* hold = nullptr);
+// `previous` with the profile counts of the players in `only` (every player
+// if null) read again from `profilesDir`.
+PlayerList Recount(const Path& profilesDir, const PlayerList& previous, std::unique_lock<std::mutex>* hold = nullptr,
+                   const std::set<std::string>* only = nullptr);
 
 // Renames followed since the last call, for the pad selections to follow
 // too. Thread-safe.

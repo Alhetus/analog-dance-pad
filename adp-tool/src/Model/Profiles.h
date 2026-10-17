@@ -41,6 +41,14 @@ std::string EscapeName(const std::string& name);
 // Inverse of EscapeName.
 std::string UnescapeName(const std::string& escaped);
 
+// `name` lowercased, for telling whether two names (players, pads) land in the
+// same directory on a case-insensitive filesystem (Windows, macOS default).
+// Folds ASCII, Latin-1, Latin Extended-A, Greek and Cyrillic.
+std::string FoldName(const std::string& name);
+
+// True if `s` is empty or only spaces and tabs.
+bool Blank(const std::string& s);
+
 // `s` with every byte that isn't part of a valid UTF-8 sequence replaced by
 // U+FFFD. Names read from a pad or an Editable.ini are raw bytes, and json
 // refuses to serialize invalid UTF-8 (it throws), so they pass through this.

@@ -245,10 +245,13 @@ TEST_CASE("LoadProfile treats null light slots as disabled and skips unchanged o
 	CHECK(pad.Lights().ledMappings.contains(1));
 	CHECK(raw->sent.size() == 3); // only the enabled slots; nothing was on to disable
 
-	// Loading the same lights again sends nothing: every slot already matches.
+	// Loading the same lights again sends nothing: every slot already matches,
+	// so the published lights aren't stale either.
 	raw->sent.clear();
+	pad.PopChanges();
 	pad.LoadProfile(j, DPG_LIGHTS);
 	CHECK(raw->sent.empty());
+	CHECK(pad.PopChanges() == 0);
 
 	// Dropping a rule disables just that slot.
 	j["lightRules"] = json::array({rule});

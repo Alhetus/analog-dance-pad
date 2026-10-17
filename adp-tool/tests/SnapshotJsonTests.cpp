@@ -24,10 +24,14 @@ TEST_CASE("SnapshotToJson emits the WebSocket contract fields", "[snapshot]")
 	s.resistorValue = 10;
 	s.button = 4;
 	s.pressed = true;
+	s.flags = SensorReport::ADC_DISABLED;
 	snap.sensors.push_back(s);
+	snap.saving = true;
 
 	json j;
 	Device::SnapshotToJson(snap, j);
+	CHECK(j["saving"] == true);
+	CHECK(j["sensors"][0]["disabled"] == true);
 
 	CHECK(j["msgType"] == 1);
 	// Clients route every message by the pad's HID path.

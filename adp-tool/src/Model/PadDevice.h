@@ -11,7 +11,9 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <future>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -33,6 +35,7 @@ enum LightRuleFlags
 	LRF_ENABLED = 1 << 0,
 	LRF_FADE_ON = 1 << 1,
 	LRF_FADE_OFF = 1 << 2,
+	LRF_KNOWN = LRF_ENABLED | LRF_FADE_ON | LRF_FADE_OFF,
 };
 
 using DevicePath = std::string;
@@ -159,10 +162,12 @@ class PadDevice
 			result.offColor = ToRgbColor(report.offColor);
 			result.offFadeColor = ToRgbColor(report.offFadeColor);
 			myLights.lightRules[report.lightRuleIndex] = result;
+			myRuleExtraFlags[report.lightRuleIndex] = report.flags & ~LRF_KNOWN;
 		}
 		else
 		{
 			myLights.lightRules.erase(report.lightRuleIndex);
+			myRuleExtraFlags.erase(report.lightRuleIndex);
 		}
 	}
 
@@ -212,7 +217,18 @@ class PadDevice
 			case ReadDataResult::SUCCESS:
 				pressedButtons |= ReadU16LE(report.buttonBits);
 				for (int i = 0; i < myPad.numSensors; ++i)
-					aggregateValues[i] += ReadU16LE(report.sensorValues[i]);
+				{
+					const int v = ReadU16LE(report.sensorValues[i]);
+					aggregateValues[i] += v;
+					// Past the reported scale every value shows as 1.0 (and no threshold can reach it).
+					if (v > myPad.maxSensorValue && !myWarnedOverScale)
+					{
+						std::printf(
+						    "PadDevice :: '%s' sensor %d reads %d, above its maxSensorValue %d: values saturate\n",
+						    myPad.name.c_str(), i, v, myPad.maxSensorValue);
+						myWarnedOverScale = true;
+					}
+				}
 				++inputsRead;
 				break;
 
@@ -252,11 +268,12 @@ class PadDevice
 		return true;
 	}
 
-	// Edits are saved to the pad's EEPROM 2s after the last one (Device::Update
-	// saves at most one pad per tick: a save can block for up to a second).
+	// Edits are saved to the pad's EEPROM 2s after the last one (StartSave: a
+	// save can block for a second or more).
 	bool SaveDue() const
 	{
-		return myHasUnsavedChanges && std::chrono::steady_clock::now() - myLastPendingChange > std::chrono::seconds(2);
+		return myHasUnsavedChanges && !Saving() &&
+		       std::chrono::steady_clock::now() - myLastPendingChange > std::chrono::seconds(2);
 	}
 
 	// The releaseThreshold to store for a sensor with press threshold
@@ -459,7 +476,10 @@ class PadDevice
 	{
 		LightRuleReport report;
 		report.lightRuleIndex = lightRuleIndex;
-		report.flags = LRF_ENABLED | (LRF_FADE_ON * rule.fadeOn) | (LRF_FADE_OFF * rule.fadeOff);
+		// Flag bits this server doesn't know (e.g. the firmware's LRF_PULSE) are kept.
+		const auto extra = myRuleExtraFlags.find(lightRuleIndex);
+		report.flags = LRF_ENABLED | (LRF_FADE_ON * rule.fadeOn) | (LRF_FADE_OFF * rule.fadeOff) |
+		               (extra == myRuleExtraFlags.end() ? 0 : extra->second);
 		report.onColor = ToColor24(rule.onColor);
 		report.offColor = ToColor24(rule.offColor);
 		report.onFadeColor = ToColor24(rule.onFadeColor);
@@ -490,23 +510,38 @@ class PadDevice
 	// True while the last two save attempts failed (it is retried every 2s).
 	bool SaveFailed() const { return mySaveFailures >= 2; }
 
-	// Stays unsaved on failure, so it is retried 2s later. True if nothing is
-	// left unsaved. A single failure isn't reported: the firmware writes the
-	// EEPROM inside the request, so a big save can outlast hidapi's write
-	// timeout and still succeed; the retry then only rewrites what differs.
+	// Starts saving the unsaved edits on a worker thread, so a long EEPROM write
+	// (the AVR firmware writes it inside the request, interrupts off, ~3.4ms
+	// per changed byte) stalls only this pad. Until FinishSave collects it the
+	// worker owns the HID handle: nothing else may touch this pad's device
+	// (Saving() pads are skipped and their messages held).
+	void StartSave()
+	{
+		if (!myHasUnsavedChanges || Saving())
+			return;
+		// A raw pointer: the reporter (and hid_close) must not die on the worker.
+		// mySave is declared after myReporter, so it is waited for first.
+		mySave = std::async(std::launch::async, [r = myReporter.get()] { return r->SendSaveConfiguration(); });
+	}
+
+	bool Saving() const { return mySave.valid(); }
+
+	// Collects a finished save; with `wait`, waits for a running one first.
+	void FinishSave(bool wait = false)
+	{
+		if (!mySave.valid() || (!wait && mySave.wait_for(std::chrono::seconds(0)) != std::future_status::ready))
+			return;
+		SaveResult(mySave.get());
+	}
+
+	// Saves on this thread. Stays unsaved on failure, so it is retried 2s
+	// later. True if nothing is left unsaved.
 	bool SaveChanges()
 	{
-		if (!myHasUnsavedChanges)
-			return true;
-		if (!myReporter->SendSaveConfiguration())
-		{
-			++mySaveFailures;
-			myLastPendingChange = std::chrono::steady_clock::now();
-			return false;
-		}
-		mySaveFailures = 0;
-		myHasUnsavedChanges = false;
-		return true;
+		FinishSave(true);
+		if (myHasUnsavedChanges)
+			SaveResult(myReporter->SendSaveConfiguration());
+		return !myHasUnsavedChanges;
 	}
 
 	const DevicePath& Path() const { return myPath; }
@@ -540,9 +575,30 @@ class PadDevice
 	bool LoadProfile(const json& j, DeviceProfileGroups groups);
 	void SaveProfile(json& j, DeviceProfileGroups groups) const;
 
+	// The lights arrays of a configure or profile, parsed slot by slot (an
+	// absent array stays empty). False, with nothing parsed, if any slot is
+	// malformed or a mapping is outside this pad's sensors, rules or LEDs.
+	bool ParseLights(const json& j, std::vector<std::optional<LedMapping>>& mappings,
+	                 std::vector<std::optional<LightRule>>& rules) const;
+
 	void TriggerChange(int type) { myChanges |= type; }
 
   private:
+	// A single failure isn't reported: the firmware writes the EEPROM inside
+	// the request, so a big save can outlast hidapi's write timeout and still
+	// succeed; the retry then only rewrites what differs.
+	void SaveResult(bool ok)
+	{
+		if (!ok)
+		{
+			++mySaveFailures;
+			myLastPendingChange = std::chrono::steady_clock::now();
+			return;
+		}
+		mySaveFailures = 0;
+		myHasUnsavedChanges = false;
+	}
+
 	// Shared ownership: the DeviceConnection also holds this reporter (for name
 	// refreshes), so refcounting keeps it alive for whichever outlives the other.
 	std::shared_ptr<Reporter> myReporter;
@@ -555,6 +611,9 @@ class PadDevice
 	int mySaveFailures = 0; // consecutive
 	std::chrono::time_point<std::chrono::steady_clock> myLastPendingChange;
 	PollingData myPollingData;
+	std::future<bool> mySave;                // a running StartSave
+	std::map<int, uint8_t> myRuleExtraFlags; // per light rule: flag bits this server doesn't know
+	bool myWarnedOverScale = false;
 };
 
 } // namespace adp

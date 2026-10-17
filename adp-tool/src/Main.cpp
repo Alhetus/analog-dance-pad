@@ -139,7 +139,7 @@ int main(int argc, char** argv)
 
 		// Start the websocket server thread.
 		std::thread websocketServerThread(&adp::WebsocketServer::Init, &websocketServer, std::ref(queue),
-		                                  opt("--host", "127.0.0.1"), access, std::ref(g_running));
+		                                  opt("--host", "127.0.0.1"), access, std::ref(g_running), 8008);
 
 		// The application loop exits when g_running is cleared by the signal handler
 		// (or by the WebSocket server when it can't listen).

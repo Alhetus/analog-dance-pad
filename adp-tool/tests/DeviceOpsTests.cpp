@@ -2,8 +2,10 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <filesystem>
+#include <future>
 #include <memory>
 #include <string>
+#include <thread>
 
 #include "support/PadFixture.h"
 #include "support/RecordingBackend.h"
@@ -264,6 +266,11 @@ TEST_CASE("A pad dropped after a failed read saves its unsaved edits first", "[d
 	raw->QueueReadCount(-1); // the next poll's HID read fails
 
 	Device::Update();
+	while (Device::BackgroundWorkForTest()) // the save runs in the background
+	{
+		std::this_thread::yield();
+		Device::Update();
+	}
 
 	REQUIRE_FALSE(raw->sent.empty());
 	CHECK(raw->sent.back()[0] == REPORT_SAVE_CONFIGURATION);
@@ -272,6 +279,8 @@ TEST_CASE("A pad dropped after a failed read saves its unsaved edits first", "[d
 
 TEST_CASE("Queued sensor edits of one pad fold into one", "[deviceops]")
 {
+	Server server;
+	server.AddPad("p1", "Cab1 P1"); // lights are checked against it
 	json a = {{"pad", "p1"}, {"sensors", {{{"threshold", 0.5}}, json::object()}}};
 	const json b = {
 	    {"pad", "p1"}, {"sensors", {{{"releaseThreshold", 0.2}}, {{"threshold", 0.3}}}}, {"lightRules", json::array()}};
@@ -334,4 +343,112 @@ TEST_CASE("The device list carries each pad's firmware and sensor scale", "[devi
 	Device::DeviceListToJson(list);
 	CHECK(list["devices"][0]["maxSensorValue"] == 1024);
 	CHECK(list["devices"][0]["firmware"] == "1.3");
+}
+
+TEST_CASE("A pad saving in the background is left alone and shown as saving", "[deviceops]")
+{
+	Server server;
+	RecordingBackend* raw = nullptr;
+	const auto rep = makeReporter(raw);
+	auto owned = std::make_unique<PadDevice>(rep, "p1", makeName("Cab1 P1"), makeIdent(1, 3, 8, 1),
+	                                         std::vector<LightRuleReport>{}, std::vector<LedMappingReport>{},
+	                                         std::vector<SensorReport>{makeSensor(0, 425, 0)});
+	PadDevice* pad = owned.get();
+	Device::AddPadForTest(std::move(owned));
+	REQUIRE(Server::Send({{"pad", "p1"}, {"releaseMode", 0}})["ok"] == true); // now unsaved
+
+	std::promise<void> gate;
+	raw->writeGate = gate.get_future().share();
+	pad->StartSave();
+	CHECK(Device::BusyPads() == std::set<std::string>{"p1"});
+
+	raw->QueueReadCount(-1); // a poll now would fail and drop the pad
+	Device::Update();
+	json j;
+	Device::SnapshotToJson((*Device::GetSnapshots())[0], j);
+	CHECK(j["saving"] == true);
+	CHECK(j["unsaved"] == true);
+
+	raw->reads.clear();
+	gate.set_value();
+	while (Device::BackgroundWorkForTest())
+	{
+		std::this_thread::yield();
+		Device::Update();
+	}
+	CHECK(Device::BusyPads().empty());
+	Device::SnapshotToJson((*Device::GetSnapshots())[0], j);
+	CHECK(j["saving"] == false);
+	CHECK(j["unsaved"] == false);
+	CHECK(raw->sent.back()[0] == REPORT_SAVE_CONFIGURATION);
+}
+
+TEST_CASE("A pad rename refuses blank, case-variant and conflicting names", "[deviceops]")
+{
+	Server server;
+	RecordingBackend* raw = server.AddPad("p1", "Cab1 P1");
+	server.AddPad("p2", "Cab1 P2");
+	REQUIRE(Server::Send({{"pad", "p1"}, {"saveProfile", {{"player", "Mike"}, {"name", "Tech"}}}})["ok"] == true);
+
+	CHECK(Server::Send({{"pad", "p1"}, {"name", " "}})["error"] == "the name must not be empty");
+	// Another pad's name in another case: the same dirs on a case-insensitive filesystem.
+	CHECK(Server::Send({{"pad", "p1"}, {"name", "CAB1 p2"}})["ok"] == false);
+	CHECK(raw->sent.empty());
+
+	raw->QueueGet(makeName("Cab1 Left")); // what the pad answers after storing it
+	json r = Server::Send({{"pad", "p1"}, {"name", "Cab1 Left"}});
+	CHECK(r["ok"] == true);
+	CHECK(r["name"] == "Cab1 Left");
+	CHECK(fs::exists(Profiles::PlayerPadDir(server.dir, "Mike", "Cab1 Left") / "tech.json"));
+	CHECK_FALSE(fs::exists(Profiles::PlayerPadDir(server.dir, "Mike", "Cab1 P1")));
+	CHECK(Server::PadState("p1")["profileId"] == "tech");
+
+	// A case-only rename keeps them too.
+	raw->QueueGet(makeName("CAB1 LEFT"));
+	REQUIRE(Server::Send({{"pad", "p1"}, {"name", "CAB1 LEFT"}})["ok"] == true);
+	CHECK(fs::exists(Profiles::PlayerPadDir(server.dir, "Mike", "CAB1 LEFT") / "tech.json"));
+	CHECK(Server::PadState("p1")["profileId"] == "tech");
+
+	// Both names holding profiles of one player: refused, nothing moves.
+	REQUIRE(Profiles::Write(Profiles::PlayerPadDir(server.dir, "Mike", "Old Pad"), "old", {{"id", "old"}}));
+	raw->sent.clear();
+	r = Server::Send({{"pad", "p1"}, {"name", "Old Pad"}});
+	CHECK(r["ok"] == false);
+	CHECK(r["error"] == "Mike has profiles on both 'CAB1 LEFT' and 'Old Pad'");
+	CHECK(raw->sent.empty());
+}
+
+TEST_CASE("Profile names must not be blank", "[deviceops]")
+{
+	Server server;
+	server.AddPad("p1", "Cab1 P1");
+	CHECK(Server::Send({{"pad", "p1"}, {"saveProfile", {{"player", "Mike"}, {"name", "  "}}}})["error"] ==
+	      "the name must not be empty");
+	REQUIRE(Server::Send({{"pad", "p1"}, {"saveProfile", {{"player", "Mike"}, {"name", "a"}}}})["ok"] == true);
+	CHECK(Server::Send({{"pad", "p1"}, {"updateProfile", {{"player", "Mike"}, {"id", "a"}, {"name", ""}}}})["ok"] ==
+	      false);
+}
+
+TEST_CASE("A release mode past int range is refused, not truncated", "[deviceops]")
+{
+	Server server;
+	RecordingBackend* raw = server.AddPad("p1", "Cab1 P1");
+	CHECK(Server::Send({{"pad", "p1"}, {"releaseMode", 4294967296LL}})["error"] == "unknown release mode");
+	CHECK(Server::Send({{"pad", "p1"}, {"releaseMode", 18446744073709551615ULL}})["ok"] == false);
+	CHECK(raw->sent.empty());
+}
+
+TEST_CASE("Lights the pad would refuse are not folded over earlier ones", "[deviceops]")
+{
+	Server server;
+	server.AddPad("p1", "Cab1 P1");
+	const json rule = {{"onColor", "#ff0000"}};
+	json a = {{"pad", "p1"}, {"lightRules", {rule}}};
+	CHECK(Device::MergeConfigure(a, {{"pad", "p1"}, {"lightRules", {rule, rule}}}));
+	CHECK(a["lightRules"].size() == 2);
+	CHECK_FALSE(Device::MergeConfigure(a, {{"pad", "p1"}, {"lightRules", {{{"onColor", 5}}}}})); // malformed
+	CHECK_FALSE(Device::MergeConfigure(
+	    a, {{"pad", "p1"}, {"ledMappings", {{{"sensorIndex", 7}}}}})); // past this pad's 2 sensors
+	CHECK(a["lightRules"].size() == 2);
+	CHECK_FALSE(Device::MergeConfigure(a, {{"pad", "gone"}, {"lightRules", {rule}}}));
 }

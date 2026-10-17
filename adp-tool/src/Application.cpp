@@ -19,12 +19,14 @@ namespace adp
 {
 Application::Application()
 {
-	OnInit();
+	std::cout << std::format("Application started: ADP Server v{}.{}", ADP_VERSION_MAJOR, ADP_VERSION_MINOR)
+	          << std::endl;
+	Device::Init();
 }
 
 Application::~Application()
 {
-	OnExit();
+	Device::Shutdown();
 }
 
 void Application::UpdateLoop(MSGQ<QueueMessage>& queue, WebsocketServer& websocketServer, std::atomic<bool>& running)
@@ -34,13 +36,6 @@ void Application::UpdateLoop(MSGQ<QueueMessage>& queue, WebsocketServer& websock
 	constexpr auto tickInterval = std::chrono::microseconds(16667);
 	auto nextTick = std::chrono::steady_clock::now();
 
-	uint64_t playersVersion = 0;
-	std::map<std::string, Sent> lastSnapshot; // per pad
-
-	// Inbound messages taken off the queue but not handled yet.
-	std::deque<Inbound> backlog;
-	std::map<std::string, Clock::time_point> lastConfigure; // per pad
-
 	while (running.load())
 	{
 		nextTick += tickInterval;
@@ -48,7 +43,7 @@ void Application::UpdateLoop(MSGQ<QueueMessage>& queue, WebsocketServer& websock
 		// logged, not fatal: the other pads and clients keep being served.
 		try
 		{
-			RunTick(queue, websocketServer, playersVersion, lastSnapshot, backlog, lastConfigure);
+			RunTick(queue, websocketServer);
 		}
 		catch (const std::exception& e)
 		{
@@ -70,8 +65,14 @@ static std::string PadOf(const nlohmann::json& m)
 	return m.is_object() && m.contains("pad") && m["pad"].is_string() ? m["pad"].get<std::string>() : "";
 }
 
+static nlohmann::json RequestIdOf(const nlohmann::json& m)
+{
+	return m.is_object() && m.contains("requestId") ? m["requestId"] : nlohmann::json();
+}
+
 size_t Application::NextDue(const std::deque<Inbound>& backlog,
-                            const std::map<std::string, Clock::time_point>& lastConfigure, Clock::time_point now)
+                            const std::map<std::string, Clock::time_point>& lastConfigure,
+                            const std::set<std::string>& busy, Clock::time_point now)
 {
 	std::set<std::string> held; // pads with an earlier message still waiting
 	for (size_t i = 0; i < backlog.size(); ++i)
@@ -82,8 +83,8 @@ size_t Application::NextDue(const std::deque<Inbound>& backlog,
 		if (held.contains(pad))
 			continue;
 		const auto last = lastConfigure.find(pad);
-		if (Device::IsConfigure(backlog[i].message) && last != lastConfigure.end() &&
-		    now - last->second < CONFIGURE_INTERVAL)
+		if (busy.contains(pad) || (Device::IsConfigure(backlog[i].message) && last != lastConfigure.end() &&
+		                           now - last->second < CONFIGURE_INTERVAL))
 		{
 			held.insert(pad);
 			continue;
@@ -93,21 +94,76 @@ size_t Application::NextDue(const std::deque<Inbound>& backlog,
 	return std::string::npos;
 }
 
-void Application::RunTick(MSGQ<QueueMessage>& queue, WebsocketServer& websocketServer, uint64_t& playersVersion,
-                          std::map<std::string, Sent>& lastSnapshot, std::deque<Inbound>& backlog,
-                          std::map<std::string, Clock::time_point>& lastConfigure)
+bool Application::Enqueue(std::deque<Inbound>& backlog, Inbound in)
+{
+	if (Device::IsConfigure(in.message))
+	{
+		const std::string pad = PadOf(in.message);
+		const auto last =
+		    std::find_if(backlog.rbegin(), backlog.rend(), [&](const Inbound& b) { return PadOf(b.message) == pad; });
+		if (last != backlog.rend() && Device::IsConfigure(last->message))
+		{
+			// The folded message is answered under the later one's sender and
+			// requestId; the earlier asker gets a copy (see RunTick).
+			const Asker earlier{last->sender, RequestIdOf(last->message)};
+			json merged = last->message;
+			merged.erase("requestId");
+			if (Device::MergeConfigure(merged, in.message))
+			{
+				last->message = std::move(merged);
+				const Asker later{in.sender, RequestIdOf(in.message)};
+				if (earlier != later &&
+				    std::find(last->folded.begin(), last->folded.end(), earlier) == last->folded.end())
+					last->folded.push_back(earlier);
+				std::erase(last->folded, later);
+				last->sender = std::move(in.sender);
+				return true;
+			}
+		}
+	}
+	if (backlog.size() >= MAX_BACKLOG)
+		return false;
+	backlog.push_back(std::move(in));
+	return true;
+}
+
+void Application::RunTick(MSGQ<QueueMessage>& queue, WebsocketServer& websocketServer)
 {
 	// An unchanged snapshot is skipped, but still resent at least this often:
-	// clients treat a pad silent for 1s as gone.
+	// clients treat a pad silent for 2s as gone.
 	constexpr auto snapshotHeartbeat = std::chrono::milliseconds(250);
 
-	// Update device data first (discovery + poll + publish snapshots).
-	Tick();
+	// Run discovery ~1Hz (not every 60Hz tick — hid_enumerate is not free) so the
+	// device map keeps up with hot-plug, including the very first tick. It only
+	// probes newly-seen (or failed, after a backoff) paths, so connected pads
+	// are not disturbed; their stage 2 runs in the background and Update()
+	// collects the finished ones.
+	constexpr unsigned discoverInterval = 60;
+	if (discoverTick++ % discoverInterval == 0)
+		Device::DiscoverNewDevices();
+
+	// Update device data (collect, poll, publish snapshots).
+	Device::Update();
 
 	// A client connected or changed its subscription: resend every snapshot
 	// now instead of at the next heartbeat.
 	if (websocketServer.TakeSnapshotResend())
 		lastSnapshot.clear();
+
+	// The pad list goes before the snapshots below, so a client never gets a
+	// snapshot of a pad it doesn't know yet. Everything published here is sent
+	// on change only; Publish() replays the latest copy to clients that
+	// connect later.
+
+	// Pad list (msgType 2) and per-pad selection (msgType 5) change together:
+	// pads coming/going, renames, and profile selections.
+	if (Device::TakePadStatesDirty())
+	{
+		json deviceListJson, padStatesJson;
+		Device::DeviceListToJson(deviceListJson);
+		Device::PadStatesToJson(padStatesJson);
+		websocketServer.Publish("pads", {Profiles::Dump(deviceListJson), Profiles::Dump(padStatesJson)});
+	}
 
 	// Send every pad's freshly published, immutable snapshot to the clients
 	// watching that pad.
@@ -140,19 +196,6 @@ void Application::RunTick(MSGQ<QueueMessage>& queue, WebsocketServer& websocketS
 		});
 	}
 
-	// Everything below is sent on change only; Publish() replays the latest
-	// copy to clients that connect later.
-
-	// Pad list (msgType 2) and per-pad selection (msgType 5) change together:
-	// pads coming/going, renames, and profile selections.
-	if (Device::TakePadStatesDirty())
-	{
-		json deviceListJson, padStatesJson;
-		Device::DeviceListToJson(deviceListJson);
-		Device::PadStatesToJson(padStatesJson);
-		websocketServer.Publish("pads", {Profiles::Dump(deviceListJson), Profiles::Dump(padStatesJson)});
-	}
-
 	// Player list (msgType 3): after every completed background scan (every
 	// 30s, or on request).
 	if (const auto version = Players::Version(); version != playersVersion)
@@ -165,31 +208,17 @@ void Application::RunTick(MSGQ<QueueMessage>& queue, WebsocketServer& websocketS
 	if (Device::TakeLightsDirty())
 		websocketServer.Publish("lights", Device::LightsMessages());
 
-	// Take every queued message into the backlog. A sensor/lights edit is
-	// folded into the same client's previous edit of that pad if nothing
-	// else for the pad came in between, so a slider drag that arrives faster
-	// than the pad can take it collapses into its latest value instead of
-	// building up lag.
+	// Take every queued message into the backlog.
 	while (auto item = queue.tryPop())
 	{
 		json j = json::parse(item->data, nullptr, false);
-		if (Device::IsConfigure(j))
+		const std::string sender = item->sender;
+		if (!Enqueue(backlog, {std::move(item->sender), j, {}}))
 		{
-			const auto last = std::find_if(backlog.rbegin(), backlog.rend(), [&](const Inbound& b) {
-				return b.message.is_object() && b.message.contains("pad") && b.message["pad"] == j["pad"];
-			});
-			if (last != backlog.rend() && last->sender == item->sender && Device::IsConfigure(last->message) &&
-			    Device::MergeConfigure(last->message, j))
-				continue;
-		}
-		if (backlog.size() >= MAX_BACKLOG)
-		{
-			std::printf("UpdateLoop :: backlog full, message from %s dropped\n", item->sender.c_str());
+			std::printf("UpdateLoop :: backlog full, message from %s dropped\n", sender.c_str());
 			for (const auto& reply : Device::Refuse(j, "the server is busy, try again"))
-				websocketServer.SendTo(item->sender, Profiles::Dump(reply.message));
-			continue;
+				websocketServer.SendTo(sender, Profiles::Dump(reply.message));
 		}
-		backlog.push_back({std::move(item->sender), std::move(j)});
 	}
 
 	// Apply them. This runs on the device-I/O thread, so device access stays
@@ -199,8 +228,9 @@ void Application::RunTick(MSGQ<QueueMessage>& queue, WebsocketServer& websocketS
 	// ponytail: a message is never split, so a profile load with lights (up to
 	// ~45 reports, ~150ms) still overruns the budget; queue its HID writes per
 	// pad and drain them across ticks if that ever shows.
+	const std::set<std::string> busy = Device::BusyPads();
 	const auto drainUntil = Clock::now() + std::chrono::milliseconds(8);
-	for (size_t i; (i = NextDue(backlog, lastConfigure, Clock::now())) != std::string::npos;)
+	for (size_t i; (i = NextDue(backlog, lastConfigure, busy, Clock::now())) != std::string::npos;)
 	{
 		const Inbound in = std::move(backlog[i]);
 		backlog.erase(backlog.begin() + (std::ptrdiff_t)i);
@@ -208,45 +238,26 @@ void Application::RunTick(MSGQ<QueueMessage>& queue, WebsocketServer& websocketS
 			lastConfigure[PadOf(in.message)] = Clock::now();
 		for (const auto& reply : Device::HandleParsedMessage(in.message))
 		{
-			if (reply.toSender)
-				websocketServer.SendTo(in.sender, Profiles::Dump(reply.message));
-			else
+			if (!reply.toSender)
+			{
 				websocketServer.SendMessageToClients(Profiles::Dump(reply.message));
+				continue;
+			}
+			websocketServer.SendTo(in.sender, Profiles::Dump(reply.message));
+			for (const Asker& asker : in.folded)
+			{
+				json copy = reply.message;
+				if (asker.requestId.is_null())
+					copy.erase("requestId");
+				else
+					copy["requestId"] = asker.requestId;
+				websocketServer.SendTo(asker.sender, Profiles::Dump(copy));
+			}
 		}
 		if (Clock::now() >= drainUntil)
 			break;
 	}
 	std::erase_if(lastConfigure,
 	              [](const auto& entry) { return Clock::now() - entry.second > std::chrono::seconds(1); });
-}
-
-void Application::OnInit()
-{
-	const auto startMsg = std::format("Application started: ADP Server v{}.{}", ADP_VERSION_MAJOR, ADP_VERSION_MINOR);
-	std::cout << startMsg << std::endl;
-
-	Device::Init();
-}
-
-void Application::OnExit()
-{
-	Device::Shutdown();
-}
-
-void Application::Tick()
-{
-	// Run discovery ~1Hz (not every 60Hz tick — hid_enumerate is not free) so the
-	// device map keeps up with hot-plug, including the very first tick. It only
-	// probes newly-seen (or failed, after a backoff) paths, so connected pads
-	// are not disturbed. Runs before Update() so a new pad is in this tick's
-	// snapshots, which the lights broadcast it triggers relies on.
-	constexpr unsigned discoverInterval = 60;
-	static unsigned discoverTick = 0; // unsigned: wraps (after ~2 years) instead of overflowing
-	if (discoverTick++ % discoverInterval == 0)
-	{
-		Device::DiscoverNewDevices();
-	}
-
-	Device::Update();
 }
 } // namespace adp

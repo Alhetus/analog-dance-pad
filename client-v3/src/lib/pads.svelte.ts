@@ -11,6 +11,7 @@ export interface Sensor {
 	resistorValue: number; // raw digipot byte 0..255 (NOT normalized)
 	button: number; // 0 = unmapped, else 1-based
 	pressed: boolean; // pad-authoritative activation
+	disabled?: boolean; // the pad doesn't read this sensor (ADC_DISABLED)
 }
 
 /** Fields a client may write back per sensor (positional in the `sensors` message). */
@@ -40,6 +41,7 @@ export interface Snapshot {
 	msgType: 1;
 	pad: string; // HID path: how messages address this pad
 	name: string;
+	/** Input reports per second. A pad at rest may send none, so 0 isn't a dead link. */
 	pollingRate: number;
 	releaseMode: number; // 0 none, 2 per-sensor (1 = legacy global, treated as per-sensor)
 	numButtons: number; // mappable buttons this pad exposes
@@ -48,6 +50,7 @@ export interface Snapshot {
 	featureLights: boolean; // pad has configurable lights
 	unsaved: boolean; // edits not yet in the pad's EEPROM (saved ~2s after the last one)
 	saveFailed: boolean; // the last save to the pad failed; the server retries every 2s
+	saving?: boolean; // an EEPROM save is running: values are frozen until it's done (up to ~2s)
 	sensors: Sensor[];
 }
 
@@ -158,9 +161,13 @@ const SEND_THROTTLE_MS = 40;
 // An optimistic edit the pad hasn't echoed back by then was refused or clamped
 // by the server; drop it so the UI shows the pad's real value again.
 const PENDING_TTL_MS = 1000;
-// No snapshot for this long while open => pad considered gone. Above the up to
-// ~1s an EEPROM save on one pad can hold up the server's polling of all pads.
+// No snapshot for this long while open => pad considered gone. The server sends
+// one at least every 250ms, also while a pad saves; only a profile load holds
+// all of its pads up, for ~150ms.
 const STALE_MS = 2000;
+// A profile load the server hasn't answered by then is given up on (it may
+// wait behind the pad's save, which can take ~2s, then take ~150ms itself).
+const LOAD_TIMEOUT_MS = 10000;
 /** The adp-tool protocol this client speaks (WebsocketServer.h PROTOCOL_VERSION). */
 const PROTOCOL_VERSION = 1;
 /** Lowest release threshold the server stores, in device counts (Reporter.h MIN_RELEASE_COUNTS). */
@@ -361,6 +368,8 @@ class PadsStore {
 	now = $state(0); // ticking clock so staleness stays reactive
 	/** Shown as a toast for a few seconds (op results, send failures). */
 	notice: Notice | null = $state(null);
+	/** Id of the profile being loaded onto the selected pad, until the server answers. */
+	loadingProfile: string | null = $state(null);
 
 	#clock: ReturnType<typeof setInterval> | null = null;
 	#sendTimer: ReturnType<typeof setTimeout> | null = null;
@@ -370,6 +379,7 @@ class PadsStore {
 	/** Edits not sent yet; a flush sends only these, not every unconfirmed one. */
 	#unsent: Record<number, SensorPatch> = {};
 	#noticeTimer: ReturnType<typeof setTimeout> | undefined;
+	#loadTimer: ReturnType<typeof setTimeout> | undefined;
 
 	/** Call once from the browser (onMount). Safe to call more than once. */
 	start() {
@@ -424,6 +434,7 @@ class PadsStore {
 
 	stop() {
 		clearTimeout(this.#noticeTimer);
+		this.#setLoading(null);
 		if (this.#clock) clearInterval(this.#clock);
 		this.#clock = null;
 		this.#stopEffects?.();
@@ -437,6 +448,7 @@ class PadsStore {
 	selectServer(url: string) {
 		this.server = url;
 		this.pad = null;
+		this.#setLoading(null);
 		this.player = null;
 		this.#clearEdits();
 		this.step = 'pad';
@@ -450,6 +462,7 @@ class PadsStore {
 	selectPad(path: string) {
 		this.pad = path;
 		this.player = null;
+		this.#setLoading(null);
 		this.#clearEdits();
 		this.step = 'player';
 		this.conn?.send({ rescanPlayers: true }); // pick up just-created players
@@ -645,6 +658,16 @@ class PadsStore {
 		this.#unsent = {};
 	}
 
+	#setLoading(id: string | null) {
+		clearTimeout(this.#loadTimer);
+		this.loadingProfile = id;
+		if (id)
+			this.#loadTimer = setTimeout(() => {
+				this.loadingProfile = null;
+				this.showNotice({ ok: false, text: "The pad didn't answer the profile load" });
+			}, LOAD_TIMEOUT_MS);
+	}
+
 	// ---- Notices ----
 
 	showNotice(notice: Notice) {
@@ -655,6 +678,7 @@ class PadsStore {
 
 	#onResult(c: Conn, r: OpResult) {
 		if (c !== this.conn) return;
+		if (r.op === 'loadProfile' && r.pad === this.pad) this.#setLoading(null);
 		this.showNotice(
 			r.ok
 				? { ok: true, op: r.op, text: OP_DONE[r.op]?.(r.name) ?? 'Done' }
@@ -679,8 +703,13 @@ class PadsStore {
 		return sent;
 	}
 
+	/** Shows as loading (loadingProfile) until the server answers: the pad is busy meanwhile. */
 	loadProfile(id: string) {
-		if (this.#sendPad({ loadProfile: { player: this.player, id } })) this.#clearEdits();
+		if (this.loadingProfile) return;
+		if (this.#sendPad({ loadProfile: { player: this.player, id } })) {
+			this.#clearEdits();
+			this.#setLoading(id);
+		}
 	}
 
 	/** Loads/saves move on to tuning once the server confirms (see #onResult). */

@@ -236,3 +236,60 @@ TEST_CASE("Recounts don't hold back the next full scan", "[players]")
 	Players::Stop();
 	Players::SetForTest({});
 }
+
+TEST_CASE("FoldName ignores case the way a case-insensitive filesystem does", "[profiles]")
+{
+	CHECK(Profiles::FoldName("Cab1 P1") == Profiles::FoldName("CAB1 p1"));
+	CHECK(Profiles::FoldName(kAsa) == Profiles::FoldName("\xC3\xA5SA")); // Åsa, åSA
+	CHECK(Profiles::FoldName("\xC5\x81\xC3\xB3"
+	                         "d\xC5\xBA") == Profiles::FoldName("\xC5\x82\xC3\x93"
+	                                                            "D\xC5\xB9")); // Łódź
+	CHECK(Profiles::FoldName("\xD0\x9C\xD0\xB8\xD1\x88\xD0\xB0") ==
+	      Profiles::FoldName("\xD0\xBC\xD0\x98\xD0\xA8\xD0\x90")); // Миша
+	CHECK(Profiles::FoldName("Mike") != Profiles::FoldName("Mikey"));
+	CHECK(Profiles::Blank(" \t"));
+	CHECK_FALSE(Profiles::Blank(" a"));
+}
+
+TEST_CASE("Scan collapses names that differ only in case", "[players]")
+{
+	TempDir local("adp-players-case-local");
+	TempDir store("adp-players-case-store");
+	WriteFile(local.path / "00000001" / "Editable.ini", "[Editable]\nDisplayName=Mike\n");
+	WriteFile(local.path / "00000002" / "Editable.ini", "[Editable]\nDisplayName=MIKE\n");
+	const auto list = Players::Scan(local.path, store.path);
+	REQUIRE(list.players.size() == 1);
+	CHECK(list.players[0].name == "Mike");
+}
+
+TEST_CASE("A case-only player rename is followed", "[players]")
+{
+	TempDir local("adp-players-casemove-local");
+	TempDir store("adp-players-casemove-store");
+	WriteFile(local.path / "00000001" / "Editable.ini", "[Editable]\nDisplayName=Mike\n");
+	REQUIRE(Profiles::Write(Profiles::PlayerPadDir(store.path, "Mike", "P1"), "a", {{"id", "a"}}));
+	Players::Scan(local.path, store.path);
+
+	WriteFile(local.path / "00000001" / "Editable.ini", "[Editable]\nDisplayName=MIKE\n");
+	const auto list = Players::Scan(local.path, store.path);
+	REQUIRE(list.renamed.size() == 1);
+	CHECK(fs::exists(Profiles::PlayerPadDir(store.path, "MIKE", "P1") / "a.json"));
+	json names;
+	REQUIRE(Profiles::Read(store.path, "player-names", names));
+	CHECK(names["00000001"] == "MIKE");
+}
+
+TEST_CASE("Recount can refresh just one player", "[players]")
+{
+	TempDir store("adp-players-recount-one");
+	Players::PlayerList before;
+	before.players.push_back({"Mike", "00000001", {}, {}});
+	before.players.push_back({"Zoe", "00000002", {}, {}});
+	REQUIRE(Profiles::Write(Profiles::PlayerPadDir(store.path, "Mike", "P1"), "a", {{"id", "a"}}));
+	REQUIRE(Profiles::Write(Profiles::PlayerPadDir(store.path, "Zoe", "P1"), "a", {{"id", "a"}}));
+
+	const std::set<std::string> only = {"Zoe"};
+	const auto after = Players::Recount(store.path, before, nullptr, &only);
+	CHECK(after.players[0].profileCounts.empty()); // Mike: not read again
+	CHECK(after.players[1].profileCounts.at("P1") == 1);
+}

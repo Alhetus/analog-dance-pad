@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <cstring>
 #include <deque>
+#include <future>
 #include <optional>
 #include <vector>
 
@@ -39,6 +40,9 @@ class RecordingBackend : public ReporterBackend
 	// the Reporter's failure paths. When unset, they return the payload length.
 	std::optional<int> sendFeatureReturn;
 	std::optional<int> writeReturn;
+
+	// If set, write() (the save) waits for it: holds a background save open.
+	std::shared_future<void> writeGate;
 
 	// Queue a report struct as a well-formed read (returns its exact size).
 	// NOTE: matches the non-MINGW expected-size (sizeof(T)); the MINGW build
@@ -76,6 +80,8 @@ class RecordingBackend : public ReporterBackend
 
 	int write(unsigned char* data, size_t length) override
 	{
+		if (writeGate.valid())
+			writeGate.wait();
 		transfers.push_back(std::chrono::steady_clock::now());
 		sent.emplace_back(data, data + length);
 		return writeReturn.value_or((int)length);

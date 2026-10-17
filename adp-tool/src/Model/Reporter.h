@@ -175,6 +175,16 @@ enum ReleaseMode
 
 #pragma pack()
 
+// The wire sizes the firmware's report structs have (firmware/src/Reports):
+// a mismatch would make every transfer of that report fail at runtime.
+static_assert(sizeof(SensorValuesReport) == 1 + 2 + 2 * SENSOR_COUNT_MAX);
+static_assert(sizeof(NameReport) == 52);
+static_assert(sizeof(IdentificationV2Report) == 44);
+static_assert(sizeof(LightRuleReport) == 15);
+static_assert(sizeof(LedMappingReport) == 7);
+static_assert(sizeof(SensorReport) == 10);
+static_assert(sizeof(SetPropertyReport) == 9);
+
 class ReporterBackend
 {
   public:

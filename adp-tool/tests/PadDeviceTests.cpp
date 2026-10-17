@@ -1,4 +1,5 @@
 #include <catch2/catch_test_macros.hpp>
+#include <future>
 #include <catch2/catch_approx.hpp>
 
 #include <cstring>
@@ -375,4 +376,46 @@ TEST_CASE("A pad's values are normalized against its own maxSensorValue", "[padd
 	// A nonsensical scale falls back to the default.
 	PadDevice bogus(rep, "t", makeName("x"), makeIdent(1, 3, 8, 1, 0, 0), {}, {}, {makeSensor(0, 425, 0)});
 	CHECK(bogus.State().maxSensorValue == DEFAULT_MAX_SENSOR_VALUE);
+}
+
+TEST_CASE("A background save hands its result back on FinishSave", "[paddevice]")
+{
+	RecordingBackend* raw = nullptr;
+	auto rep = makeReporter(raw);
+	PadDevice pad(rep, "t", makeName("x"), makeIdent(1, 3, 8, 1), {}, {}, {makeSensor(0, 425, 0)});
+	CHECK(SetThreshold(pad, 0, 0.7, 0.2));
+
+	std::promise<void> gate;
+	raw->writeGate = gate.get_future().share();
+	pad.StartSave();
+	CHECK(pad.Saving());
+	CHECK_FALSE(pad.SaveDue());
+	pad.FinishSave(); // still writing: nothing yet
+	CHECK(pad.Saving());
+	CHECK(pad.HasUnsavedChanges());
+
+	gate.set_value();
+	pad.FinishSave(true);
+	CHECK_FALSE(pad.Saving());
+	CHECK_FALSE(pad.HasUnsavedChanges());
+	CHECK(raw->sent.back()[0] == REPORT_SAVE_CONFIGURATION);
+}
+
+TEST_CASE("Light rule flag bits the server doesn't know are written back", "[paddevice]")
+{
+	RecordingBackend* raw = nullptr;
+	auto rep = makeReporter(raw);
+	LightRuleReport rule;
+	rule.lightRuleIndex = 0;
+	rule.flags = LRF_ENABLED | (1 << 3); // the firmware's LRF_PULSE
+	rule.onColor = rule.offColor = rule.onFadeColor = rule.offFadeColor = {0, 0, 0};
+	PadDevice pad(rep, "t", makeName("x"), makeIdent(1, 3, 8, 1, IdentificationV2Report::FEATURE_LIGHTS), {rule}, {},
+	              {makeSensor(0, 425, 0)});
+	raw->sent.clear();
+
+	LightRule changed = pad.Lights().lightRules.at(0);
+	changed.onColor = RgbColor(1, 2, 3);
+	REQUIRE(pad.SendLightRule(0, changed));
+	REQUIRE(raw->sent.size() == 1);
+	CHECK(raw->sent[0][2] == (LRF_ENABLED | (1 << 3))); // reportId, index, flags
 }

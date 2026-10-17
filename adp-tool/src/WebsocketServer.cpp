@@ -86,10 +86,8 @@ WebsocketServer::WebsocketServer() = default;
 WebsocketServer::~WebsocketServer() = default;
 
 void WebsocketServer::Init(MSGQ<QueueMessage>& queue, std::string host, WebsocketAccess access,
-                           std::atomic<bool>& running)
+                           std::atomic<bool>& running, int port)
 {
-	constexpr int port = 8008;
-
 	auto srv = std::make_unique<ix::WebSocketServer>(port, host);
 
 	srv->setOnClientMessageCallback([this, &queue, access](const std::shared_ptr<ix::ConnectionState>& connectionState,
@@ -120,6 +118,10 @@ void WebsocketServer::Init(MSGQ<QueueMessage>& queue, std::string host, Websocke
 			for (const auto& [key, messages] : replay)
 				for (const auto& m : messages)
 					webSocket.send(m);
+			// A failed send closes the socket and runs the Close handler right
+			// away, before this admits it: a closed one would then stay listed.
+			if (webSocket.getReadyState() != ix::ReadyState::Open)
+				return;
 			{
 				std::lock_guard<std::mutex> clientsLock(clientsMutex);
 				clients[&webSocket] = {connectionState->getId()};

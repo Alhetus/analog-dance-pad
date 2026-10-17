@@ -43,7 +43,8 @@ class WebsocketServer
 	// Runs the server on `host` (e.g. "0.0.0.0" to accept phones/tablets on
 	// the LAN); blocks until Stop() is called. If the port can't be opened it
 	// clears `running` (so the whole process exits) and sets Failed().
-	void Init(MSGQ<QueueMessage>& queue, std::string host, WebsocketAccess access, std::atomic<bool>& running);
+	void Init(MSGQ<QueueMessage>& queue, std::string host, WebsocketAccess access, std::atomic<bool>& running,
+	          int port = 8008);
 
 	// Broadcasts a message to all connected clients. Thread-safe.
 	void SendMessageToClients(const std::string& message);

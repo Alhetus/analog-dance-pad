@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <filesystem>
+#include <future>
 #include <optional>
 #include <set>
 
@@ -41,8 +42,6 @@ constexpr HidIdentifier HID_IDS[] = {
     {0x1209, 0xb196}, // pid.codes id of the ADP firmware
     {0x03eb, 0x204f}, // Atmel's LUFA generic-HID id, used by older ADP firmware (other LUFA demos share it)
 };
-
-static_assert(sizeof(float) == sizeof(uint32_t), "32-bit float required");
 
 RgbColor::RgbColor(uint8_t r, uint8_t g, uint8_t b) : red(r), green(g), blue(b)
 {
@@ -99,16 +98,77 @@ enum ConnectionState
 	CS_FAILED
 };
 
+// Stage 2 of connecting: reads every slot (~90 transfers) and builds the pad,
+// or null if a read failed. Touches only `reporter`'s device.
+static unique_ptr<PadDevice> BuildPad(const shared_ptr<Reporter>& reporter, const string& devicePath,
+                                      const NameReport& name, const IdentificationV2Report& identification)
+{
+	// Firmware before v1.3 has no IdentificationV2 report, so Probe() already
+	// refused it: everything below assumes the v1.3+ reports.
+
+	// Reads every slot of one kind: select slot i, then get it.
+	auto readSlots = [&](SetPropertyReport::Ids select, int count, auto& report, auto&& keep) {
+		SetPropertyReport selectReport;
+		selectReport.propertyId = WriteU32LE(select);
+		for (int i = 0; i < count; ++i)
+		{
+			selectReport.propertyValue = WriteU32LE(i);
+			if (!reporter->Send(selectReport) || !reporter->Get(report))
+				return false;
+			keep(report);
+		}
+		return true;
+	};
+
+	vector<LightRuleReport> lightRules;
+	vector<LedMappingReport> ledMappings;
+	if (identification.ledCount > 0)
+	{
+		LightRuleReport lightReport;
+		LedMappingReport ledReport;
+		if (!readSlots(SetPropertyReport::SELECTED_LIGHT_RULE_INDEX, MAX_LIGHT_RULES, lightReport,
+		               [&](const LightRuleReport& r) {
+			               if (r.flags & LRF_ENABLED)
+				               lightRules.push_back(r);
+		               }) ||
+		    !readSlots(SetPropertyReport::SELECTED_LED_MAPPING_INDEX, MAX_LED_MAPPINGS, ledReport,
+		               [&](const LedMappingReport& r) {
+			               if (r.flags & LMF_ENABLED)
+				               ledMappings.push_back(r);
+		               }))
+			return nullptr;
+	}
+
+	vector<SensorReport> sensors;
+	SensorReport sensorReport;
+	if (!readSlots(SetPropertyReport::SELECTED_SENSOR_INDEX, identification.sensorCount, sensorReport,
+	               [&](const SensorReport& r) { sensors.push_back(r); }))
+		return nullptr;
+
+	auto device =
+	    make_unique<PadDevice>(reporter, devicePath.c_str(), name, identification, lightRules, ledMappings, sensors);
+
+	const PadState& pad = device->State();
+	std::printf("ConnectionManager :: connected '%s' (%s, firmware v%u.%u, %d sensors, %d buttons, features %s) "
+	            "at %s\n",
+	            pad.name.c_str(), pad.boardType.c_str(), pad.firmwareVersion.major, pad.firmwareVersion.minor,
+	            pad.numSensors, pad.numButtons, fmt::format("{:b}", ReadU16LE(identification.features)).c_str(),
+	            devicePath.c_str());
+	return device;
+}
+
 class DeviceConnection
 {
   public:
 	DeviceConnection(std::string path) : path(path) {}
 
 	// The hid_device* is owned solely by the Reporter's BackendHid (which closes
-	// it in its destructor), so there is no handle to close here.
+	// it in its destructor), so there is no handle to close here. A running
+	// stage 2 is waited for (by the future's destructor).
 	~DeviceConnection() = default;
 
 	// Opens the pad and reads its name and identification (kept for stage 2).
+	// Stays on the device thread, where hid_enumerate runs too.
 	bool Probe()
 	{
 		std::this_thread::sleep_for(std::chrono::milliseconds(5));
@@ -124,7 +184,7 @@ class DeviceConnection
 
 		if (hid_set_nonblocking(handle, 1) < 0)
 		{
-			std::printf("ConnectionManager :: hid_set_nonblocking failed\n");
+			std::printf("DeviceConnection :: hid_set_nonblocking failed :: %s\n", path.c_str());
 			hid_close(handle);
 			SetFailed();
 			return false;
@@ -146,14 +206,34 @@ class DeviceConnection
 		return true;
 	}
 
-	string GetPath() { return path; }
-
-	shared_ptr<Reporter> GetReporter() { return reporter; }
-
 	ConnectionState GetState() { return state; }
 
-	const NameReport& Name() const { return name; }
-	const IdentificationV2Report& Identification() const { return identification; }
+	// Runs stage 2 on a worker thread, so connecting a pad doesn't stall polling
+	// of the others. Until TakeStage2 returns its result the worker owns the HID
+	// handle, and this connection is left alone (the worker reads its members).
+	void StartStage2()
+	{
+		stage2 = std::async(std::launch::async, [this] { return BuildPad(reporter, path, name, identification); });
+	}
+
+	bool Stage2Pending() const { return stage2.valid(); }
+
+	// True once a started stage 2 is done, with `pad` its result (null if it failed).
+	bool TakeStage2(unique_ptr<PadDevice>& pad)
+	{
+		if (!stage2.valid() || stage2.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
+			return false;
+		try
+		{
+			pad = stage2.get();
+		}
+		catch (const std::exception& e)
+		{
+			std::printf("DeviceConnection :: stage 2 failed (%s)\n", e.what());
+			pad = nullptr;
+		}
+		return true;
+	}
 
 	void SetConnected()
 	{
@@ -162,8 +242,7 @@ class DeviceConnection
 	}
 
 	// Stage 2 (reading every slot) failed. It is retried on the next discovery
-	// pass (~1s) instead of sleeping on the device thread, which would stall
-	// polling of every pad; after 3 tries the pad goes into the failed backoff.
+	// pass (~1s); after 3 tries the pad goes into the failed backoff.
 	void Stage2Failed()
 	{
 		std::printf("DeviceConnection :: ConnectStage2 failed (%d)\n", stage2Failures);
@@ -206,11 +285,13 @@ class DeviceConnection
 
 	// Shared with the PadDevice created from this connection.
 	shared_ptr<Reporter> reporter;
+	std::future<unique_ptr<PadDevice>> stage2;
 };
 
 class ConnectionManager
 {
   public:
+	// Retiring pads finish their save in their destructors.
 	~ConnectionManager()
 	{
 		for (auto& [path, pad] : myPads)
@@ -245,16 +326,20 @@ class ConnectionManager
 		}
 	}
 
+	// Drops unplugged pads and starts connecting new ones (Collect finishes
+	// that). True if a pad went away.
 	bool DiscoverDevice()
 	{
 		std::vector<string> devicePaths;
 		UpdateDeviceMap(devicePaths);
 
-		// Remove any devices that are no longer connected.
+		// Remove any devices that are no longer connected. One whose stage 2 is
+		// still running goes once that is done (its pad then fails its first read).
 		bool changed = false;
 		for (auto it = devices.begin(); it != devices.end();)
 		{
-			if (std::find(devicePaths.begin(), devicePaths.end(), it->first) == devicePaths.end())
+			if (!it->second.Stage2Pending() &&
+			    std::find(devicePaths.begin(), devicePaths.end(), it->first) == devicePaths.end())
 			{
 				changed |= myPads.contains(it->first);
 				DropPad(it->first);
@@ -274,6 +359,8 @@ class ConnectionManager
 		{
 			auto [it, isNew] = devices.try_emplace(path, path);
 			DeviceConnection& con = it->second;
+			if (con.Stage2Pending())
+				continue;
 			if (isNew || con.RetryDue())
 			{
 				if (!con.Probe())
@@ -282,85 +369,56 @@ class ConnectionManager
 			else if (con.GetState() != CS_PROBED)
 				continue;
 
-			if (ConnectToDeviceStage2(con))
-			{
-				con.SetConnected();
-				changed = true;
-			}
-			else
-				con.Stage2Failed();
+			con.StartStage2();
 		}
 
 		return changed;
 	}
 
-	bool ConnectToDeviceStage2(DeviceConnection& deviceCon)
+	// Takes finished background work: connected pads, finished saves, and
+	// dropped pads whose last save is done. True if a pad came.
+	bool Collect()
 	{
-		shared_ptr<Reporter> reporter = deviceCon.GetReporter();
-		string devicePath = deviceCon.GetPath();
-		if (reporter == nullptr)
-			return false;
-
-		// Firmware before v1.3 has no IdentificationV2 report, so Probe() already
-		// refused it: everything below assumes the v1.3+ reports.
-		const NameReport& name = deviceCon.Name();
-		const IdentificationV2Report& identification = deviceCon.Identification();
-
-		// Reads every slot of one kind: select slot i, then get it.
-		auto readSlots = [&](SetPropertyReport::Ids select, int count, auto& report, auto&& keep) {
-			SetPropertyReport selectReport;
-			selectReport.propertyId = WriteU32LE(select);
-			for (int i = 0; i < count; ++i)
-			{
-				selectReport.propertyValue = WriteU32LE(i);
-				if (!reporter->Send(selectReport) || !reporter->Get(report))
-					return false;
-				keep(report);
-			}
-			return true;
-		};
-
-		vector<LightRuleReport> lightRules;
-		vector<LedMappingReport> ledMappings;
-		if (identification.ledCount > 0)
+		bool changed = false;
+		for (auto& [path, con] : devices)
 		{
-			LightRuleReport lightReport;
-			LedMappingReport ledReport;
-			if (!readSlots(SetPropertyReport::SELECTED_LIGHT_RULE_INDEX, MAX_LIGHT_RULES, lightReport,
-			               [&](const LightRuleReport& r) {
-				               if (r.flags & LRF_ENABLED)
-					               lightRules.push_back(r);
-			               }) ||
-			    !readSlots(SetPropertyReport::SELECTED_LED_MAPPING_INDEX, MAX_LED_MAPPINGS, ledReport,
-			               [&](const LedMappingReport& r) {
-				               if (r.flags & LMF_ENABLED)
-					               ledMappings.push_back(r);
-			               }))
-				return false;
+			unique_ptr<PadDevice> pad;
+			if (!con.TakeStage2(pad))
+				continue;
+			if (!pad)
+			{
+				con.Stage2Failed();
+				continue;
+			}
+			// Back after a failed read that left edits in the pad's RAM unsaved.
+			if (unsavedPaths.erase(path))
+				pad->NotifyUnsavedChanges();
+			myPads[path] = std::move(pad);
+			con.SetConnected();
+			changed = true;
 		}
 
-		vector<SensorReport> sensors;
-		SensorReport sensorReport;
-		if (!readSlots(SetPropertyReport::SELECTED_SENSOR_INDEX, identification.sensorCount, sensorReport,
-		               [&](const SensorReport& r) { sensors.push_back(r); }))
-			return false;
+		for (auto& [path, pad] : myPads)
+			pad->FinishSave();
 
-		auto device = make_unique<PadDevice>(reporter, devicePath.c_str(), name, identification, lightRules,
-		                                     ledMappings, sensors);
+		// ponytail: a pad back on the same path before its retiring save is done
+		// isn't told it has unsaved edits; the retry backoff (>=5s) outlasts a save.
+		std::erase_if(myRetiring, [&](Retiring& r) {
+			r.pad->FinishSave();
+			if (r.pad->Saving())
+				return false;
+			if (r.pad->HasUnsavedChanges() && devices.contains(r.path))
+				unsavedPaths.insert(r.path);
+			return true;
+		});
+		return changed;
+	}
 
-		const PadState& pad = device->State();
-		std::printf("ConnectionManager :: connected '%s' (%s, firmware v%u.%u, %d sensors, %d buttons, features %s) "
-		            "at %s\n",
-		            pad.name.c_str(), pad.boardType.c_str(), pad.firmwareVersion.major, pad.firmwareVersion.minor,
-		            pad.numSensors, pad.numButtons, fmt::format("{:b}", ReadU16LE(identification.features)).c_str(),
-		            devicePath.c_str());
-
-		// Back after a failed read that left edits in the pad's RAM unsaved.
-		if (unsavedPaths.erase(devicePath))
-			device->NotifyUnsavedChanges();
-
-		myPads[devicePath] = std::move(device);
-		return true;
+	bool BackgroundWork() const
+	{
+		return !myRetiring.empty() ||
+		       std::any_of(myPads.begin(), myPads.end(), [](const auto& p) { return p.second->Saving(); }) ||
+		       std::any_of(devices.begin(), devices.end(), [](const auto& d) { return d.second.Stage2Pending(); });
 	}
 
 	void AddPad(unique_ptr<PadDevice> pad)
@@ -369,25 +427,40 @@ class ConnectionManager
 		myPads[path] = std::move(pad);
 	}
 
-	// A HID read failed. The pad may only have hiccupped and keep its RAM, so
-	// unsaved edits are saved now if it still answers, else remembered and
-	// saved once it reconnects (unless it is unplugged meanwhile).
+	// A HID read failed. The pad may only have hiccupped and keep its RAM.
 	void DisconnectFailedDevice(const string& path)
 	{
-		if (PadDevice* pad = Find(path); pad && !pad->SaveChanges())
-			unsavedPaths.insert(path);
 		if (devices.contains(path))
 			devices.at(path).SetFailed();
 		DropPad(path);
 	}
 
-	void DropPad(const string& path) { myPads.erase(path); }
+	// Takes the pad out of service. Its unsaved edits are saved in the
+	// background (a dead pad can take the whole HID timeout to refuse); if that
+	// fails too they are remembered and saved once it reconnects, unless it
+	// was unplugged meanwhile.
+	void DropPad(const string& path)
+	{
+		auto it = myPads.find(path);
+		if (it == myPads.end())
+			return;
+		it->second->StartSave();
+		myRetiring.push_back({path, std::move(it->second)});
+		myPads.erase(it);
+	}
 
   private:
+	struct Retiring
+	{
+		DevicePath path;
+		unique_ptr<PadDevice> pad;
+	};
+
 	map<DevicePath, DeviceConnection> devices;
 	std::set<DevicePath> unsavedPaths;
 
 	map<DevicePath, unique_ptr<PadDevice>> myPads;
+	vector<Retiring> myRetiring; // dropped, their last save still running
 };
 
 // ====================================================================================================================
@@ -447,9 +520,17 @@ void Device::Update()
 {
 	DeviceChanges changes = 0;
 
-	// Poll every pad. All hidapi access happens here on the device-I/O thread.
+	// Pads connected in the background, finished saves.
+	if (connectionManager->Collect())
+		changes |= DCF_DEVICE;
+
+	// Poll every pad. HID access happens here on the device-I/O thread, except
+	// for a pad's background save or connect (see PadDevice::StartSave).
 	for (PadDevice* device : connectionManager->Pads())
 	{
+		// Its HID handle belongs to the save running in the background.
+		if (device->Saving())
+			continue;
 		const string path = device->Path(); // the device is gone after a disconnect
 		DeviceChanges padChanges = device->PopChanges();
 
@@ -463,14 +544,11 @@ void Device::Update()
 		changes |= padChanges;
 	}
 
-	// At most one save per tick: the firmware writes its EEPROM inside the
-	// request, which can block this thread (and so every pad) for up to a second.
+	// In the background: the firmware writes its EEPROM inside the request,
+	// which can take a second or more, and must stall only that pad.
 	for (PadDevice* device : connectionManager->Pads())
 		if (device->SaveDue())
-		{
-			device->SaveChanges();
-			break;
-		}
+			device->StartSave();
 
 	FollowPlayerRenames(Players::TakeRenames());
 
@@ -502,6 +580,7 @@ void Device::PublishSnapshot()
 		snapshot.featureLights = pad.featureLights;
 		snapshot.unsaved = device->HasUnsavedChanges();
 		snapshot.saveFailed = device->SaveFailed();
+		snapshot.saving = device->Saving();
 
 		snapshot.sensors.reserve(pad.numSensors);
 		for (int i = 0; i < pad.numSensors; ++i)
@@ -563,6 +642,7 @@ void Device::SnapshotToJson(const SensorSnapshot& snapshot, json& j)
 	j["featureLights"] = snapshot.featureLights;
 	j["unsaved"] = snapshot.unsaved;
 	j["saveFailed"] = snapshot.saveFailed;
+	j["saving"] = snapshot.saving;
 	j["sensors"] = json::array();
 
 	// Values are averages over the tick, so quantize them to the device's own
@@ -582,6 +662,7 @@ void Device::SnapshotToJson(const SensorSnapshot& snapshot, json& j)
 		sensor["resistorValue"] = s.resistorValue;
 		sensor["button"] = s.button;
 		sensor["pressed"] = s.pressed;
+		sensor["disabled"] = (s.flags & SensorReport::ADC_DISABLED) != 0; // the firmware doesn't read it
 		j["sensors"].push_back(std::move(sensor));
 	}
 }
@@ -702,7 +783,7 @@ static void RenamePad(const std::string& from, const std::string& to)
 	gPadStates.erase(from);
 	gPadStates.erase(to);
 	gPadStatesDirty = true;
-	Players::RequestRecount();
+	Players::RequestRecount(); // every player's counts are keyed by pad name
 	std::printf("Pad renamed '%s' -> '%s'\n", from.c_str(), to.c_str());
 }
 
@@ -817,10 +898,12 @@ static bool HasString(const json& op, const char* key)
 }
 
 // Why a profile op's name or description can't be stored, or "".
-static std::string TooLong(const json& op)
+static std::string BadText(const json& op)
 {
 	if (HasString(op, "name") && op["name"].get_ref<const std::string&>().size() > Profiles::MAX_NAME_BYTES)
 		return fmt::format("the name is longer than {} bytes", Profiles::MAX_NAME_BYTES);
+	if (HasString(op, "name") && Profiles::Blank(op["name"].get_ref<const std::string&>()))
+		return "the name must not be empty";
 	if (HasString(op, "description") &&
 	    op["description"].get_ref<const std::string&>().size() > Profiles::MAX_DESCRIPTION_BYTES)
 		return fmt::format("the description is longer than {} bytes", Profiles::MAX_DESCRIPTION_BYTES);
@@ -860,13 +943,15 @@ static std::string OpNameOf(const json& j)
 	return "";
 }
 
-// Another connected pad named `name`, or nullptr. Profiles and the pad's
-// selection are stored under its name, so two pads sharing one (e.g. both
-// still on the factory default) would share them too.
+// Another connected pad named `name` (ignoring case), or nullptr. Profiles
+// and the pad's selection are stored under its name, so two pads sharing one
+// (e.g. both still on the factory default) would share them too, and on a
+// case-insensitive filesystem (Windows, macOS) so would "PAD" and "pad".
 static PadDevice* OtherPadNamed(const PadDevice* device, const std::string& name)
 {
+	const std::string folded = Profiles::FoldName(name);
 	for (PadDevice* other : connectionManager->Pads())
-		if (other != device && other->State().name == name)
+		if (other != device && Profiles::FoldName(other->State().name) == folded)
 			return other;
 	return nullptr;
 }
@@ -914,6 +999,18 @@ bool Device::IsConfigure(const json& j)
 
 bool Device::MergeConfigure(json& into, const json& next)
 {
+	// Later lights replace earlier ones: if the pad would refuse the later
+	// (all or nothing), folding would lose the earlier valid ones.
+	if (next.contains("lightRules") || next.contains("ledMappings"))
+	{
+		const PadDevice* pad = connectionManager && HasString(next, "pad")
+		                           ? connectionManager->Find(next["pad"].get<std::string>())
+		                           : nullptr;
+		std::vector<std::optional<LedMapping>> mappings;
+		std::vector<std::optional<LightRule>> rules;
+		if (!pad || !pad->ParseLights(next, mappings, rules))
+			return false;
+	}
 	const bool intoSensors = into.contains("sensors"), nextSensors = next.contains("sensors");
 	if (intoSensors && nextSensors)
 	{
@@ -1033,6 +1130,9 @@ static std::vector<ClientReply> HandleClientMessageImpl(const json& j, OpContext
 		}
 		return done(false, "pad not connected");
 	}
+	// Normally held back while it saves (BusyPads): until then its HID handle
+	// is the save's.
+	device->FinishSave(true);
 	const std::string padName = device->State().name;
 	const int numSensors = device->State().numSensors;
 	const auto padDir = [&] { return Profiles::PlayerPadDir(gProfilesDir, player, padName); };
@@ -1052,14 +1152,14 @@ static std::vector<ClientReply> HandleClientMessageImpl(const json& j, OpContext
 		// This also catches a rename the pad stored differently than asked.
 		if (OtherPadNamed(device, padName))
 			return done(false, fmt::format("another pad here is also named '{}', rename one first", padName));
-		if (const std::string error = TooLong(*op); !error.empty())
+		if (const std::string error = BadText(*op); !error.empty())
 			return done(false, error);
 	}
 
 	auto refreshed = [&] {
 		// Broadcast: other clients may be showing this player's profiles too.
 		replies.push_back({PlayerProfilesJson(player), false});
-		Players::RequestRecount(); // profile counts in the player list
+		Players::RequestRecount(player); // profile counts in the player list
 	};
 	const auto full = [&] {
 		return fmt::format("{} already has {} profiles on this pad", player, Profiles::MAX_PER_PAD);
@@ -1195,7 +1295,7 @@ static std::vector<ClientReply> HandleClientMessageImpl(const json& j, OpContext
 	// been removed, so it is refused like any other unknown value.
 	if (opName == "setReleaseMode")
 	{
-		const int mode = j["releaseMode"].is_number_integer() ? j["releaseMode"].get<int>() : -1;
+		const int64_t mode = j["releaseMode"].is_number_integer() ? j["releaseMode"].get<int64_t>() : -1;
 		if (mode != RELEASE_NONE && mode != RELEASE_INDIVIDUAL)
 			return done(false, "unknown release mode");
 		return device->SetReleaseMode((ReleaseMode)mode) ? done(true, "") : done(false, "the pad didn't accept it");
@@ -1207,6 +1307,8 @@ static std::vector<ClientReply> HandleClientMessageImpl(const json& j, OpContext
 		if (!HasString(j, "name"))
 			return done(false, "needs a name");
 		const std::string newName = j["name"].get<std::string>();
+		if (Profiles::Blank(newName))
+			return done(false, "the name must not be empty");
 		if (OtherPadNamed(device, newName))
 			return done(false, fmt::format("another pad here is already named '{}'", newName));
 		if (const std::string conflict = RenameConflict(padName, newName); !conflict.empty())
@@ -1240,6 +1342,20 @@ void Device::AddPadForTest(std::unique_ptr<PadDevice> pad)
 		connectionManager = std::make_unique<ConnectionManager>();
 	connectionManager->AddPad(std::move(pad));
 	gPadStatesDirty = true;
+}
+
+std::set<std::string> Device::BusyPads()
+{
+	std::set<std::string> busy;
+	for (PadDevice* device : connectionManager ? connectionManager->Pads() : vector<PadDevice*>{})
+		if (device->Saving())
+			busy.insert(device->Path());
+	return busy;
+}
+
+bool Device::BackgroundWorkForTest()
+{
+	return connectionManager && connectionManager->BackgroundWork();
 }
 
 void Device::ResetForTest()
@@ -1376,51 +1492,34 @@ bool PadDevice::LoadProfile(const json& j, DeviceProfileGroups groups)
 		// can't leave the lights half applied. Only slots that differ from the
 		// pad are sent: each report is a HID round-trip that stalls polling of
 		// every pad, and a full rewrite is 32 of them.
-		const bool hasMappings = j.contains("ledMappings") && j["ledMappings"].is_array();
-		const bool hasRules = j.contains("lightRules") && j["lightRules"].is_array();
 		std::vector<std::optional<LedMapping>> mappings;
 		std::vector<std::optional<LightRule>> rules;
-		if ((hasMappings && !ParseSlots(j["ledMappings"], MAX_LED_MAPPINGS, mappings, ParseLedMapping)) ||
-		    (hasRules && !ParseSlots(j["lightRules"], MAX_LIGHT_RULES, rules, ParseLightRule)))
-		{
-			std::printf("LoadProfile :: malformed lights, none applied\n");
+		bool sent = false;
+		if (!ParseLights(j, mappings, rules))
 			ok = false;
-		}
-		else if (!std::all_of(mappings.begin(), mappings.end(),
-		                      [&](const std::optional<LedMapping>& m) { return !m || ValidLedMapping(*m); }))
+		for (int i = 0; i < (int)mappings.size(); ++i)
 		{
-			std::printf("LoadProfile :: LED mapping outside this pad's sensors, rules or LEDs, no lights applied\n");
-			ok = false;
+			const auto current = myLights.ledMappings.find(i);
+			const bool enabled = current != myLights.ledMappings.end();
+			if (!mappings[i] ? enabled : !enabled || !(current->second == *mappings[i]))
+			{
+				ok &= mappings[i] ? SendLedMapping(i, *mappings[i]) : DisableLedMapping(i);
+				sent = true;
+			}
 		}
-		else
+		for (int i = 0; i < (int)rules.size(); ++i)
 		{
-			for (int i = 0; i < (int)mappings.size(); ++i)
+			const auto current = myLights.lightRules.find(i);
+			const bool enabled = current != myLights.lightRules.end();
+			if (!rules[i] ? enabled : !enabled || !(current->second == *rules[i]))
 			{
-				const auto current = myLights.ledMappings.find(i);
-				const bool enabled = current != myLights.ledMappings.end();
-				if (!mappings[i])
-				{
-					if (enabled)
-						ok &= DisableLedMapping(i);
-				}
-				else if (!enabled || !(current->second == *mappings[i]))
-					ok &= SendLedMapping(i, *mappings[i]);
+				ok &= rules[i] ? SendLightRule(i, *rules[i]) : DisableLightRule(i);
+				sent = true;
 			}
-			for (int i = 0; i < (int)rules.size(); ++i)
-			{
-				const auto current = myLights.lightRules.find(i);
-				const bool enabled = current != myLights.lightRules.end();
-				if (!rules[i])
-				{
-					if (enabled)
-						ok &= DisableLightRule(i);
-				}
-				else if (!enabled || !(current->second == *rules[i]))
-					ok &= SendLightRule(i, *rules[i]);
-			}
-			if (hasMappings || hasRules)
-				TriggerChange(DCF_LIGHTS);
 		}
+		// Only then are the published lights stale.
+		if (sent)
+			TriggerChange(DCF_LIGHTS);
 	}
 
 	if (j.contains("sensors") && j["sensors"].is_array())
@@ -1463,6 +1562,28 @@ bool PadDevice::LoadProfile(const json& j, DeviceProfileGroups groups)
 		}
 	}
 	return ok;
+}
+
+bool PadDevice::ParseLights(const json& j, std::vector<std::optional<LedMapping>>& mappings,
+                            std::vector<std::optional<LightRule>>& rules) const
+{
+	const bool hasMappings = j.contains("ledMappings") && j["ledMappings"].is_array();
+	const bool hasRules = j.contains("lightRules") && j["lightRules"].is_array();
+	const auto refuse = [&](const char* why) {
+		std::printf("LoadProfile :: %s, no lights applied\n", why);
+		mappings.clear();
+		rules.clear();
+		return false;
+	};
+	mappings.clear();
+	rules.clear();
+	if ((hasMappings && !ParseSlots(j["ledMappings"], MAX_LED_MAPPINGS, mappings, ParseLedMapping)) ||
+	    (hasRules && !ParseSlots(j["lightRules"], MAX_LIGHT_RULES, rules, ParseLightRule)))
+		return refuse("malformed lights");
+	if (!std::all_of(mappings.begin(), mappings.end(),
+	                 [&](const std::optional<LedMapping>& m) { return !m || ValidLedMapping(*m); }))
+		return refuse("LED mapping outside this pad's sensors, rules or LEDs");
+	return true;
 }
 
 void PadDevice::SaveProfile(json& j, DeviceProfileGroups groups) const

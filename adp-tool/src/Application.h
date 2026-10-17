@@ -4,7 +4,9 @@
 #include <cstdint>
 #include <deque>
 #include <map>
+#include <set>
 #include <string>
+#include <vector>
 #include <nlohmann/json.hpp>
 #include "MSGQ.hpp"
 #include "WebsocketServer.h"
@@ -34,18 +36,35 @@ class Application
 
 	using Clock = std::chrono::steady_clock;
 
+	// Who is owed an answer to a message: its sender and its requestId (null if none).
+	struct Asker
+	{
+		std::string sender;
+		nlohmann::json requestId;
+		bool operator==(const Asker&) const = default;
+	};
+
 	// A parsed inbound message (discarded if it wasn't JSON) and its sender.
 	struct Inbound
 	{
 		std::string sender;
 		nlohmann::json message;
+		std::vector<Asker> folded; // earlier configures folded into this one: answered too
 	};
 
 	// Index of the first backlog message that may be applied at `now`, or
 	// npos. A configure waits until CONFIGURE_INTERVAL after its pad's last
-	// one (`lastConfigure`), and nothing else for that pad overtakes it.
+	// one (`lastConfigure`), a pad in `busy` (saving) waits altogether, and
+	// nothing else for a waiting pad overtakes its first message.
 	static size_t NextDue(const std::deque<Inbound>& backlog,
-	                      const std::map<std::string, Clock::time_point>& lastConfigure, Clock::time_point now);
+	                      const std::map<std::string, Clock::time_point>& lastConfigure,
+	                      const std::set<std::string>& busy, Clock::time_point now);
+
+	// Appends `in` to the backlog. A configure folds into the pad's waiting one
+	// if that is the pad's last message (whichever client sent it: last writer
+	// wins per field), so slider drags that arrive faster than the pad takes
+	// them collapse instead of building up lag. False if the backlog is full.
+	static bool Enqueue(std::deque<Inbound>& backlog, Inbound in);
 
   private:
 	// The last snapshot sent for one pad, also as the struct, so an unchanged
@@ -58,12 +77,12 @@ class Application
 	};
 
 	// One tick of UpdateLoop.
-	static void RunTick(MSGQ<QueueMessage>& queue, WebsocketServer& websocketServer, uint64_t& playersVersion,
-	                    std::map<std::string, Sent>& lastSnapshot, std::deque<Inbound>& backlog,
-	                    std::map<std::string, Clock::time_point>& lastConfigure);
+	void RunTick(MSGQ<QueueMessage>& queue, WebsocketServer& websocketServer);
 
-	static void OnInit();
-	static void OnExit();
-	static void Tick();
+	uint64_t playersVersion = 0;
+	std::map<std::string, Sent> lastSnapshot;               // per pad
+	std::deque<Inbound> backlog;                            // taken off the queue, not handled yet
+	std::map<std::string, Clock::time_point> lastConfigure; // per pad
+	unsigned discoverTick = 0;                              // unsigned: wraps (after ~2 years) instead of overflowing
 };
 } // namespace adp
