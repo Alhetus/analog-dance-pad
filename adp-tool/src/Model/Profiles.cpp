@@ -1,4 +1,5 @@
 #include <Model/Profiles.h>
+#include <Model/Reporter.h> // slot counts
 
 #include <cctype>
 #include <cstdio>
@@ -265,12 +266,23 @@ json Sanitize(const json& profile)
 	    !profile.contains("sensors") || !profile["sensors"].is_array())
 		return nullptr;
 
+	// One entry per sensor (a short array would load only partly), and no
+	// more slots than a pad has, so nothing unbounded reaches the disk.
+	const int sensorCount = profile["sensorCount"].get<int>();
+	if (sensorCount < 0 || sensorCount > SENSOR_COUNT_MAX || (int)profile["sensors"].size() != sensorCount)
+		return nullptr;
+
 	json out = json::object();
-	out["sensorCount"] = profile["sensorCount"];
+	out["sensorCount"] = sensorCount;
 	out["sensors"] = profile["sensors"];
-	for (const char* key : {"lightRules", "ledMappings"})
-		if (profile.contains(key) && profile[key].is_array())
-			out[key] = profile[key];
+	for (const auto& [key, max] : {std::pair{"lightRules", MAX_LIGHT_RULES}, {"ledMappings", MAX_LED_MAPPINGS}})
+	{
+		if (!profile.contains(key) || !profile[key].is_array())
+			continue;
+		if ((int)profile[key].size() > max)
+			return nullptr;
+		out[key] = profile[key];
+	}
 	out["description"] =
 	    profile.contains("description") && profile["description"].is_string() ? profile["description"] : json("");
 	return out;

@@ -272,6 +272,17 @@ PlayerList Scan(const Path& localProfilesDir, const Path& profilesDir, const Pla
 	return list;
 }
 
+PlayerList Recount(const Path& profilesDir, const PlayerList& previous)
+{
+	PlayerList list = previous;
+	if (profilesDir.empty())
+		return list;
+	std::lock_guard<std::mutex> lock(Profiles::StoreMutex());
+	for (auto& p : list.players)
+		p.profileCounts = CountProfiles(profilesDir / "players" / Profiles::U8Path(Profiles::EscapeName(p.name)));
+	return list;
+}
+
 json ToJson(const PlayerList& list)
 {
 	json j;
@@ -291,6 +302,7 @@ static std::shared_ptr<const PlayerList> gList = std::make_shared<PlayerList>();
 static std::atomic<uint64_t> gVersion{0};
 static bool gStop = false;
 static bool gRescan = false;
+static bool gRecount = false;
 static std::thread gThread;
 
 void Start(const Path& localProfilesDir, const Path& profilesDir, std::chrono::seconds interval)
@@ -303,6 +315,9 @@ void Start(const Path& localProfilesDir, const Path& profilesDir, std::chrono::s
 	gThread = std::thread([=] {
 		constexpr auto retryInterval = std::chrono::seconds(5); // while LocalProfiles is unreachable
 		std::unique_lock lock(gMutex);
+		// This thread is the only writer of gList, so a recount can't be
+		// overwritten by the counts of a scan that started before it.
+		bool recountOnly = false;
 		while (!gStop)
 		{
 			const auto prev = gList;
@@ -310,7 +325,7 @@ void Start(const Path& localProfilesDir, const Path& profilesDir, std::chrono::s
 			PlayerList next;
 			try
 			{
-				next = Scan(localProfilesDir, profilesDir, *prev);
+				next = recountOnly ? Recount(profilesDir, *prev) : Scan(localProfilesDir, profilesDir, *prev);
 			}
 			catch (const std::exception& e)
 			{
@@ -329,8 +344,9 @@ void Start(const Path& localProfilesDir, const Path& profilesDir, std::chrono::s
 			gList = std::make_shared<const PlayerList>(std::move(next));
 			if (changed)
 				gVersion++;
-			gCv.wait_for(lock, healthy ? interval : retryInterval, [] { return gStop || gRescan; });
-			gRescan = false;
+			gCv.wait_for(lock, healthy ? interval : retryInterval, [] { return gStop || gRescan || gRecount; });
+			recountOnly = gRecount && !gRescan; // a full scan recounts too
+			gRescan = gRecount = false;
 		}
 	});
 }
@@ -351,6 +367,15 @@ void RequestRescan()
 	{
 		std::lock_guard lock(gMutex);
 		gRescan = true;
+	}
+	gCv.notify_all();
+}
+
+void RequestRecount()
+{
+	{
+		std::lock_guard lock(gMutex);
+		gRecount = true;
 	}
 	gCv.notify_all();
 }

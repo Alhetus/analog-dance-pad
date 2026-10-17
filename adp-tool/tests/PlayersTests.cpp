@@ -5,6 +5,7 @@
 
 #include <Model/Players.h>
 #include <Model/Profiles.h>
+#include <Model/Reporter.h>
 
 using namespace adp;
 namespace fs = std::filesystem;
@@ -157,14 +158,28 @@ TEST_CASE("Scan keeps the last known players while LocalProfiles is unmounted", 
 	CHECK(back.players[0].profileCounts.at("P1") == 1);
 }
 
+TEST_CASE("Recount refreshes profile counts without reading LocalProfiles", "[players]")
+{
+	TempDir store("adp-players-recount-store");
+	Players::PlayerList before;
+	before.localOk = false; // carried over untouched
+	before.players.push_back({"Mike", "00000001", {}, {}});
+	REQUIRE(Profiles::Write(Profiles::PlayerPadDir(store.path, "Mike", "P1"), "a", {{"id", "a"}}));
+
+	const auto after = Players::Recount(store.path, before);
+	CHECK_FALSE(after.localOk);
+	REQUIRE(after.players.size() == 1);
+	CHECK(after.players[0].profileCounts.at("P1") == 1);
+}
+
 TEST_CASE("Sanitize keeps only the storable settings of an imported profile", "[profiles]")
 {
 	const json in = {{"id", "../evil"},         {"name", "x"},
-	                 {"sensorCount", 4},        {"sensors", json::array()},
+	                 {"sensorCount", 2},        {"sensors", json::array({json::object(), json::object()})},
 	                 {"releaseThreshold", 0.5}, {"lightRules", json::array()},
 	                 {"description", 42},       {"junk", "y"}};
 	const json out = Profiles::Sanitize(in);
-	CHECK(out["sensorCount"] == 4);
+	CHECK(out["sensorCount"] == 2);
 	CHECK_FALSE(out.contains("releaseThreshold")); // the removed global release ratio
 	CHECK(out["description"] == "");               // wrong type replaced
 	CHECK_FALSE(out.contains("id"));               // set by the server, never taken from the client
@@ -174,6 +189,13 @@ TEST_CASE("Sanitize keeps only the storable settings of an imported profile", "[
 	CHECK(Profiles::Sanitize({{"sensors", json::array()}}).is_null()); // no sensorCount
 	CHECK(Profiles::Sanitize({{"sensorCount", 4}, {"sensors", "x"}}).is_null());
 	CHECK(Profiles::Sanitize("not an object").is_null());
+	// A sensors array that doesn't match sensorCount would load only partly.
+	CHECK(Profiles::Sanitize({{"sensorCount", 4}, {"sensors", json::array({json::object()})}}).is_null());
+	// More light slots than a pad has.
+	CHECK(Profiles::Sanitize({{"sensorCount", 0},
+	                          {"sensors", json::array()},
+	                          {"lightRules", json(std::vector<json>(MAX_LIGHT_RULES + 1, json::object()))}})
+	          .is_null());
 }
 
 TEST_CASE("Profiles store under a UTF-8 player dir", "[profiles]")

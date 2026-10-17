@@ -61,6 +61,7 @@ struct SensorState
 	int resistorValue = 0;
 	int button = 0; // zero means unmapped.
 	bool pressed = false;
+	int flags = 0; // SensorReport flags (e.g. ADC_DISABLED): device-owned, written back unchanged
 
 	SensorReport ToReport(int index);
 };
@@ -106,8 +107,8 @@ struct SensorSnapshot
 	int releaseMode = 0;
 	int numButtons = 0;
 	bool featureDigipot = false;
+	bool featureLights = false;
 	std::vector<SensorState> sensors;
-	LightsState lights; // for client-side profile drift detection
 };
 
 struct VersionType
@@ -141,9 +142,9 @@ struct PadState
 	int numSensors = 0;
 	double releaseThreshold = 1.0;
 	BoardTypeStruct boardType;
-	bool featureDebug;
-	bool featureDigipot;
-	bool featureLights;
+	bool featureDebug = false;
+	bool featureDigipot = false;
+	bool featureLights = false;
 	VersionType firmwareVersion = versionTypeUnknown;
 	ReleaseMode releaseMode = ReleaseMode::RELEASE_INDIVIDUAL;
 };
@@ -182,8 +183,12 @@ class Device
 	static void DeviceListToJson(json& j);
 
 	// Serializes one pad's lights (msgType 4). Broadcast only on
-	// change / periodically (see TakeLightsDirty), not with every snapshot.
-	static void LightsToJson(const SensorSnapshot& snapshot, json& j);
+	// change (see TakeLightsDirty), not with every snapshot.
+	static void LightsToJson(const std::string& pad, const LightsState& lights, json& j);
+
+	// One lights message per connected pad, read straight from the pads.
+	// Device-I/O thread only.
+	static std::vector<std::string> LightsMessages();
 
 	// Returns true and clears the flag if the pad's lights changed (or a device
 	// was (re)selected) since the last call, so the caller can rebroadcast them.

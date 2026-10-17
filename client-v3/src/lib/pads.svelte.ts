@@ -44,6 +44,7 @@ export interface Snapshot {
 	releaseMode: number; // 0 none, 2 per-sensor (1 = legacy global, treated as per-sensor)
 	numButtons: number; // mappable buttons this pad exposes
 	featureDigipot: boolean; // pad supports per-sensor gain
+	featureLights: boolean; // pad has configurable lights
 	sensors: Sensor[];
 }
 
@@ -580,11 +581,18 @@ class PadsStore {
 			if (Math.abs((a.threshold ?? 0) - b.threshold) > EPS) return true;
 			if (compareRelease && Math.abs((a.releaseThreshold ?? 0) - b.releaseThreshold) > EPS)
 				return true;
-			if (a.resistorValue !== undefined && a.resistorValue !== b.resistorValue) return true;
+			// The server skips gain and lights a pad lacks when loading a profile
+			// (e.g. one copied from another pad), so those can't drift.
+			if (
+				snap.featureDigipot &&
+				a.resistorValue !== undefined &&
+				a.resistorValue !== b.resistorValue
+			)
+				return true;
 		}
 		// Lights arrive in their own (gated) message; only compare once we've got
 		// them, so we don't flag drift before the first lights message lands.
-		const lights = this.pad ? this.conn?.lights[this.pad] : undefined;
+		const lights = this.pad && snap.featureLights ? this.conn?.lights[this.pad] : undefined;
 		if (lights) {
 			if (canon(p.lightRules ?? []) !== canon(lights.lightRules)) return true;
 			if (canon(p.ledMappings ?? []) !== canon(lights.ledMappings)) return true;

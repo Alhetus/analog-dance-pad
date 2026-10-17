@@ -73,6 +73,7 @@ std::mutex& StoreMutex();
 
 // The storable settings of a client-supplied profile (importProfile): keeps
 // only the known fields, each with its expected type. Returns null unless it
-// has a sensorCount and a sensors array. id/name/savedAt are set by the caller.
+// has a sensorCount and a sensors array of that length, and its lights arrays
+// fit a pad's slots. id/name/savedAt are set by the caller.
 json Sanitize(const json& profile);
 } // namespace adp::Profiles

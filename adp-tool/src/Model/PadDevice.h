@@ -156,7 +156,9 @@ class PadDevice
 
 	void UpdateName(const NameReport& report)
 	{
-		if (report.size <= MAX_NAME_LENGTH)
+		// An empty name would put profiles and pad state in the parent dirs
+		// (they are stored under the pad name), so it is replaced too.
+		if (report.size > 0 && report.size <= MAX_NAME_LENGTH)
 		{
 			myPad.name = "";
 			myPad.name.append((const char*)report.name, (size_t)report.size);
@@ -384,6 +386,7 @@ class PadDevice
 		mySensors[sensor.index].threshold = ToNormalizedSensorValue(ReadU16LE(sensor.threshold));
 		mySensors[sensor.index].releaseThreshold = ToNormalizedSensorValue(ReadU16LE(sensor.releaseThreshold));
 		mySensors[sensor.index].resistorValue = sensor.resistorValue;
+		mySensors[sensor.index].flags = ReadU16LE(sensor.flags);
 		mySensors[sensor.index].button = (sensor.buttonMapping >= myPad.numButtons ? 0 : (sensor.buttonMapping + 1));
 	}
 
@@ -418,8 +421,7 @@ class PadDevice
 
 	bool SendName(const char* name)
 	{
-
-		NameReport report;
+		NameReport report{};
 		auto length = std::strlen(name);
 
 		// Profiles and pad state are stored under the pad name, so an empty (or
@@ -547,7 +549,7 @@ class PadDevice
 
 	bool SendPadConfiguration()
 	{
-		PadConfigurationReport report;
+		PadConfigurationReport report{};
 		// The legacy PadConfiguration report has fixed-size arrays; never write
 		// past them even if the device claims more sensors.
 		int count = std::min(myPad.numSensors, SENSOR_COUNT_V1);

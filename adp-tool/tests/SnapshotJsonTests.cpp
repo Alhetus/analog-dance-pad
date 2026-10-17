@@ -13,6 +13,7 @@ TEST_CASE("SnapshotToJson emits the WebSocket contract fields", "[snapshot]")
 	snap.name = "MyPad";
 	snap.pollingRate = 1000;
 	snap.releaseMode = 1;
+	snap.featureLights = true;
 
 	SensorState s;
 	s.threshold = 0.5;
@@ -33,6 +34,8 @@ TEST_CASE("SnapshotToJson emits the WebSocket contract fields", "[snapshot]")
 	CHECK(j["pollingRate"] == 1000);
 	CHECK_FALSE(j.contains("releaseThreshold")); // the removed global release ratio
 	CHECK(j["releaseMode"] == 1);
+	// The client skips lights drift checks on pads without lights.
+	CHECK(j["featureLights"] == true);
 
 	REQUIRE(j["sensors"].is_array());
 	REQUIRE(j["sensors"].size() == 1);
@@ -52,16 +55,16 @@ TEST_CASE("SnapshotToJson emits the WebSocket contract fields", "[snapshot]")
 
 TEST_CASE("LightsToJson emits the lights message in profile shape", "[snapshot]")
 {
-	SensorSnapshot snap;
-	snap.lights.lightRules[0] =
+	LightsState lights;
+	lights.lightRules[0] =
 	    LightRule{true, false, RgbColor(255, 0, 0), RgbColor(0, 0, 0), RgbColor(0, 0, 0), RgbColor(0, 0, 0)};
-	snap.lights.ledMappings[0] = LedMapping{0, 1, 2, 3};
+	lights.ledMappings[0] = LedMapping{0, 1, 2, 3};
 
 	json j;
-	Device::LightsToJson(snap, j);
+	Device::LightsToJson("hid#1", lights, j);
 
 	CHECK(j["msgType"] == 4);
-	CHECK(j.contains("pad"));
+	CHECK(j["pad"] == "hid#1");
 	// Same shape a saved profile uses, so the client can compare field-for-field.
 	REQUIRE(j["lightRules"].is_array());
 	REQUIRE(j["lightRules"].size() == 1);

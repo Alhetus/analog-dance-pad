@@ -98,6 +98,10 @@ int main(int argc, char** argv)
 	     args.present<std::vector<std::string>>("--allowed-origin").value_or(std::vector<std::string>{}))
 		access.allowedOrigins.insert(o);
 	access.token = opt("--token", "");
+	// Browsers let any page open a WebSocket to any host, localhost included.
+	if (access.allowedOrigins.empty() && access.token.empty())
+		std::printf("WARNING: neither --allowed-origin nor --token is set: any web page opened on a machine that can "
+		            "reach this server can drive the pads and edit or delete profiles\n");
 
 	// Must be set before Application (which constructs Device) is created below.
 	adp::Device::SetProfilesDir(adp::Profiles::U8Path(profilesDir));
@@ -137,11 +141,14 @@ int main(int argc, char** argv)
 		std::cout << "Shutting down..." << std::endl;
 		websocketServer.Stop();
 		websocketServerThread.join();
-		adp::Players::Stop();
 
 		failed = websocketServer.Failed();
 		// application's destructor runs here, saving/closing the pads (Device::Shutdown).
 	}
+
+	// Last: joining the scanner can block for a long time on a dead network
+	// share, and the pads must be saved before a supervisor gives up on us.
+	adp::Players::Stop();
 
 	// Required on Windows
 	ix::uninitNetSystem();

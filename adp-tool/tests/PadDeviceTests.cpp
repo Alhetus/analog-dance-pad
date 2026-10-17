@@ -47,6 +47,31 @@ TEST_CASE("PadDevice keeps a valid name and rejects an over-long one", "[paddevi
 		PadDevice pad(rep, "t", longName, makeIdent(1, 0, 8, 2), {}, {}, {});
 		CHECK(pad.State().name == "Unknown");
 	}
+
+	SECTION("empty name falls back to Unknown (profiles are stored under it)")
+	{
+		RecordingBackend* raw = nullptr;
+		auto rep = makeReporter(raw);
+		PadDevice pad(rep, "t", makeName(""), makeIdent(1, 0, 8, 2), {}, {}, {});
+		CHECK(pad.State().name == "Unknown");
+	}
+}
+
+TEST_CASE("PadDevice writes the device's sensor flags back unchanged", "[paddevice]")
+{
+	RecordingBackend* raw = nullptr;
+	auto rep = makeReporter(raw);
+	SensorReport sensor = makeSensor(0, 400, 0);
+	sensor.flags = WriteU16LE(SensorReport::ADC_DISABLED);
+	PadDevice pad(rep, "t", makeName("x"), makeIdent(1, 3, 8, 1), {}, {}, {sensor});
+	raw->sent.clear();
+
+	REQUIRE(pad.SetThreshold(0, 0.5, 0.4));
+	REQUIRE(raw->sent.size() == 1);
+	REQUIRE(raw->sent[0].size() == sizeof(SensorReport));
+	SensorReport out;
+	std::memcpy(&out, raw->sent[0].data(), sizeof(out));
+	CHECK(ReadU16LE(out.flags) == SensorReport::ADC_DISABLED);
 }
 
 TEST_CASE("PadDevice normalizes sensor thresholds and maps buttons", "[paddevice]")

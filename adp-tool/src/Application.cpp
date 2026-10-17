@@ -91,22 +91,20 @@ void Application::UpdateLoop(MSGQ<QueueMessage>& queue, WebsocketServer& websock
 		}
 
 		// Lights (msgType 4), one message per pad, ~1KB each.
-		if (snapshots && Device::TakeLightsDirty())
-		{
-			std::vector<std::string> lights;
-			for (const auto& snapshot : *snapshots)
-			{
-				json lightsJson;
-				Device::LightsToJson(snapshot, lightsJson);
-				lights.push_back(lightsJson.dump());
-			}
-			websocketServer.Publish("lights", std::move(lights));
-		}
+		if (Device::TakeLightsDirty())
+			websocketServer.Publish("lights", Device::LightsMessages());
 
-		// Drain and apply any inbound client messages. This runs on the
-		// device-I/O thread, so device access stays single-threaded.
-		while (auto item = queue.tryPop())
+		// Drain and apply inbound client messages. This runs on the device-I/O
+		// thread, so device access stays single-threaded. Applying one can take
+		// several HID round-trips, so stop after a time budget and leave the rest
+		// for the next tick: polling and snapshots keep their cadence even when
+		// several clients drag sliders at once.
+		const auto drainUntil = std::chrono::steady_clock::now() + std::chrono::milliseconds(8);
+		do
 		{
+			auto item = queue.tryPop();
+			if (!item)
+				break;
 			for (const auto& reply : Device::HandleClientMessage(item->data))
 			{
 				if (reply.toSender)
@@ -114,7 +112,7 @@ void Application::UpdateLoop(MSGQ<QueueMessage>& queue, WebsocketServer& websock
 				else
 					websocketServer.SendMessageToClients(reply.message.dump());
 			}
-		}
+		} while (std::chrono::steady_clock::now() < drainUntil);
 
 		// After a stall (a slow probe), start over rather than racing to catch up.
 		if (const auto now = std::chrono::steady_clock::now(); nextTick < now)
@@ -145,8 +143,8 @@ void Application::Tick()
 	// probes newly-seen (or failed, after a backoff) paths, so connected pads
 	// are not disturbed. Runs before Update() so a new pad is in this tick's
 	// snapshots, which the lights broadcast it triggers relies on.
-	constexpr int discoverInterval = 60;
-	static int discoverTick = 0;
+	constexpr unsigned discoverInterval = 60;
+	static unsigned discoverTick = 0; // unsigned: wraps (after ~2 years) instead of overflowing
 	if (discoverTick++ % discoverInterval == 0)
 	{
 		Device::DiscoverNewDevices();

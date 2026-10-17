@@ -76,6 +76,12 @@ json ToJson(const PlayerList& list);
 void Start(const Path& localProfilesDir, const Path& profilesDir, std::chrono::seconds interval);
 void Stop();
 void RequestRescan();
+// Recounts the stored profiles (local disk) without rescanning LocalProfiles
+// (the share): after a profile op or a pad rename.
+void RequestRecount();
+
+// `previous` with every player's profile counts read again from `profilesDir`.
+PlayerList Recount(const Path& profilesDir, const PlayerList& previous);
 
 // Latest published list (empty before the first scan). Thread-safe.
 std::shared_ptr<const PlayerList> Get();

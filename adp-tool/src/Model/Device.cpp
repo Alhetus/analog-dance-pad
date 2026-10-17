@@ -10,6 +10,7 @@
 #include <ctime>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <filesystem>
 
 #include "hidapi.h"
@@ -36,9 +37,8 @@ struct HidIdentifier
 };
 
 constexpr HidIdentifier HID_IDS[] = {
-    // TODO: document what these correspond to.
-    {0x1209, 0xb196},
-    {0x03eb, 0x204f},
+    {0x1209, 0xb196}, // pid.codes id of the ADP firmware
+    {0x03eb, 0x204f}, // Atmel's LUFA generic-HID id, used by older ADP firmware (other LUFA demos share it)
 };
 
 static_assert(sizeof(float) == sizeof(uint32_t), "32-bit float required");
@@ -78,9 +78,10 @@ std::string RgbColor::ToString() const
 
 SensorReport SensorState::ToReport(int index)
 {
-	SensorReport report;
+	SensorReport report{}; // nothing left uninitialized goes to the device
 
 	report.index = index;
+	report.flags = WriteU16LE(flags);
 	report.threshold = WriteU16LE(ToDeviceSensorValue(threshold));
 	report.releaseThreshold = WriteU16LE(ToDeviceSensorValue(releaseThreshold));
 	report.resistorValue = resistorValue;
@@ -165,6 +166,8 @@ class DeviceConnection
 		// Reporter/BackendHid takes ownership of the handle from here on.
 		reporter = make_shared<Reporter>(handle);
 
+		NameReport nameReport;
+		IdentificationV2Report identificationReport;
 		if (!reporter->Get(nameReport) || !reporter->Get(identificationReport))
 		{
 			SetFailed();
@@ -173,16 +176,6 @@ class DeviceConnection
 
 		state = CS_PROBED;
 		return true;
-	}
-
-	string GetName(bool update = false)
-	{
-		if (update && reporter)
-		{
-			reporter->Get(nameReport);
-		}
-
-		return string((const char*)nameReport.name, nameReport.size);
 	}
 
 	string GetPath() { return path; }
@@ -225,8 +218,6 @@ class DeviceConnection
 
 	// Shared with the PadDevice created from this connection.
 	shared_ptr<Reporter> reporter;
-	NameReport nameReport;
-	IdentificationV2Report identificationReport;
 };
 
 class ConnectionManager
@@ -280,7 +271,7 @@ class ConnectionManager
 				changed |= myPads.contains(it->first);
 				DropPad(it->first);
 
-				std::printf("ConnectionManager :: device removed (%s)\n", it->second.GetName().c_str());
+				std::printf("ConnectionManager :: device removed (%s)\n", it->first.c_str());
 				it = devices.erase(it);
 			}
 			else
@@ -424,22 +415,24 @@ class ConnectionManager
 		else
 		{
 			// Backwards compat
+			// Without it every threshold would start at 0, and the first edit
+			// (which rewrites the whole report) would store those zeros: fail, so
+			// the connect is retried.
 			PadConfigurationReport padConfig;
-			if (reporter->Get(padConfig))
+			if (!reporter->Get(padConfig))
+				return false;
+			for (int i = 0; i < SENSOR_COUNT_V1; ++i)
 			{
-				for (int i = 0; i < SENSOR_COUNT_V1; ++i)
-				{
-					sensorReport.index = i;
-					sensorReport.threshold = padConfig.sensorThresholds[i];
-					auto th = ReadU16LE(padConfig.sensorThresholds[i]);
-					auto rt = ReadF32LE(padConfig.releaseThreshold);
-					sensorReport.releaseThreshold = WriteU16LE(int(th * rt));
-					sensorReport.buttonMapping = padConfig.sensorToButtonMapping[i];
-					sensorReport.resistorValue = 0;
-					sensorReport.flags = WriteU16LE(0);
+				sensorReport.index = i;
+				sensorReport.threshold = padConfig.sensorThresholds[i];
+				auto th = ReadU16LE(padConfig.sensorThresholds[i]);
+				auto rt = ReadF32LE(padConfig.releaseThreshold);
+				sensorReport.releaseThreshold = WriteU16LE(int(th * rt));
+				sensorReport.buttonMapping = padConfig.sensorToButtonMapping[i];
+				sensorReport.resistorValue = 0;
+				sensorReport.flags = WriteU16LE(0);
 
-					sensors.push_back(sensorReport);
-				}
+				sensors.push_back(sensorReport);
 			}
 		}
 
@@ -470,13 +463,6 @@ class ConnectionManager
 	}
 
 	void DropPad(const string& path) { myPads.erase(path); }
-
-	// Refreshes the cached name of a pad's connection (after a rename).
-	void RefreshName(const string& path)
-	{
-		if (devices.contains(path))
-			devices.at(path).GetName(true);
-	}
 
   private:
 	map<DevicePath, DeviceConnection> devices;
@@ -577,8 +563,6 @@ void Device::Update()
 			continue;
 		}
 
-		if (padChanges & DCF_NAME)
-			connectionManager->RefreshName(path);
 		changes |= padChanges;
 	}
 
@@ -607,6 +591,7 @@ void Device::PublishSnapshot()
 		snapshot.releaseMode = (int)pad.releaseMode;
 		snapshot.numButtons = pad.numButtons;
 		snapshot.featureDigipot = pad.featureDigipot;
+		snapshot.featureLights = pad.featureLights;
 
 		snapshot.sensors.reserve(pad.numSensors);
 		for (int i = 0; i < pad.numSensors; ++i)
@@ -614,9 +599,6 @@ void Device::PublishSnapshot()
 			if (const SensorState* s = device->Sensor(i))
 				snapshot.sensors.push_back(*s);
 		}
-
-		if (pad.featureLights)
-			snapshot.lights = device->Lights();
 
 		snapshots->push_back(std::move(snapshot));
 	}
@@ -667,6 +649,7 @@ void Device::SnapshotToJson(const SensorSnapshot& snapshot, json& j)
 	j["releaseMode"] = snapshot.releaseMode;
 	j["numButtons"] = snapshot.numButtons;
 	j["featureDigipot"] = snapshot.featureDigipot;
+	j["featureLights"] = snapshot.featureLights;
 	j["sensors"] = json::array();
 
 	// Values are averages over the tick, so quantize them to the device's own
@@ -689,14 +672,26 @@ void Device::SnapshotToJson(const SensorSnapshot& snapshot, json& j)
 }
 
 // Lights change rarely and are ~1KB, so they travel as their own message
-// (msgType 4) that the WebSocket loop broadcasts only on change / periodically —
-// not with every 60Hz snapshot. Same shape a saved profile uses, so the client
-// can drift-check a loaded profile's lights field-for-field.
-void Device::LightsToJson(const SensorSnapshot& snapshot, json& j)
+// (msgType 4) that the WebSocket loop broadcasts only on change — not with
+// every 60Hz snapshot. Same shape a saved profile uses, so the client can
+// drift-check a loaded profile's lights field-for-field.
+void Device::LightsToJson(const std::string& pad, const LightsState& lights, json& j)
 {
 	j["msgType"] = 4;
-	j["pad"] = snapshot.path;
-	AppendLightsToJson(snapshot.lights, j);
+	j["pad"] = pad;
+	AppendLightsToJson(lights, j);
+}
+
+std::vector<std::string> Device::LightsMessages()
+{
+	std::vector<std::string> out;
+	for (PadDevice* device : connectionManager ? connectionManager->Pads() : vector<PadDevice*>{})
+	{
+		json j;
+		LightsToJson(device->Path(), device->State().featureLights ? device->Lights() : LightsState{}, j);
+		out.push_back(j.dump());
+	}
+	return out;
 }
 
 bool Device::TakeLightsDirty()
@@ -773,12 +768,14 @@ static void RenamePad(const std::string& from, const std::string& to)
 	std::error_code ec;
 	const auto escFrom = Profiles::U8Path(Profiles::EscapeName(from));
 	const auto escTo = Profiles::U8Path(Profiles::EscapeName(to));
-	// Moves one dir, logging (not hiding) why it stayed put.
+	// Moves one dir, logging (not hiding) why it stayed put. On a
+	// case-insensitive filesystem a case-only rename finds dst "existing" as src
+	// itself; that one is moved.
 	auto move = [](const Profiles::Path& src, const Profiles::Path& dst) {
 		std::error_code ec;
 		if (!std::filesystem::exists(src, ec))
 			return;
-		if (std::filesystem::exists(dst, ec))
+		if (std::filesystem::exists(dst, ec) && !std::filesystem::equivalent(src, dst, ec))
 			std::printf("RenamePad :: %s already exists, %s NOT moved\n", Profiles::PathU8(dst).c_str(),
 			            Profiles::PathU8(src).c_str());
 		else if (std::filesystem::rename(src, dst, ec); ec)
@@ -790,7 +787,7 @@ static void RenamePad(const std::string& from, const std::string& to)
 	gPadStates.erase(from);
 	gPadStates.erase(to);
 	gPadStatesDirty = true;
-	Players::RequestRescan();
+	Players::RequestRecount();
 	std::printf("Pad renamed '%s' -> '%s'\n", from.c_str(), to.c_str());
 }
 
@@ -805,7 +802,8 @@ static std::string RenameConflict(const std::string& from, const std::string& to
 	const auto escFrom = Profiles::U8Path(Profiles::EscapeName(from));
 	const auto escTo = Profiles::U8Path(Profiles::EscapeName(to));
 	auto both = [&](const Profiles::Path& a, const Profiles::Path& b) {
-		return std::filesystem::exists(a, ec) && std::filesystem::exists(b, ec);
+		return std::filesystem::exists(a, ec) && std::filesystem::exists(b, ec) &&
+		       !std::filesystem::equivalent(a, b, ec); // a case-only rename on a case-insensitive fs
 	};
 	for (const auto& player : std::filesystem::directory_iterator(gProfilesDir / "players", ec))
 		if (both(player.path() / escFrom, player.path() / escTo))
@@ -863,28 +861,45 @@ static bool HasString(const json& op, const char* key)
 	return op.contains(key) && op[key].is_string();
 }
 
-static std::vector<ClientReply> HandleClientMessageImpl(const std::string& message);
+// The op being handled, so a failure can still be answered.
+struct OpContext
+{
+	std::string op;
+	json pad;
+};
+
+// The answer to an op, for its sender (msgType 8).
+static ClientReply OpResult(const OpContext& ctx, bool ok, const std::string& error, const std::string& name = "")
+{
+	return {{{"msgType", 8}, {"op", ctx.op}, {"pad", ctx.pad}, {"ok", ok}, {"error", error}, {"name", name}}, true};
+}
+
+static std::vector<ClientReply> HandleClientMessageImpl(const std::string& message, OpContext& ctx);
 
 std::vector<ClientReply> Device::HandleClientMessage(const std::string& message)
 {
 	// Directory iteration throws on I/O errors (permissions, a dir removed
 	// mid-walk), and json throws on a client field of an unexpected type;
 	// neither may take down the device thread.
+	OpContext ctx;
 	try
 	{
 		// Profile ops must not race the player scanner renaming players/<name>.
 		std::lock_guard<std::mutex> lock(Profiles::StoreMutex());
-		return HandleClientMessageImpl(message);
+		return HandleClientMessageImpl(message, ctx);
 	}
 	catch (const std::exception& e)
 	{
 		// Filesystem errors, or a json type error from an unexpected field type.
+		// Writes made before the throw stay applied.
 		std::printf("HandleClientMessage :: failed (%s)\n", e.what());
-		return {};
+		if (ctx.op.empty())
+			return {};
+		return {OpResult(ctx, false, "invalid message")};
 	}
 }
 
-static std::vector<ClientReply> HandleClientMessageImpl(const std::string& message)
+static std::vector<ClientReply> HandleClientMessageImpl(const std::string& message, OpContext& ctx)
 {
 	// Runs on the device-I/O thread, so any device mutation triggered here is
 	// single-threaded and safe. Parsing is fully defensive: a malformed or
@@ -933,6 +948,7 @@ static std::vector<ClientReply> HandleClientMessageImpl(const std::string& messa
 		std::printf("HandleClientMessage :: missing or unknown pad, message ignored\n");
 		return replies;
 	}
+	ctx.pad = j["pad"];
 	const std::string padName = device->State().name;
 	const int numSensors = device->State().numSensors;
 	const auto padDir = [&] { return Profiles::PlayerPadDir(gProfilesDir, player, padName); };
@@ -940,7 +956,7 @@ static std::vector<ClientReply> HandleClientMessageImpl(const std::string& messa
 	// ---- Profile ops: {pad, <op>:{player, ...}} on <player>/<this pad>/. ----
 	// Profile files are on local disk, so this I/O on the device thread is fast.
 	// Each op answers its sender with {msgType 8, op, pad, ok, error, name}.
-	std::string opName;
+	std::string& opName = ctx.op;
 	const json* op = nullptr;
 	for (const char* key : {"loadProfile", "saveProfile", "importProfile", "updateProfile", "deleteProfile"})
 	{
@@ -954,14 +970,13 @@ static std::vector<ClientReply> HandleClientMessageImpl(const std::string& messa
 	auto done = [&](bool ok, const std::string& error, const std::string& name = "") {
 		if (!ok)
 			std::printf("%s :: %s\n", opName.c_str(), error.c_str());
-		replies.push_back(
-		    {{{"msgType", 8}, {"op", opName}, {"pad", j["pad"]}, {"ok", ok}, {"error", error}, {"name", name}}, true});
+		replies.push_back(OpResult(ctx, ok, error, name));
 		return replies;
 	};
 	auto refreshed = [&] {
 		// Broadcast: other clients may be showing this player's profiles too.
 		replies.push_back({PlayerProfilesJson(player), false});
-		Players::RequestRescan(); // profile counts in the player list
+		Players::RequestRecount(); // profile counts in the player list
 	};
 	const auto full = [&] {
 		return fmt::format("{} already has {} profiles on this pad", player, Profiles::MAX_PER_PAD);
@@ -969,6 +984,14 @@ static std::vector<ClientReply> HandleClientMessageImpl(const std::string& messa
 
 	if (!opName.empty() && !op)
 		return done(false, "unknown player");
+
+	// Profiles and the pad's selection are stored under its name, so two pads
+	// sharing one (e.g. both still on the factory default) would share them too.
+	// This also catches a rename the pad stored differently than asked.
+	if (!opName.empty())
+		for (PadDevice* other : connectionManager->Pads())
+			if (other != device && other->State().name == padName)
+				return done(false, fmt::format("another pad here is also named '{}', rename one first", padName));
 
 	if (opName == "loadProfile")
 	{
