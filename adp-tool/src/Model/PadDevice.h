@@ -242,6 +242,9 @@ class PadDevice
 				readsLeft = 0;
 				break;
 
+			case ReadDataResult::SKIPPED:
+				break;
+
 			case ReadDataResult::FAILURE:
 				return false;
 			}
@@ -520,16 +523,18 @@ class PadDevice
 		return SendLightRuleReport(report);
 	}
 
-	void CalibrateSensor(int sensorIndex)
+	bool CalibrateSensor(int sensorIndex)
 	{
 		if (!ValidSensorIndex(sensorIndex))
-			return;
+			return false;
 
 		SetPropertyReport report;
 		report.propertyId = WriteU32LE(SetPropertyReport::CALIBRATE_SENSOR);
 		report.propertyValue = WriteU32LE(sensorIndex);
-		if (!myReporter->Send(report))
-			std::printf("CalibrateSensor :: failed to send calibrate command\n");
+		if (myReporter->Send(report))
+			return true;
+		std::printf("CalibrateSensor :: failed to send calibrate command\n");
+		return false;
 	}
 
 	void Reset() { myReporter->SendReset(); }
@@ -567,13 +572,13 @@ class PadDevice
 
 	bool HasUnsavedChanges() { return myHasUnsavedChanges; }
 
+	// Stays unsaved on failure, so the next poll (2s later) retries.
 	void SaveChanges()
 	{
-		if (myHasUnsavedChanges)
-		{
-			myReporter->SendSaveConfiguration();
+		if (myHasUnsavedChanges && myReporter->SendSaveConfiguration())
 			myHasUnsavedChanges = false;
-		}
+		else if (myHasUnsavedChanges)
+			myLastPendingChange = std::chrono::steady_clock::now();
 	}
 
 	const DevicePath& Path() const { return myPath; }
@@ -584,7 +589,7 @@ class PadDevice
 
 	const LightsState& Lights() const { return myLights; }
 
-	const SensorState* Sensor(int index)
+	const SensorState* Sensor(int index) const
 	{
 		if (index < 0 || index >= myPad.numSensors)
 		{
@@ -629,8 +634,9 @@ class PadDevice
 
 	// Apply / capture a client profile against this device. Defined out-of-line
 	// in Device.cpp (they lean on json/fmt/Adp.h, kept out of this header).
-	void LoadProfile(json& j, DeviceProfileGroups groups);
-	void SaveProfile(json& j, DeviceProfileGroups groups);
+	// LoadProfile returns false if any HID write failed.
+	bool LoadProfile(const json& j, DeviceProfileGroups groups);
+	void SaveProfile(json& j, DeviceProfileGroups groups) const;
 
 	void TriggerChange(int type) { myChanges |= type; }
 

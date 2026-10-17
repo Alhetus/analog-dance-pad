@@ -1,14 +1,10 @@
-#include <chrono>
+#include <vector>
 #include <algorithm>
-
-#include <serial/serial.h>
-using namespace serial;
 
 #include <Model/Firmware.h>
 #include <Model/Device.h>
 
 using namespace std;
-using namespace chrono;
 
 namespace adp
 {
@@ -32,15 +28,6 @@ size_t split_str(const std::string& txt, std::vector<std::string>& strs, char ch
 	strs.push_back(txt.substr(initialPos, std::min(pos, txt.size()) - initialPos + 1));
 
 	return strs.size();
-}
-
-void ListSerialPorts(std::vector<std::string>& ports)
-{
-	vector<PortInfo> comPorts = list_ports();
-	for (PortInfo port : comPorts)
-	{
-		ports.push_back(port.port);
-	}
 }
 
 // BoardTypeStruct

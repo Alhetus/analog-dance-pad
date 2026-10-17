@@ -19,12 +19,14 @@
 	let showCalibration = $state(false);
 	let editingIndex = $state<number | null>(null);
 
-	// The selected pad vanished (unplugged / server down): back to the dashboard.
+	// The selected pad vanished (unplugged): back to the dashboard. Only once
+	// the server's device list is in: right after a (re)connect it is empty.
 	$effect(() => {
 		if (
 			pads.step !== 'server' &&
 			pads.step !== 'pad' &&
 			pads.conn?.status === 'open' &&
+			pads.conn.devicesKnown &&
 			!pads.device
 		)
 			pads.goto('pad');
@@ -152,28 +154,6 @@
 		{/if}
 	</main>
 </div>
-
-{#if pads.notice}
-	{@const notice = pads.notice}
-	<div
-		role="status"
-		class="bg-card fixed bottom-6 left-1/2 flex -translate-x-1/2 items-center gap-3 rounded-full px-5 py-3 shadow-lg ring-1 {notice.ok
-			? 'ring-foreground/10'
-			: 'ring-destructive text-destructive'}"
-	>
-		<span>{notice.text}</span>
-		{#if notice.ok && notice.op === 'loadProfile'}
-			<Button
-				variant="link"
-				size="sm"
-				onclick={() => {
-					pads.notice = null;
-					pads.goto('profile');
-				}}>Change</Button
-			>
-		{/if}
-	</div>
-{/if}
 
 {#if editing}
 	<SensorEditor

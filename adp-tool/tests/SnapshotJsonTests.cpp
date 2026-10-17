@@ -1,4 +1,5 @@
 #include <catch2/catch_test_macros.hpp>
+#include <cmath>
 
 #include <Model/Device.h>
 
@@ -80,4 +81,24 @@ TEST_CASE("SnapshotToJson emits an empty array when there are no sensors", "[sna
 
 	REQUIRE(j["sensors"].is_array());
 	CHECK(j["sensors"].empty());
+}
+
+TEST_CASE("SnapshotToJson quantizes values so a resting pad serializes identically", "[snapshot]")
+{
+	SensorSnapshot snap;
+	SensorState s;
+	s.threshold = 425.0 / MAX_SENSOR_VALUE;
+	s.value = 100.2 / MAX_SENSOR_VALUE; // an average over the tick
+	snap.sensors.push_back(s);
+	json a;
+	Device::SnapshotToJson(snap, a);
+
+	snap.sensors[0].value = 99.9 / MAX_SENSOR_VALUE; // the same device value, rounded
+	json b;
+	Device::SnapshotToJson(snap, b);
+
+	CHECK(a.dump() == b.dump());
+	CHECK(a["sensors"][0]["value"] == 0.1176); // 100/850, 4 decimals
+	// 4 decimals still map back to the exact device threshold.
+	CHECK(std::lround(a["sensors"][0]["threshold"].get<double>() * MAX_SENSOR_VALUE) == 425);
 }

@@ -50,7 +50,7 @@ TEST_CASE("Get(SensorValuesReport) maps zero bytes to NO_DATA", "[reporter]")
 	CHECK(rep.Get(out, 4) == ReadDataResult::NO_DATA);
 }
 
-TEST_CASE("Get(SensorValuesReport) maps wrong/negative size to FAILURE", "[reporter]")
+TEST_CASE("Get(SensorValuesReport) skips foreign reports, fails only on a HID error", "[reporter]")
 {
 	const int numSensors = 4;
 	const int expected = (int)sizeof(uint8_t) + (int)sizeof(uint16_le) + (int)sizeof(uint16_le) * numSensors;
@@ -64,7 +64,20 @@ TEST_CASE("Get(SensorValuesReport) maps wrong/negative size to FAILURE", "[repor
 		Reporter rep(std::move(be));
 
 		SensorValuesReport out;
-		CHECK(rep.Get(out, numSensors) == ReadDataResult::FAILURE);
+		CHECK(rep.Get(out, numSensors) == ReadDataResult::SKIPPED);
+	}
+
+	SECTION("right size, another report id")
+	{
+		RecordingBackend* raw = nullptr;
+		auto be = makeBackend(raw);
+		SensorValuesReport in;
+		in.reportId = REPORT_UNUSED_JOYSTICK;
+		raw->QueueRead(&in, sizeof(in), expected);
+		Reporter rep(std::move(be));
+
+		SensorValuesReport out;
+		CHECK(rep.Get(out, numSensors) == ReadDataResult::SKIPPED);
 	}
 
 	SECTION("negative (HID error)")

@@ -1,4 +1,5 @@
 import { browser } from '$app/environment';
+import { untrack } from 'svelte';
 import serversConfig from './servers.config.json';
 
 // ---- Protocol types (see adp-tool Device.cpp / Players.cpp) ----
@@ -87,23 +88,33 @@ export interface Profile {
 	ledMappings?: LedMapping[];
 }
 
-export type ProfileOp =
-	'loadProfile' | 'saveProfile' | 'importProfile' | 'updateProfile' | 'deleteProfile';
+/** Ops the server answers with a result (msgType 8). `configure` (sensor and
+ * lights edits) is answered only when it fails. */
+export type Op =
+	| 'loadProfile'
+	| 'saveProfile'
+	| 'importProfile'
+	| 'updateProfile'
+	| 'deleteProfile'
+	| 'rename'
+	| 'setReleaseMode'
+	| 'calibrateSensor'
+	| 'configure';
 
-/** The server's answer to one of this client's profile ops (msgType 8). */
+/** The server's answer to one of this client's ops (msgType 8). */
 export interface OpResult {
-	op: ProfileOp;
+	op: Op;
 	pad: string;
 	ok: boolean;
 	error: string; // '' when ok
-	name: string; // the profile's name, when there is one
+	name: string; // the profile's (or, for rename, the pad's) name, when there is one
 }
 
 /** A short-lived message for the user, e.g. an op result. */
 export interface Notice {
 	ok: boolean;
 	text: string;
-	op?: ProfileOp;
+	op?: Op;
 }
 
 export interface Avatar {
@@ -162,6 +173,8 @@ class Conn {
 	readonly name: string;
 	status: 'connecting' | 'open' | 'offline' = $state('connecting');
 	deviceList: DeviceInfo[] = $state([]);
+	/** True once this connection's device list arrived (false while (re)connecting). */
+	devicesKnown = $state(false);
 	/** Replaced (never mutated) per message: raw state skips deep-proxying 60Hz data. */
 	snapshots: Record<string, Snapshot> = $state.raw({});
 	/** Arrival time per pad; not reactive, read alongside `snapshots` and the ticking clock. */
@@ -230,6 +243,7 @@ class Conn {
 			this.#events.snapshot(this, s.pad);
 		} else if (msg.msgType === 2) {
 			this.deviceList = (m as { devices: DeviceInfo[] }).devices;
+			this.devicesKnown = true;
 		} else if (msg.msgType === 3) {
 			const pl = m as { players: Player[]; localProfiles?: boolean };
 			this.players = pl.players;
@@ -254,9 +268,12 @@ class Conn {
 		this.status = 'offline';
 		this.snapshots = {};
 		this.deviceList = [];
+		this.devicesKnown = false;
 		this.lights = {};
 		this.padStates = {};
-		this.avatars = {}; // requests made while down were dropped; ask again on reconnect
+		// Requests made while down were dropped: forget those so they are asked
+		// again, but keep fetched avatars (they can be MBs each).
+		this.avatars = Object.fromEntries(Object.entries(this.avatars).filter(([, a]) => a !== null));
 		this.#scheduleReconnect();
 	}
 
@@ -367,6 +384,20 @@ class PadsStore {
 					c.subscribe(
 						c.endpoint !== this.server ? '' : this.step === 'pad' || !this.pad ? '*' : this.pad
 					);
+			});
+			// Profiles are listed per pad name: after the selected pad is renamed
+			// (here or by another client), list them again under the new name.
+			let lastPad: string | null = null;
+			let lastName: string | undefined;
+			$effect(() => {
+				const name = this.device?.name;
+				const pad = this.pad;
+				untrack(() => {
+					if (name && pad === lastPad && lastName && name !== lastName && this.player)
+						this.#requestProfiles(this.player);
+				});
+				lastPad = pad;
+				lastName = name;
 			});
 		});
 	}
@@ -540,11 +571,15 @@ class PadsStore {
 		const snap = this.activeSnapshot;
 		if (!p || !snap) return false;
 		const n = Math.min(p.sensors.length, snap.sensors.length);
+		// In "None" release mode the pad holds release == threshold whatever the
+		// profile says, so release values aren't compared there.
+		const compareRelease = snap.releaseMode !== 0;
 		for (let i = 0; i < n; i++) {
 			const a = p.sensors[i];
 			const b = snap.sensors[i];
 			if (Math.abs((a.threshold ?? 0) - b.threshold) > EPS) return true;
-			if (Math.abs((a.releaseThreshold ?? 0) - b.releaseThreshold) > EPS) return true;
+			if (compareRelease && Math.abs((a.releaseThreshold ?? 0) - b.releaseThreshold) > EPS)
+				return true;
 			if (a.resistorValue !== undefined && a.resistorValue !== b.resistorValue) return true;
 		}
 		// Lights arrive in their own (gated) message; only compare once we've got
@@ -591,8 +626,13 @@ class PadsStore {
 				? { ok: true, op: r.op, text: OP_DONE[r.op]?.(r.name) ?? 'Done' }
 				: { ok: false, op: r.op, text: `Couldn't ${OP_VERBS[r.op] ?? r.op}: ${r.error}` }
 		);
-		// A new profile is what the pad holds now: on to tuning it.
-		if (r.ok && r.op === 'saveProfile' && r.pad === this.pad && this.step === 'profile')
+		// A loaded or new profile is what the pad holds now: on to tuning it.
+		if (
+			r.ok &&
+			(r.op === 'loadProfile' || r.op === 'saveProfile') &&
+			r.pad === this.pad &&
+			this.step === 'profile'
+		)
 			this.step = 'tune';
 	}
 
@@ -609,7 +649,7 @@ class PadsStore {
 		if (this.#sendPad({ loadProfile: { player: this.player, id } })) this.#clearEdits();
 	}
 
-	/** Saves the pad's settings as a new profile; moves on to tuning once the server confirms. */
+	/** Loads/saves move on to tuning once the server confirms (see #onResult). */
 	saveProfileAs(name: string) {
 		this.#sendPad({ saveProfile: { player: this.player, name } });
 	}
@@ -723,12 +763,26 @@ class PadsStore {
 	}
 
 	#flush() {
+		if (Object.keys(this.#unsent).length === 0) return;
 		const snap = this.activeSnapshot;
-		if (!snap || !this.pad) return; // kept in #unsent for the next flush
 		// Positional array: {} for sensors without new edits. Each patch is a HID
 		// round-trip on the server, so already-sent edits are not repeated.
-		const sensors = snap.sensors.map((_, i) => this.#unsent[i] ?? {});
-		if (this.conn?.send({ pad: this.pad, sensors })) this.#unsent = {};
+		const sent =
+			!!snap &&
+			!!this.pad &&
+			!!this.conn?.send({
+				pad: this.pad,
+				sensors: snap.sensors.map((_, i) => this.#unsent[i] ?? {})
+			});
+		if (!sent) {
+			// Pad stale or socket down: retry until it's back (or the edits are
+			// dropped by a pad/profile change), keeping the overlay up meanwhile.
+			const now = Date.now();
+			for (const k of Object.keys(this.#unsent)) this.#pendingAt[Number(k)] = now;
+			this.#scheduleSend();
+			return;
+		}
+		this.#unsent = {};
 	}
 
 	/** Clear optimistic values the server has caught up to. Call each snapshot. */
@@ -771,20 +825,28 @@ class PadsStore {
 	}
 }
 
-const OP_VERBS: Record<ProfileOp, string> = {
+const OP_VERBS: Record<Op, string> = {
 	loadProfile: 'load the profile',
 	saveProfile: 'save the profile',
 	importProfile: 'copy the profile',
 	updateProfile: 'rename the profile',
-	deleteProfile: 'delete the profile'
+	deleteProfile: 'delete the profile',
+	rename: 'rename the pad',
+	setReleaseMode: 'change the release mode',
+	calibrateSensor: 'calibrate the sensor',
+	configure: 'apply the change'
 };
 
-const OP_DONE: Record<ProfileOp, (name: string) => string> = {
+const OP_DONE: Record<Op, (name: string) => string> = {
 	loadProfile: (n) => `Loaded ${n}`,
 	saveProfile: (n) => `Saved ${n}`,
 	importProfile: (n) => `Copied as ${n}`,
 	updateProfile: (n) => `Renamed to ${n}`,
-	deleteProfile: () => 'Profile deleted'
+	deleteProfile: () => 'Profile deleted',
+	rename: (n) => `Pad renamed to ${n}`,
+	setReleaseMode: () => 'Release mode changed',
+	calibrateSensor: () => 'Sensor calibrated',
+	configure: () => 'Applied'
 };
 
 /** Mapped sensors grouped by button, sorted ascending; empty buttons skipped. */

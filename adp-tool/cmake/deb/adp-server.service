@@ -6,6 +6,11 @@
 #
 # Profiles are stored locally (--profiles-dir, created if missing); only
 # ITGmania's LocalProfiles comes from the network share.
+#
+# Anyone on the LAN can reach :8008, and browsers let any web page open a
+# WebSocket to it. Lock it down with --allowed-origin <the client's origin,
+# e.g. http://cab1:5173> (repeatable) and/or --token <secret> (clients then
+# connect to ws://host:8008/?token=<secret>; put that in servers.config.json).
 [Unit]
 Description=ADP pad server (WebSocket on :8008)
 

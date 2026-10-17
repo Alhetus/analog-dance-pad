@@ -48,7 +48,8 @@ enum class ReadDataResult
 {
 	NO_DATA,
 	SUCCESS,
-	FAILURE,
+	SKIPPED, // a report of another id or size: not ours, read on
+	FAILURE, // the HID read itself failed (device gone)
 };
 
 struct uint16_le

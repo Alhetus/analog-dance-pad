@@ -42,7 +42,8 @@ no in-app editor — the list is fixed per build.
 ```
 
 - Each entry is a full WebSocket URL (`ws://host:port` or `wss://host:port`).
-  The ADP Server defaults to `ws://127.0.0.1:8008`.
+  The ADP Server defaults to `ws://127.0.0.1:8008`. If the server runs with
+  `--token <secret>`, use `ws://host:8008/?token=<secret>`.
 - List multiple endpoints to connect to several servers at once; every device
   found across all of them appears in the pad dropdown, and each endpoint gets a
   connection-status badge on the main page.

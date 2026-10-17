@@ -8,6 +8,7 @@
 #include <chrono>
 #include <thread>
 #include <ctime>
+#include <cmath>
 #include <cstdint>
 #include <filesystem>
 
@@ -17,7 +18,6 @@
 #include <Model/Device.h>
 #include <Model/PadDevice.h>
 #include <Model/Reporter.h>
-#include <Model/Utils.h>
 #include <Model/Firmware.h>
 #include <Model/Wire.h>
 #include <Model/Players.h>
@@ -25,9 +25,6 @@
 
 using namespace std;
 using namespace chrono;
-
-typedef std::function<void(uint8_t reportId, std::vector<uint8_t> data)> HidReadCallback;
-int HID_API_EXPORT HID_API_CALL hid_read_register(HidReadCallback callback);
 
 namespace adp
 {
@@ -92,20 +89,6 @@ SensorReport SensorState::ToReport(int index)
 	return report;
 }
 
-[[maybe_unused]] static void PrintPadConfigurationReport(const PadConfigurationReport& padConfiguration)
-{
-	std::printf("pad configuration [\n");
-	std::printf("  releaseThreshold: %.2f\n", ReadF32LE(padConfiguration.releaseThreshold));
-	std::printf("  sensors: [\n");
-	for (int i = 0; i < SENSOR_COUNT_V1; ++i)
-	{
-		std::printf("    sensorToButtonMapping: %i\n", padConfiguration.sensorToButtonMapping[i]);
-		std::printf("    sensorThresholds: %i\n", ReadU16LE(padConfiguration.sensorThresholds[i]));
-	}
-	std::printf("  ]\n");
-	std::printf("]\n");
-}
-
 static void PrintLightRuleReport(const LightRuleReport& r)
 {
 	std::printf("light rule [\n");
@@ -142,25 +125,6 @@ static void PrintSensorReport(const SensorReport& r)
 	std::printf("]\n");
 }
 
-// ====================================================================================================================
-// Pad device.
-// ====================================================================================================================
-
-typedef string DeviceName;
-
-// ====================================================================================================================
-// Connection manager.
-// ====================================================================================================================
-
-[[maybe_unused]] static bool ContainsDevice(hid_device_info* devices, DevicePath path)
-{
-	for (auto device = devices; device; device = device->next)
-		if (path == device->path)
-			return true;
-
-	return false;
-}
-
 enum ConnectionState
 {
 	CS_UNKNOWN,
@@ -180,9 +144,6 @@ class DeviceConnection
 
 	bool Probe()
 	{
-		if (state == CS_FAILED)
-			return false;
-
 		std::this_thread::sleep_for(std::chrono::milliseconds(5));
 
 		hid_device* handle = hid_open_path(path.c_str());
@@ -236,14 +197,22 @@ class DeviceConnection
 	{
 		state = CS_FAILED;
 		failedAt = std::chrono::steady_clock::now();
+		++failures;
 		reporter.reset();
+		std::printf("DeviceConnection :: %s failed, retrying in %llds\n", path.c_str(),
+		            (long long)RetryDelay().count());
 	}
 
 	// Failed long enough ago to be probed again (e.g. hidraw permissions were
 	// not applied yet when the pad was plugged in, or a transient HID error).
-	bool RetryDue() const
+	bool RetryDue() const { return state == CS_FAILED && std::chrono::steady_clock::now() - failedAt > RetryDelay(); }
+
+	// 5s after the first failure, doubling up to 5 minutes: a pad recovers
+	// quickly, while a matching non-ADP device (0x03eb:0x204f is LUFA's
+	// generic id) stops being probed and logged every few seconds.
+	std::chrono::seconds RetryDelay() const
 	{
-		return state == CS_FAILED && std::chrono::steady_clock::now() - failedAt > std::chrono::seconds(5);
+		return std::min(std::chrono::seconds(5) * (1 << std::min(failures - 1, 6)), std::chrono::seconds(300));
 	}
 
 	bool ConnectStage2();
@@ -251,6 +220,7 @@ class DeviceConnection
   protected:
 	ConnectionState state = CS_UNKNOWN;
 	std::chrono::steady_clock::time_point failedAt;
+	int failures = 0; // consecutive, reset on a successful connect
 	std::string path;
 
 	// Shared with the PadDevice created from this connection.
@@ -267,14 +237,6 @@ class ConnectionManager
 		for (auto& [path, pad] : myPads)
 			pad->SaveChanges();
 	}
-
-	// The pad the static Device::* API currently acts on. Set per pad by
-	// Update() while polling and by HandleClientMessage from the message's `pad`.
-	// ponytail: a current-pad pointer instead of threading a PadDevice& through
-	// the whole static API; safe because only the device-I/O thread touches it.
-	PadDevice* ConnectedDevice() const { return myCurrent; }
-
-	void SetCurrent(PadDevice* pad) { myCurrent = pad; }
 
 	PadDevice* Find(const string& path) const
 	{
@@ -309,8 +271,7 @@ class ConnectionManager
 		std::vector<string> devicePaths;
 		UpdateDeviceMap(devicePaths);
 
-		// Remove any devices that are no longer connected, and forget failed ones
-		// whose backoff is over so they get probed again below.
+		// Remove any devices that are no longer connected.
 		bool changed = false;
 		for (auto it = devices.begin(); it != devices.end();)
 		{
@@ -322,21 +283,19 @@ class ConnectionManager
 				std::printf("ConnectionManager :: device removed (%s)\n", it->second.GetName().c_str());
 				it = devices.erase(it);
 			}
-			else if (it->second.RetryDue())
-				it = devices.erase(it);
 			else
 				++it;
 		}
 
-		// Probe and connect every newly seen pad; all pads are polled every tick.
+		// Probe and connect every newly seen pad, and failed ones whose backoff is
+		// over; all pads are polled every tick.
 		for (auto& path : devicePaths)
 		{
-			if (devices.contains(path))
+			auto [it, isNew] = devices.try_emplace(path, path);
+			if (!isNew && !it->second.RetryDue())
 				continue;
-
-			auto it = devices.emplace(path, path);
-			if (it.first->second.Probe())
-				changed |= it.first->second.ConnectStage2();
+			if (it->second.Probe())
+				changed |= it->second.ConnectStage2();
 		}
 
 		return changed;
@@ -510,15 +469,7 @@ class ConnectionManager
 		DropPad(path);
 	}
 
-	void DropPad(const string& path)
-	{
-		auto it = myPads.find(path);
-		if (it == myPads.end())
-			return;
-		if (myCurrent == it->second.get())
-			myCurrent = nullptr;
-		myPads.erase(it);
-	}
+	void DropPad(const string& path) { myPads.erase(path); }
 
 	// Refreshes the cached name of a pad's connection (after a rename).
 	void RefreshName(const string& path)
@@ -527,40 +478,10 @@ class ConnectionManager
 			devices.at(path).GetName(true);
 	}
 
-	void AddIncompatibleDevice(hid_device_info* device)
-	{
-		if (device->product_string) // Can be null on failure, apparently.
-			myFailedDevices[device->path] = narrow(device->product_string, wcslen(device->product_string));
-	}
-
-	int DeviceNumber() { return (int)devices.size(); }
-
-	string GetDeviceName(int index, bool update = false)
-	{
-		if (index < 0 || (size_t)index >= devices.size())
-			return "";
-
-		auto it = devices.begin();
-		std::advance(it, index);
-		return it->second.GetName(update);
-	}
-
-	string GetDevicePath(int index)
-	{
-		if (index < 0 || (size_t)index >= devices.size())
-			return "";
-
-		auto it = devices.begin();
-		std::advance(it, index);
-		return it->first;
-	}
-
   private:
 	map<DevicePath, DeviceConnection> devices;
 
 	map<DevicePath, unique_ptr<PadDevice>> myPads;
-	PadDevice* myCurrent = nullptr;
-	map<DevicePath, DeviceName> myFailedDevices;
 };
 
 // ====================================================================================================================
@@ -606,7 +527,11 @@ bool DeviceConnection::ConnectStage2()
 	for (int tries = 0; tries < 3; ++tries)
 	{
 		if (connectionManager->ConnectToDeviceStage2(*this))
+		{
+			state = CS_CONNECTED;
+			failures = 0;
 			return true;
+		}
 
 		std::printf("DeviceConnection :: ConnectStage2 failed (%d)\n", tries);
 		std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -635,14 +560,13 @@ void Device::Shutdown()
 	hid_exit();
 }
 
-DeviceChanges Device::Update()
+void Device::Update()
 {
 	DeviceChanges changes = 0;
 
 	// Poll every pad. All hidapi access happens here on the device-I/O thread.
 	for (PadDevice* device : connectionManager->Pads())
 	{
-		connectionManager->SetCurrent(device);
 		const string path = device->Path(); // the device is gone after a disconnect
 		DeviceChanges padChanges = device->PopChanges();
 
@@ -657,7 +581,6 @@ DeviceChanges Device::Update()
 			connectionManager->RefreshName(path);
 		changes |= padChanges;
 	}
-	connectionManager->SetCurrent(nullptr);
 
 	// A lights change (or pads coming/going) means the gated messages are stale.
 	if (changes & (DCF_LIGHTS | DCF_DEVICE))
@@ -667,32 +590,6 @@ DeviceChanges Device::Update()
 
 	// Publish the latest immutable snapshots for the WebSocket side to read.
 	PublishSnapshot();
-
-	return changes;
-}
-
-int Device::PollingRate()
-{
-	auto device = connectionManager->ConnectedDevice();
-	return device ? device->PollingRate() : 0;
-}
-
-const PadState* Device::Pad()
-{
-	auto device = connectionManager->ConnectedDevice();
-	return device ? &device->State() : nullptr;
-}
-
-const LightsState* Device::Lights()
-{
-	auto device = connectionManager->ConnectedDevice();
-	return device ? &device->Lights() : nullptr;
-}
-
-const SensorState* Device::Sensor(int sensorIndex)
-{
-	auto device = connectionManager->ConnectedDevice();
-	return device ? device->Sensor(sensorIndex) : nullptr;
 }
 
 void Device::PublishSnapshot()
@@ -772,12 +669,18 @@ void Device::SnapshotToJson(const SensorSnapshot& snapshot, json& j)
 	j["featureDigipot"] = snapshot.featureDigipot;
 	j["sensors"] = json::array();
 
+	// Values are averages over the tick, so quantize them to the device's own
+	// resolution (1/MAX_SENSOR_VALUE): a pad at rest then serializes identically
+	// tick to tick (letting the loop skip unchanged snapshots), and 4 decimals
+	// replace 17 digits. 4 decimals still round-trip every device value exactly.
+	const auto q = [](double v) { return std::round(v * 1e4) / 1e4; };
+	const auto device = [](double v) { return std::round(v * MAX_SENSOR_VALUE) / MAX_SENSOR_VALUE; };
 	for (const SensorState& s : snapshot.sensors)
 	{
 		json sensor;
-		sensor["threshold"] = s.threshold;
-		sensor["releaseThreshold"] = s.releaseThreshold;
-		sensor["value"] = s.value;
+		sensor["threshold"] = q(s.threshold);
+		sensor["releaseThreshold"] = q(s.releaseThreshold);
+		sensor["value"] = q(device(s.value));
 		sensor["resistorValue"] = s.resistorValue;
 		sensor["button"] = s.button;
 		sensor["pressed"] = s.pressed;
@@ -891,6 +794,28 @@ static void RenamePad(const std::string& from, const std::string& to)
 	std::printf("Pad renamed '%s' -> '%s'\n", from.c_str(), to.c_str());
 }
 
+// Why renaming pad `from` to `to` would lose data, or "" if it is safe: both
+// names hold a profile dir for the same player (or both a pad state), so
+// RenamePad couldn't move them. Taking over the name of a pad whose data is
+// on disk is fine when this pad has none of its own (a replaced board
+// adopting the old pad's profiles).
+static std::string RenameConflict(const std::string& from, const std::string& to)
+{
+	std::error_code ec;
+	const auto escFrom = Profiles::U8Path(Profiles::EscapeName(from));
+	const auto escTo = Profiles::U8Path(Profiles::EscapeName(to));
+	auto both = [&](const Profiles::Path& a, const Profiles::Path& b) {
+		return std::filesystem::exists(a, ec) && std::filesystem::exists(b, ec);
+	};
+	for (const auto& player : std::filesystem::directory_iterator(gProfilesDir / "players", ec))
+		if (both(player.path() / escFrom, player.path() / escTo))
+			return fmt::format("{} has profiles on both '{}' and '{}'",
+			                   Profiles::UnescapeName(Profiles::PathU8(player.path().filename())), from, to);
+	if (both(PadStateDir(from), PadStateDir(to)))
+		return fmt::format("a pad named '{}' has been used here before", to);
+	return "";
+}
+
 // ---- Client messages ---------------------------------------------------------------------------------------------
 
 // All of one player's stored profiles, grouped by pad name (msgType 6).
@@ -961,7 +886,6 @@ std::vector<ClientReply> Device::HandleClientMessage(const std::string& message)
 
 static std::vector<ClientReply> HandleClientMessageImpl(const std::string& message)
 {
-	using D = Device;
 	// Runs on the device-I/O thread, so any device mutation triggered here is
 	// single-threaded and safe. Parsing is fully defensive: a malformed or
 	// unrecognized message is logged and ignored, never fatal. Returns the
@@ -1009,12 +933,6 @@ static std::vector<ClientReply> HandleClientMessageImpl(const std::string& messa
 		std::printf("HandleClientMessage :: missing or unknown pad, message ignored\n");
 		return replies;
 	}
-	connectionManager->SetCurrent(device);
-	struct ClearCurrent
-	{
-		~ClearCurrent() { connectionManager->SetCurrent(nullptr); }
-	} clearCurrent;
-
 	const std::string padName = device->State().name;
 	const int numSensors = device->State().numSensors;
 	const auto padDir = [&] { return Profiles::PlayerPadDir(gProfilesDir, player, padName); };
@@ -1059,9 +977,11 @@ static std::vector<ClientReply> HandleClientMessageImpl(const std::string& messa
 			return done(false, "unknown profile");
 		if (blob.value("sensorCount", -1) != numSensors)
 			return done(false, "profile is for a pad with a different number of sensors");
-		D::LoadProfile(blob, PROFILE_GROUPS);
+		const bool applied = device->LoadProfile(blob, PROFILE_GROUPS);
+		// Select it even if a write failed: most of it is on the pad, and the
+		// client shows the drift.
 		SetPadSelection(padName, player, blob.value("id", std::string()), blob.value("name", std::string()));
-		return done(true, "", blob.value("name", std::string()));
+		return done(applied, applied ? "" : "not every setting reached the pad", blob.value("name", std::string()));
 	}
 
 	// Capture this pad's live settings. Two forms:
@@ -1092,7 +1012,7 @@ static std::vector<ClientReply> HandleClientMessageImpl(const std::string& messa
 			return done(false, "needs a name or id");
 
 		json blob;
-		D::SaveProfile(blob, PROFILE_GROUPS); // capture this pad
+		device->SaveProfile(blob, PROFILE_GROUPS); // capture this pad
 		blob["id"] = id;
 		blob["name"] = name;
 		blob["description"] = description;
@@ -1174,164 +1094,62 @@ static std::vector<ClientReply> HandleClientMessageImpl(const std::string& messa
 		return done(true, "");
 	}
 
-	// ---- Device ops. ----
+	// ---- Device ops. Results (msgType 8) go to the sender like profile ops. ----
 
 	// Release mode: 0 = none, 2 = individual (ReleaseMode enum). Global (1) has
 	// been removed, so it is refused like any other unknown value.
-	if (j.contains("releaseMode") && j["releaseMode"].is_number_integer())
+	if (j.contains("releaseMode"))
 	{
-		int mode = j["releaseMode"].get<int>();
-		if (mode == RELEASE_NONE || mode == RELEASE_INDIVIDUAL)
-			D::SetReleaseMode((ReleaseMode)mode);
-		else
-			std::printf("releaseMode :: out of range, ignored\n");
-		return replies;
+		opName = "setReleaseMode";
+		const int mode = j["releaseMode"].is_number_integer() ? j["releaseMode"].get<int>() : -1;
+		if (mode != RELEASE_NONE && mode != RELEASE_INDIVIDUAL)
+			return done(false, "unknown release mode");
+		return device->SetReleaseMode((ReleaseMode)mode) ? done(true, "") : done(false, "the pad didn't accept it");
 	}
 
-	// Recalibrate one sensor's baseline; out-of-range indices are rejected downstream.
-	if (j.contains("calibrateSensor") && j["calibrateSensor"].is_number_integer())
+	if (j.contains("calibrateSensor"))
 	{
-		D::CalibrateSensor(j["calibrateSensor"].get<int>());
-		return replies;
+		opName = "calibrateSensor";
+		if (!j["calibrateSensor"].is_number_integer() || !device->ValidSensorIndex(j["calibrateSensor"].get<int>()))
+			return done(false, "unknown sensor");
+		return device->CalibrateSensor(j["calibrateSensor"].get<int>()) ? done(true, "")
+		                                                                : done(false, "the pad didn't accept it");
 	}
 
-	// A configuration update reuses the hardened LoadProfile path, which
-	// validates every index and group before touching device state.
-	if (j.contains("sensors") || j.contains("name") || j.contains("lightRules"))
+	// A rename. Profiles and pad state are keyed by pad name and move along.
+	if (j.contains("name"))
 	{
-		// Profiles and pad state are keyed by pad name, so two pads on this server
-		// with one name would share them: refuse such a rename.
-		if (HasString(j, "name"))
-		{
-			const std::string newName = j["name"].get<std::string>();
-			for (PadDevice* other : connectionManager->Pads())
-			{
-				if (other != device && other->State().name == newName)
-				{
-					std::printf("HandleClientMessage :: pad name '%s' already in use, rename refused\n",
-					            newName.c_str());
-					j.erase("name");
-					break;
-				}
-			}
-		}
-		try
-		{
-			D::LoadProfile(j, DGP_ALL);
-		}
-		catch (const std::exception& e)
-		{
-			std::printf("HandleClientMessage :: failed to apply config (%s)\n", e.what());
-		}
-		// Profiles are stored per pad name, so a rename carries them along.
+		opName = "rename";
+		if (!HasString(j, "name"))
+			return done(false, "needs a name");
+		const std::string newName = j["name"].get<std::string>();
+		for (PadDevice* other : connectionManager->Pads())
+			if (other != device && other->State().name == newName)
+				return done(false, fmt::format("another pad here is already named '{}'", newName));
+		if (const std::string conflict = RenameConflict(padName, newName); !conflict.empty())
+			return done(false, conflict);
+		if (!device->SendName(newName.c_str()))
+			return done(false, "the pad didn't accept the name");
 		RenamePad(padName, device->State().name);
+		return done(true, "", device->State().name);
+	}
+
+	// A configuration update ({sensors} and/or {lightRules, ledMappings})
+	// reuses the hardened LoadProfile path, which validates every index and
+	// group before touching device state. Sent at slider-drag rate, so only a
+	// failure is answered.
+	if (j.contains("sensors") || j.contains("lightRules") || j.contains("ledMappings"))
+	{
+		opName = "configure";
+		if (j.contains("sensors") && (!j["sensors"].is_array() || (int)j["sensors"].size() != numSensors))
+			return done(false, fmt::format("expected {} sensors", numSensors));
+		if (!device->LoadProfile(j, (DeviceProfileGroups)(DGP_ALL & ~DPG_DEVICE)))
+			return done(false, "not every setting reached the pad");
 		return replies;
 	}
 
 	std::printf("HandleClientMessage :: unhandled message: %s\n", message.c_str());
 	return replies;
-}
-
-std::string Device::ReadDebug()
-{
-	auto device = connectionManager->ConnectedDevice();
-	return device ? device->ReadDebug() : "";
-}
-
-bool Device::HasUnsavedChanges()
-{
-	auto device = connectionManager->ConnectedDevice();
-	return device ? device->HasUnsavedChanges() : false;
-}
-
-bool Device::SetThreshold(int sensorIndex, double threshold, double releaseThreshold)
-{
-	auto device = connectionManager->ConnectedDevice();
-	return device ? device->SetThreshold(sensorIndex, threshold, releaseThreshold) : false;
-}
-
-bool Device::SetAdcConfig(int sensorIndex, int resistorValue)
-{
-	auto device = connectionManager->ConnectedDevice();
-	return device ? device->SetAdcConfig(sensorIndex, resistorValue) : false;
-}
-
-bool Device::SetButtonMapping(int sensorIndex, int button)
-{
-	auto device = connectionManager->ConnectedDevice();
-	return device ? device->SetButtonMapping(sensorIndex, button) : false;
-}
-
-bool Device::SetDeviceName(const char* name)
-{
-	auto device = connectionManager->ConnectedDevice();
-	return device ? device->SendName(name) : false;
-}
-
-bool Device::SendLedMapping(int ledMappingIndex, LedMapping mapping)
-{
-	auto device = connectionManager->ConnectedDevice();
-	return device ? device->SendLedMapping(ledMappingIndex, mapping) : false;
-}
-
-bool Device::DisableLedMapping(int ledMappingIndex)
-{
-	auto device = connectionManager->ConnectedDevice();
-	return device ? device->DisableLedMapping(ledMappingIndex) : false;
-}
-
-bool Device::SendLightRule(int lightRuleIndex, LightRule rule)
-{
-	auto device = connectionManager->ConnectedDevice();
-	return device ? device->SendLightRule(lightRuleIndex, rule) : false;
-}
-
-bool Device::DisableLightRule(int lightRuleIndex)
-{
-	auto device = connectionManager->ConnectedDevice();
-	return device ? device->DisableLightRule(lightRuleIndex) : false;
-}
-
-void Device::CalibrateSensor(int sensorIndex)
-{
-	auto device = connectionManager->ConnectedDevice();
-	if (device)
-	{
-		device->CalibrateSensor(sensorIndex);
-	}
-}
-
-bool Device::SetReleaseMode(ReleaseMode mode)
-{
-	auto device = connectionManager->ConnectedDevice();
-
-	if (device)
-	{
-		return device->SetReleaseMode(mode);
-	}
-
-	return false;
-}
-
-void Device::SendDeviceReset()
-{
-	auto device = connectionManager->ConnectedDevice();
-	if (device)
-		device->Reset();
-}
-
-void Device::SendFactoryReset()
-{
-	auto device = connectionManager->ConnectedDevice();
-	if (device)
-		device->FactoryReset();
-}
-
-void Device::SaveChanges()
-{
-	auto device = connectionManager->ConnectedDevice();
-	if (device)
-		device->SaveChanges();
 }
 
 void Device::DiscoverNewDevices()
@@ -1342,27 +1160,6 @@ void Device::DiscoverNewDevices()
 		gLightsDirty = true;
 		gPadStatesDirty = true;
 	}
-}
-
-int Device::DeviceNumber()
-{
-	if (!connectionManager)
-		return 0;
-	return connectionManager->DeviceNumber();
-}
-
-string Device::GetDeviceName(int index)
-{
-	if (!connectionManager)
-		return "";
-	return connectionManager->GetDeviceName(index);
-}
-
-string Device::GetDevicePath(int index)
-{
-	if (!connectionManager)
-		return "";
-	return connectionManager->GetDevicePath(index);
 }
 
 void Device::DeviceListToJson(json& j)
@@ -1391,9 +1188,10 @@ void Device::SetProfilesDir(const std::filesystem::path& dir)
 	gPadStatesDirty = true;
 }
 
-void PadDevice::LoadProfile(json& j, DeviceProfileGroups groups)
+bool PadDevice::LoadProfile(const json& j, DeviceProfileGroups groups)
 {
 	const PadState* pad = &myPad;
+	bool ok = true;
 
 	if ((groups & DPG_LIGHTS) && pad->featureLights)
 	{
@@ -1415,7 +1213,7 @@ void PadDevice::LoadProfile(json& j, DeviceProfileGroups groups)
 				if (i >= (int)ledMappings.size() || !ledMappings[i].is_object())
 				{
 					if (enabled)
-						DisableLedMapping(i);
+						ok &= DisableLedMapping(i);
 					continue;
 				}
 
@@ -1423,7 +1221,7 @@ void PadDevice::LoadProfile(json& j, DeviceProfileGroups groups)
 				LedMapping lm = {value.value("lightRuleIndex", 0), value.value("sensorIndex", 0),
 				                 value.value("ledIndexBegin", 0), value.value("ledIndexEnd", 0)};
 				if (!enabled || !(current->second == lm))
-					SendLedMapping(i, lm);
+					ok &= SendLedMapping(i, lm);
 			}
 		}
 
@@ -1438,7 +1236,7 @@ void PadDevice::LoadProfile(json& j, DeviceProfileGroups groups)
 				if (i >= (int)lightRules.size() || !lightRules[i].is_object())
 				{
 					if (enabled)
-						DisableLightRule(i);
+						ok &= DisableLightRule(i);
 					continue;
 				}
 
@@ -1452,7 +1250,7 @@ void PadDevice::LoadProfile(json& j, DeviceProfileGroups groups)
 				    value.value("fadeOn", false), value.value("fadeOff", false), color("onColor"), color("offColor"),
 				    color("onFadeColor"),         color("offFadeColor")};
 				if (!enabled || !(current->second == lr))
-					SendLightRule(i, lr);
+					ok &= SendLightRule(i, lr);
 			}
 		}
 
@@ -1488,7 +1286,7 @@ void PadDevice::LoadProfile(json& j, DeviceProfileGroups groups)
 			if ((groups & DPG_GAIN) && pad->featureDigipot && sensor.contains("resistorValue") &&
 			    sensor["resistorValue"].is_number_integer())
 				want.resistorValue = sensor["resistorValue"].get<int>();
-			SetSensor(idx, want);
+			ok &= SetSensor(idx, want);
 		}
 	}
 
@@ -1496,12 +1294,13 @@ void PadDevice::LoadProfile(json& j, DeviceProfileGroups groups)
 	{
 		if (j.contains("name") && j["name"].is_string())
 		{
-			SendName(j["name"].get<string>().c_str());
+			ok &= SendName(j["name"].get<string>().c_str());
 		}
 	}
+	return ok;
 }
 
-void PadDevice::SaveProfile(json& j, DeviceProfileGroups groups)
+void PadDevice::SaveProfile(json& j, DeviceProfileGroups groups) const
 {
 	const PadState* pad = &myPad;
 
@@ -1543,28 +1342,6 @@ void PadDevice::SaveProfile(json& j, DeviceProfileGroups groups)
 	{
 		j["name"] = pad->name;
 	}
-}
-
-void Device::LoadProfile(json& j, DeviceProfileGroups groups)
-{
-	auto device = connectionManager ? connectionManager->ConnectedDevice() : nullptr;
-	if (!device)
-	{
-		std::printf("LoadProfile :: no device connected\n");
-		return;
-	}
-	device->LoadProfile(j, groups);
-}
-
-void Device::SaveProfile(json& j, DeviceProfileGroups groups)
-{
-	auto device = connectionManager ? connectionManager->ConnectedDevice() : nullptr;
-	if (!device)
-	{
-		std::printf("SaveProfile :: no device connected\n");
-		return;
-	}
-	device->SaveProfile(j, groups);
 }
 
 } // namespace adp

@@ -64,25 +64,25 @@ template <typename T> bool Reporter::SendFeatureReport(const T& report, const ch
 template <typename T> ReadDataResult Reporter::ReadData(T& report, const char* name, int expectedSize)
 {
 	uint8_t buffer[MAX_REPORT_SIZE];
-	buffer[0] = report.reportId;
 
 	int bytesRead = backend->read(buffer, sizeof(buffer));
-
-	if (bytesRead >= 0 && (size_t)bytesRead == (size_t)expectedSize)
-	{
-		memcpy(&report, buffer, expectedSize);
-		return ReadDataResult::SUCCESS;
-	}
 
 	if (bytesRead == 0)
 		return ReadDataResult::NO_DATA;
 
 	if (bytesRead < 0)
+	{
 		std::printf("%s :: hid_read failed (%ls)\n", name, backend->error());
-	else
-		std::printf("%s :: unexpected number of bytes read (%i) expected (%i)\n", name, bytesRead, expectedSize);
+		return ReadDataResult::FAILURE;
+	}
 
-	return ReadDataResult::FAILURE;
+	// Anything but our report (another report id on the same interface, or a
+	// size that doesn't match the sensor count) is skipped, not a disconnect.
+	if ((size_t)bytesRead != (size_t)expectedSize || buffer[0] != report.reportId)
+		return ReadDataResult::SKIPPED;
+
+	memcpy(&report, buffer, expectedSize);
+	return ReadDataResult::SUCCESS;
 }
 
 bool Reporter::WriteData(uint8_t reportId, const char* name, bool performErrorCheck)

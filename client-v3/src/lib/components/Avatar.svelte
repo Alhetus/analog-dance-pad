@@ -3,8 +3,24 @@
 
 	let { player, class: klass = 'size-16' }: { player: Player; class?: string } = $props();
 
+	// Avatars can be MBs each, so only fetch the ones scrolled (nearly) into view.
+	let el = $state<HTMLDivElement | null>(null);
+	let visible = $state(false);
+	$effect(() => {
+		if (!el || visible) return;
+		const io = new IntersectionObserver(
+			(entries) => {
+				if (entries.some((e) => e.isIntersecting)) visible = true;
+			},
+			{ rootMargin: '200px' }
+		);
+		io.observe(el);
+		return () => io.disconnect();
+	});
 	// Fetching writes state, so it runs in an effect; the derived only reads.
-	$effect(() => pads.requestAvatar(player));
+	$effect(() => {
+		if (visible) pads.requestAvatar(player);
+	});
 	const avatar = $derived(pads.avatar(player));
 	const initials = $derived(
 		player.name
@@ -17,6 +33,7 @@
 </script>
 
 <div
+	bind:this={el}
 	class="bg-muted text-muted-foreground flex shrink-0 items-center justify-center overflow-hidden rounded-full font-semibold {klass}"
 >
 	{#if avatar?.url && avatar.mime.startsWith('video/')}

@@ -86,9 +86,6 @@ set(IXW_HPP "${IXW_DIR}/IXBench.h"
         "${IXW_DIR}/IXWebSocketTransport.h"
         "${IXW_DIR}/IXWebSocketVersion.h")
 
-list(APPEND IXW_SRC "${IXW_DIR}/IXSocketMbedTLS.cpp")
-list(APPEND IXW_HPP "${IXW_DIR}/IXSocketMbedTLS.h")
-
 source_group("" FILES ${IXW_SRC} ${IXW_HPP})
 
 add_library("ixwebsocket" STATIC ${IXW_SRC} ${IXW_HPP})
@@ -97,22 +94,10 @@ set_property(TARGET "ixwebsocket" PROPERTY CXX_STANDARD 11)
 set_property(TARGET "ixwebsocket" PROPERTY CXX_STANDARD_REQUIRED ON)
 set_property(TARGET "ixwebsocket" PROPERTY CXX_EXTENSIONS OFF)
 
-target_compile_definitions("ixwebsocket" PRIVATE IXWEBSOCKET_USE_TLS)
-target_compile_definitions("ixwebsocket" PRIVATE IXWEBSOCKET_USE_MBED_TLS)
-target_compile_definitions("ixwebsocket" PRIVATE IXWEBSOCKET_USE_MBED_TLS_MIN_VERSION_3)
-set(ENABLE_TESTING OFF CACHE INTERNAL "Don't build tests")
-set(GEN_FILES OFF CACHE INTERNAL "Don't generate files (requires perl and python)")
-# mbedtls defaults MBEDTLS_FATAL_WARNINGS to ON, which appends -Werror to its own
-# build. Newer Clang/GCC add warnings (e.g. -Wunterminated-string-initialization on
-# mbedtls's intentionally NUL-less TLS label arrays) that then break the build. Keep
-# warnings-as-errors first-party only (see the top-level CMakeLists.txt comment) by
-# disabling it for this vendored dependency.
-set(MBEDTLS_FATAL_WARNINGS OFF CACHE INTERNAL "Don't treat mbedtls warnings as errors")
-add_subdirectory("../lib/mbedtls" EXCLUDE_FROM_ALL)
-target_link_libraries("ixwebsocket" mbedtls mbedcrypto mbedx509)
+# Plain ws:// only: built without TLS (no IXWEBSOCKET_USE_TLS, no mbedtls).
 
 if(WIN32)
-    target_link_libraries(ixwebsocket wsock32 ws2_32 shlwapi Crypt32)
+    target_link_libraries(ixwebsocket wsock32 ws2_32 shlwapi)
     target_compile_definitions(ixwebsocket PRIVATE _CRT_SECURE_NO_WARNINGS)
 endif()
 

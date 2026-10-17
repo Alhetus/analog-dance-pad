@@ -17,9 +17,9 @@
 	const full = $derived((profiles?.length ?? 0) >= MAX_PROFILES);
 	const sources = $derived(pads.copySources);
 
+	// The store moves on to tuning once the server confirms the load.
 	function load(p: Profile) {
 		pads.loadProfile(p.id);
-		pads.goto('tune');
 	}
 
 	// A player with exactly one profile here gets it loaded right away (once,

@@ -26,8 +26,10 @@ Application::~Application()
 
 void Application::UpdateLoop(MSGQ<QueueMessage>& queue, WebsocketServer& websocketServer, std::atomic<bool>& running)
 {
-	// ~60Hz update loop, should be enough for the websocket UI.
-	constexpr auto sleep_time = std::chrono::milliseconds(16);
+	// ~60Hz update loop, should be enough for the websocket UI. A fixed
+	// cadence (sleep_until), so the time spent polling doesn't stretch a tick.
+	constexpr auto tickInterval = std::chrono::microseconds(16667);
+	auto nextTick = std::chrono::steady_clock::now();
 
 	uint64_t playersVersion = 0;
 
@@ -44,6 +46,7 @@ void Application::UpdateLoop(MSGQ<QueueMessage>& queue, WebsocketServer& websock
 
 	while (running.load())
 	{
+		nextTick += tickInterval;
 		// Update device data first (discovery + poll + publish snapshots).
 		Tick();
 
@@ -113,7 +116,10 @@ void Application::UpdateLoop(MSGQ<QueueMessage>& queue, WebsocketServer& websock
 			}
 		}
 
-		std::this_thread::sleep_for(sleep_time);
+		// After a stall (a slow probe), start over rather than racing to catch up.
+		if (const auto now = std::chrono::steady_clock::now(); nextTick < now)
+			nextTick = now;
+		std::this_thread::sleep_until(nextTick);
 	}
 
 	std::cout << "Application update loop stopped" << std::endl;

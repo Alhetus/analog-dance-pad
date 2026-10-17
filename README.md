@@ -26,7 +26,7 @@ git submodule update --init --recursive
 ## Prerequisites
 
 You need **CMake ≥ 3.21** and a **C++20 compiler**. Dependencies (fmt,
-nlohmann-json, argparse, libzippp, and Catch2 for the tests) are fetched and
+nlohmann-json, argparse, and Catch2 for the tests) are fetched and
 built automatically by the bundled **vcpkg** submodule — you do **not** need to
 install vcpkg separately or set `VCPKG_ROOT`.
 

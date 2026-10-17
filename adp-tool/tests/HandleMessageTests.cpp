@@ -1,6 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <Model/Device.h>
+#include "WebsocketServer.h"
 
 using namespace adp;
 
@@ -33,4 +34,24 @@ TEST_CASE("HandleClientMessage only builds paths for known players", "[handlemes
 	CHECK(Device::HandleClientMessage("{\"listProfiles\":\"Mike\"}").empty());
 	CHECK(Device::HandleClientMessage("{\"pad\":\"x\",\"loadProfile\":{\"player\":\"Mike\",\"id\":\"a\"}}").empty());
 	CHECK_NOTHROW(Device::HandleClientMessage("{\"rescanPlayers\":true}"));
+}
+
+TEST_CASE("AccessAllowed checks the Origin allowlist and the token", "[websocket]")
+{
+	WebsocketAccess open;
+	CHECK(AccessAllowed(open, "http://evil.example", "/"));
+
+	WebsocketAccess origins;
+	origins.allowedOrigins = {"http://cab1:5173"};
+	CHECK(AccessAllowed(origins, "http://cab1:5173", "/"));
+	CHECK_FALSE(AccessAllowed(origins, "http://evil.example", "/"));
+	CHECK_FALSE(AccessAllowed(origins, "", "/"));
+
+	WebsocketAccess token;
+	token.token = "s3cret";
+	CHECK(AccessAllowed(token, "", "/?token=s3cret"));
+	CHECK(AccessAllowed(token, "", "/?a=1&token=s3cret&b=2"));
+	CHECK_FALSE(AccessAllowed(token, "", "/"));
+	CHECK_FALSE(AccessAllowed(token, "", "/?token=s3cretX"));
+	CHECK_FALSE(AccessAllowed(token, "", "/?xtoken=s3cret"));
 }

@@ -12,28 +12,54 @@ namespace adp
 // snapshots until it catches up (~2s of 60Hz snapshots for a few pads).
 constexpr size_t MAX_BUFFERED_BYTES = 256 * 1024;
 
+bool AccessAllowed(const WebsocketAccess& access, const std::string& origin, const std::string& uri)
+{
+	if (!access.allowedOrigins.empty() && !access.allowedOrigins.contains(origin))
+		return false;
+	if (access.token.empty())
+		return true;
+	// ?token=<t> anywhere in the query string.
+	const auto q = uri.find('?');
+	if (q == std::string::npos)
+		return false;
+	const std::string query = "&" + uri.substr(q + 1) + "&";
+	return query.find("&token=" + access.token + "&") != std::string::npos;
+}
+
 WebsocketServer::WebsocketServer() = default;
 WebsocketServer::~WebsocketServer() = default;
 
-void WebsocketServer::Init(MSGQ<QueueMessage>& queue, std::string host, std::atomic<bool>& running)
+void WebsocketServer::Init(MSGQ<QueueMessage>& queue, std::string host, WebsocketAccess access,
+                           std::atomic<bool>& running)
 {
 	constexpr int port = 8008;
 
 	auto srv = std::make_unique<ix::WebSocketServer>(port, host);
 
-	srv->setOnClientMessageCallback([this, &queue](const std::shared_ptr<ix::ConnectionState>& connectionState,
-	                                               ix::WebSocket& webSocket, const ix::WebSocketMessagePtr& msg) {
-		// The ConnectionState object contains information about the connection,
-		// at this point only the client ip address and the port.
-
+	srv->setOnClientMessageCallback([this, &queue, access](const std::shared_ptr<ix::ConnectionState>& connectionState,
+	                                                       ix::WebSocket& webSocket,
+	                                                       const ix::WebSocketMessagePtr& msg) {
 		if (msg->type == ix::WebSocketMessageType::Open)
 		{
-			std::printf("New connection from %s (id: %s), uri: %s\n", connectionState->getRemoteIp().c_str(),
-			            connectionState->getId().c_str(), msg->openInfo.uri.c_str());
+			const auto originIt = msg->openInfo.headers.find("Origin");
+			const std::string origin = originIt == msg->openInfo.headers.end() ? "" : originIt->second;
+			if (!AccessAllowed(access, origin, msg->openInfo.uri))
+			{
+				std::printf("Refused connection from %s (origin '%s')\n", connectionState->getRemoteIp().c_str(),
+				            origin.c_str());
+				webSocket.close(4003, "Forbidden");
+				return;
+			}
+			std::printf("New connection from %s (id: %s)\n", connectionState->getRemoteIp().c_str(),
+			            connectionState->getId().c_str());
 
-			// Current device list, pad states, players and lights, so the client
-			// doesn't wait for the next change to see them.
+			// Admit, then send the current device list, pad states, players and
+			// lights so the client doesn't wait for the next change to see them.
 			std::lock_guard<std::mutex> lock(replayMutex);
+			{
+				std::lock_guard<std::mutex> clientsLock(clientsMutex);
+				clients[&webSocket] = {connectionState->getId()};
+			}
 			for (const auto& [key, messages] : replay)
 				for (const auto& m : messages)
 					webSocket.send(m);
@@ -42,11 +68,16 @@ void WebsocketServer::Init(MSGQ<QueueMessage>& queue, std::string host, std::ato
 		{
 			std::printf("Client %s WebSocket disconnected, reason: %s\n", connectionState->getId().c_str(),
 			            msg->closeInfo.reason.c_str());
-			std::lock_guard<std::mutex> lock(subMutex);
-			subscriptions.erase(&webSocket);
+			std::lock_guard<std::mutex> lock(clientsMutex);
+			clients.erase(&webSocket);
 		}
 		else if (msg->type == ix::WebSocketMessageType::Message)
 		{
+			{
+				std::lock_guard<std::mutex> lock(clientsMutex);
+				if (!clients.contains(&webSocket))
+					return; // refused, still closing
+			}
 			// Avatars are file-only and can be MBs, so answer them here, to the
 			// asking client only, instead of on the device thread. The name is
 			// looked up in the scanned player list, never used as a path.
@@ -62,13 +93,13 @@ void WebsocketServer::Init(MSGQ<QueueMessage>& queue, std::string host, std::ato
 				}
 				if (j.is_object() && j.contains("subscribe") && j["subscribe"].is_string())
 				{
-					std::lock_guard<std::mutex> lock(subMutex);
-					subscriptions[&webSocket] = j["subscribe"].get<std::string>();
+					std::lock_guard<std::mutex> lock(clientsMutex);
+					clients[&webSocket].subscription = j["subscribe"].get<std::string>();
 					return;
 				}
 			}
 			// Enqueue the message by value; the device thread drains and applies it.
-			queue.push(QueueMessage(msg->str, &webSocket));
+			queue.push(QueueMessage(msg->str, connectionState->getId()));
 		}
 	});
 
@@ -87,7 +118,8 @@ void WebsocketServer::Init(MSGQ<QueueMessage>& queue, std::string host, std::ato
 
 	// Run the server in the background. Server can be stopped by calling Stop().
 	srv->start();
-	std::printf("Websocket server started on ws://%s:%d\n", host.c_str(), port);
+	std::printf("Websocket server started on ws://%s:%d%s\n", host.c_str(), port,
+	            access.token.empty() ? "" : " (token required)");
 
 	// Publish the owned server so other threads can broadcast, then block
 	// until Stop(). Our own condition (not ix's wait(), which misses a stop
@@ -106,17 +138,20 @@ void WebsocketServer::SendMessageToClients(const std::string& message)
 {
 	std::lock_guard<std::mutex> lock(serverMutex);
 	if (server == nullptr)
-	{
 		return;
-	}
 
 	for (const auto& socket : server->getClients())
 	{
+		{
+			std::lock_guard<std::mutex> clientsLock(clientsMutex);
+			if (!clients.contains(socket.get()))
+				continue;
+		}
 		socket->send(message);
 	}
 }
 
-void WebsocketServer::SendTo(const ix::WebSocket* client, const std::string& message)
+void WebsocketServer::SendTo(const std::string& clientId, const std::string& message)
 {
 	std::lock_guard<std::mutex> lock(serverMutex);
 	if (server == nullptr)
@@ -124,15 +159,20 @@ void WebsocketServer::SendTo(const ix::WebSocket* client, const std::string& mes
 
 	for (const auto& socket : server->getClients())
 	{
-		if (socket.get() == client)
+		std::lock_guard<std::mutex> clientsLock(clientsMutex);
+		auto it = clients.find(socket.get());
+		if (it != clients.end() && it->second.id == clientId)
+		{
 			socket->send(message);
+			return;
+		}
 	}
 }
 
 bool WebsocketServer::HasClients()
 {
-	std::lock_guard<std::mutex> lock(serverMutex);
-	return server != nullptr && !server->getClients().empty();
+	std::lock_guard<std::mutex> lock(clientsMutex);
+	return !clients.empty();
 }
 
 void WebsocketServer::Publish(const std::string& key, std::vector<std::string> messages)
@@ -152,9 +192,9 @@ void WebsocketServer::SendSnapshot(const std::string& pad, const std::string& me
 	for (const auto& socket : server->getClients())
 	{
 		{
-			std::lock_guard<std::mutex> subLock(subMutex);
-			auto it = subscriptions.find(socket.get());
-			if (it != subscriptions.end() && it->second != "*" && it->second != pad)
+			std::lock_guard<std::mutex> clientsLock(clientsMutex);
+			auto it = clients.find(socket.get());
+			if (it == clients.end() || (it->second.subscription != "*" && it->second.subscription != pad))
 				continue;
 		}
 		if (socket->bufferedAmount() > MAX_BUFFERED_BYTES)

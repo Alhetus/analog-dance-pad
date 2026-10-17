@@ -6,6 +6,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -14,6 +15,17 @@
 
 namespace adp
 {
+// Who may connect. Browsers don't apply the same-origin policy to WebSockets,
+// so without these any page a visitor opens on the LAN could drive the pads.
+struct WebsocketAccess
+{
+	std::set<std::string> allowedOrigins; // empty: any Origin
+	std::string token;                    // non-empty: required as ?token=<token>
+};
+
+// True if a connection with this Origin header and request URI may connect.
+bool AccessAllowed(const WebsocketAccess& access, const std::string& origin, const std::string& uri);
+
 class WebsocketServer
 {
   public:
@@ -23,13 +35,14 @@ class WebsocketServer
 	// Runs the server on `host` (e.g. "0.0.0.0" to accept phones/tablets on
 	// the LAN); blocks until Stop() is called. If the port can't be opened it
 	// clears `running` (so the whole process exits) and sets Failed().
-	void Init(MSGQ<QueueMessage>& queue, std::string host, std::atomic<bool>& running);
+	void Init(MSGQ<QueueMessage>& queue, std::string host, WebsocketAccess access, std::atomic<bool>& running);
 
 	// Broadcasts a message to all connected clients. Thread-safe.
 	void SendMessageToClients(const std::string& message);
 
-	// Sends a message to one client, if it is still connected. Thread-safe.
-	void SendTo(const ix::WebSocket* client, const std::string& message);
+	// Sends a message to one client (by connection id), if it is still
+	// connected. Thread-safe.
+	void SendTo(const std::string& clientId, const std::string& message);
 
 	// True if any client is connected. Thread-safe.
 	bool HasClients();
@@ -66,9 +79,18 @@ class WebsocketServer
 	std::mutex replayMutex;
 	std::map<std::string, std::vector<std::string>> replay;
 
-	// Pad each client watches; a client missing here watches all pads.
-	std::mutex subMutex;
-	std::map<const ix::WebSocket*, std::string> subscriptions;
+	// Admitted clients, added on open and removed on close. Only these get
+	// messages, so a refused connection receives nothing while it closes.
+	// Sockets are only ever reached through server->getClients() (which keeps
+	// them alive); the pointer is just the lookup key.
+	// Lock order: replayMutex -> serverMutex -> clientsMutex.
+	struct Client
+	{
+		std::string id;
+		std::string subscription = "*"; // pad path, "*" for all, "" for none
+	};
+	std::mutex clientsMutex;
+	std::map<const ix::WebSocket*, Client> clients;
 };
 } // namespace adp
 

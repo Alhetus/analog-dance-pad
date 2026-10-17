@@ -260,3 +260,42 @@ TEST_CASE("SendPadConfiguration never writes past the legacy sensor count", "[pa
 	CHECK(raw->sent[0].size() == sizeof(PadConfigurationReport));
 	CHECK(raw->sent[0][0] == REPORT_PAD_CONFIGURATION);
 }
+
+TEST_CASE("PollSensors skips a foreign report instead of disconnecting", "[paddevice]")
+{
+	RecordingBackend* raw = nullptr;
+	auto rep = makeReporter(raw);
+	PadDevice pad(rep, "t", makeName("x"), makeIdent(1, 0, 4, 2), {}, {}, {makeSensor(0, 400, 0)});
+
+	SensorValuesReport foreign;
+	foreign.reportId = REPORT_UNUSED_JOYSTICK;
+	raw->QueueRead(&foreign, sizeof(foreign), 3);
+
+	SensorValuesReport ours;
+	ours.sensorValues[0] = WriteU16LE(425);
+	raw->QueueRead(&ours, sizeof(ours), 1 + 2 + 2 * 2);
+	raw->QueueReadCount(0);
+
+	CHECK(pad.PollSensors());
+	CHECK(pad.Sensor(0)->value == Approx(0.5));
+
+	raw->QueueReadCount(-1);
+	CHECK_FALSE(pad.PollSensors());
+}
+
+TEST_CASE("SaveChanges keeps the change unsaved when the save fails", "[paddevice]")
+{
+	RecordingBackend* raw = nullptr;
+	auto rep = makeReporter(raw);
+	PadDevice pad(rep, "t", makeName("x"), makeIdent(1, 3, 8, 1), {}, {}, {makeSensor(0, 425, 0)});
+	CHECK(pad.SetThreshold(0, 0.7, 0.2));
+	REQUIRE(pad.HasUnsavedChanges());
+
+	raw->writeReturn = -1;
+	pad.SaveChanges();
+	CHECK(pad.HasUnsavedChanges());
+
+	raw->writeReturn.reset();
+	pad.SaveChanges();
+	CHECK_FALSE(pad.HasUnsavedChanges());
+}

@@ -23,9 +23,6 @@ find_package(argparse REQUIRED)
 # Third-party include directories are marked SYSTEM so that first-party
 # warnings-as-errors (ADP_WERROR) does not trip over warnings in vendored headers.
 include_directories(SYSTEM
-	"lib/avrdude"
-	"lib/argparse"
-	"lib/mbedtls"
 	"lib/ixwebsocket"
 )
 
@@ -34,14 +31,13 @@ set(GLOBAL_LIBS
 	fmt::fmt
 	nlohmann_json::nlohmann_json
 	ixwebsocket
+	argparse::argparse
 )
-
-list(APPEND GLOBAL_LIBS avrdude serial)
 
 if(WIN32 OR MINGW)
 	list(APPEND GLOBAL_LIBS setupapi ws2_32)
 elseif(APPLE)
-	# hidapi's mac backend and serial's list_ports_osx need these frameworks
+	# hidapi's mac backend needs these frameworks
 	# (the udev/X11 the Linux branch links do not exist on macOS).
 	list(APPEND GLOBAL_LIBS "-framework IOKit" "-framework CoreFoundation" "-framework AppKit")
 elseif(UNIX)
@@ -57,9 +53,7 @@ if(MSVC)
 	# bar below (-Wall -Wextra does NOT flag implicit narrowing; that needs
 	# -Wconversion, which we do not enable). C4244/C4267 are the pervasive,
 	# intentional narrowings in the packed HID wire structs.
-	# /wd4127 (constant conditional) is MSVC-only noise from the UTF-8 tables in
-	# Utils.cpp; GCC/Clang -Wall -Wextra do not flag it.
-	target_compile_options(adp_warnings INTERFACE /W4 /permissive- /wd4244 /wd4267 /wd4127)
+	target_compile_options(adp_warnings INTERFACE /W4 /permissive- /wd4244 /wd4267)
 	if(ADP_WERROR)
 		target_compile_options(adp_warnings INTERFACE /WX)
 	endif()
@@ -78,7 +72,6 @@ set(CORE_SOURCES
 	"src/Model/Players.cpp"
 	"src/Model/Profiles.cpp"
 	"src/Model/Reporter.cpp"
-	"src/Model/Utils.cpp"
 	"src/Application.cpp"
 	"src/WebsocketServer.cpp"
 )

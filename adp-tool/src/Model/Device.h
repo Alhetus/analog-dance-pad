@@ -115,7 +115,7 @@ struct VersionType
 	uint16_t major;
 	uint16_t minor;
 
-	bool IsNewer(VersionType then)
+	bool IsNewer(VersionType then) const
 	{
 		if (major > then.major)
 		{
@@ -163,15 +163,8 @@ class Device
 
 	static void Shutdown();
 
-	static DeviceChanges Update();
-
-	static int PollingRate();
-
-	static const PadState* Pad();
-
-	static const LightsState* Lights();
-
-	static const SensorState* Sensor(int sensorIndex);
+	// Polls every pad, then publishes their snapshots. Device-I/O thread only.
+	static void Update();
 
 	// Builds an immutable snapshot of every connected pad and publishes them
 	// atomically. Called on the device-I/O thread (from Update()).
@@ -207,46 +200,6 @@ class Device
 
 	// Returns true and clears the flag if any pad state changed since the last call.
 	static bool TakePadStatesDirty();
-
-	static std::string ReadDebug();
-
-	static bool HasUnsavedChanges();
-
-	static bool SetReleaseMode(ReleaseMode mode);
-
-	static bool SetThreshold(int sensorIndex, double threshold, double releaseThreshold);
-
-	static bool SetAdcConfig(int sensorIndex, int resistorValue);
-
-	static bool SetButtonMapping(int sensorIndex, int button);
-
-	static bool SetDeviceName(const char* name);
-
-	static bool SendLedMapping(int ledMappingIndex, LedMapping mapping);
-
-	static bool DisableLedMapping(int ledMappingIndex);
-
-	static bool SendLightRule(int lightRuleIndex, LightRule rule);
-
-	static bool DisableLightRule(int lightRuleIndex);
-
-	static void CalibrateSensor(int sensorIndex);
-
-	static void SendDeviceReset();
-
-	static void SendFactoryReset();
-
-	static void SaveChanges();
-
-	static int DeviceNumber();
-
-	static std::string GetDeviceName(int index);
-
-	static std::string GetDevicePath(int index);
-
-	static void LoadProfile(json& j, DeviceProfileGroups groups);
-
-	static void SaveProfile(json& j, DeviceProfileGroups groups);
 
 	// Root of this server's local profile store. Set once at startup.
 	static void SetProfilesDir(const std::filesystem::path& dir);

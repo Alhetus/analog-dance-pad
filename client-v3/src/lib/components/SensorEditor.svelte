@@ -25,13 +25,10 @@
 		onclose
 	}: Props = $props();
 
-	// Gain: higher % = more sensitivity = LOWER resistor byte.
-	// 100% -> byte 0, 0% -> byte 255 (inverted).
+	// Gain in raw digipot steps, so every one of the 256 is reachable: higher =
+	// more sensitivity = LOWER resistor byte (255 -> byte 0, 0 -> byte 255).
 	const clampPct = (p: number) => (p < 0 ? 0 : p > 100 ? 100 : p);
-	const pctToByte = (p: number) => Math.round(((100 - clampPct(p)) / 100) * 255);
-	const byteToPct = (b: number) => Math.round(((255 - b) / 255) * 100);
-
-	const gainPct = $derived(byteToPct(sensor.resistorValue));
+	const gain = $derived(255 - sensor.resistorValue);
 	const thresholdPct = $derived(Math.round(sensor.threshold * 100));
 	const releasePct = $derived(Math.round(sensor.releaseThreshold * 100));
 
@@ -113,7 +110,7 @@
 		{/snippet}
 
 		{#if gainEnabled}
-			{@render row('Gain', gainPct, '%', (p) => ongain(pctToByte(p)), 100)}
+			{@render row('Gain', gain, '', (g) => ongain(255 - g), 255)}
 		{/if}
 		{@render row('Threshold', thresholdPct, '%', (p) => onthreshold(clampPct(p) / 100), 100)}
 		{#if releaseEnabled}

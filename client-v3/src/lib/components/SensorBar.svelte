@@ -34,6 +34,23 @@
 	function onPointerMove(e: PointerEvent) {
 		if (dragging) onthreshold(valueFromPointer(e.clientY));
 	}
+	// Arrow keys nudge by 1%, Page Up/Down by 10%, Home/End to the ends.
+	function onKeyDown(e: KeyboardEvent) {
+		const step: Record<string, number> = {
+			ArrowUp: 0.01,
+			ArrowRight: 0.01,
+			ArrowDown: -0.01,
+			ArrowLeft: -0.01,
+			PageUp: 0.1,
+			PageDown: -0.1,
+			Home: -1,
+			End: 1
+		};
+		if (!(e.key in step)) return;
+		e.preventDefault();
+		e.stopPropagation(); // Space/Enter on the track open the editor; arrows don't
+		onthreshold(Math.min(1, Math.max(0, sensor.threshold + step[e.key])));
+	}
 	function onPointerUp(e: PointerEvent) {
 		dragging = false;
 		(e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
@@ -83,6 +100,7 @@
 			class="absolute inset-x-0 h-11 cursor-row-resize touch-none"
 			style="bottom: calc({pct(sensor.threshold)}% - 22px)"
 			onclick={(e) => e.stopPropagation()}
+			onkeydown={onKeyDown}
 			onpointerdown={onPointerDown}
 			onpointermove={onPointerMove}
 			onpointerup={onPointerUp}
