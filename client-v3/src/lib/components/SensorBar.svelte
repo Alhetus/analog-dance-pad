@@ -3,12 +3,13 @@
 
 	interface Props {
 		sensor: Sensor;
+		label: string; // the button's name, or "Button N"
 		releaseEnabled: boolean; // false in "None" mode: hide the release marker
 		onthreshold: (value: number) => void;
 		onedit: () => void;
 	}
 
-	let { sensor, releaseEnabled, onthreshold, onedit }: Props = $props();
+	let { sensor, label, releaseEnabled, onthreshold, onedit }: Props = $props();
 
 	let trackEl = $state<HTMLDivElement | null>(null);
 	let dragging = $state(false);
@@ -72,7 +73,7 @@
 		onclick={onedit}
 		role="button"
 		tabindex="0"
-		aria-label="Edit button {sensor.button}"
+		aria-label="Edit {label}"
 		onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && onedit()}
 	>
 		<!-- value fill -->
@@ -109,7 +110,7 @@
 			onpointerup={onPointerUp}
 			onpointercancel={onPointerUp}
 			role="slider"
-			aria-label="Threshold for button {sensor.button}"
+			aria-label="Threshold for {label}"
 			aria-valuemin={0}
 			aria-valuemax={100}
 			aria-valuenow={pct(sensor.threshold)}

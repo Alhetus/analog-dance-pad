@@ -502,3 +502,31 @@ TEST_CASE("A pad gone before its edits were saved is flagged until settings are 
 	REQUIRE(Server::Send({{"pad", "p2"}, {"sensors", json::array({{{"threshold", 0.3}}})}})["ok"] == true);
 	CHECK_FALSE(Server::PadState("p2").contains("editsLost"));
 }
+
+TEST_CASE("Buttons can be named, and the names follow a pad rename", "[deviceops]")
+{
+	Server server;
+	RecordingBackend* raw = server.AddPad("p1", "Cab1 P1");
+	auto name = [](int button, const char* n) {
+		return Server::Send({{"pad", "p1"}, {"buttonName", {{"button", button}, {"name", n}}}});
+	};
+
+	json r = name(1, " Left ");
+	CHECK(r["op"] == "renameButton");
+	REQUIRE(r["ok"] == true);
+	CHECK(r["name"] == "Left");
+	CHECK(Server::PadState("p1")["buttonNames"]["1"] == "Left");
+
+	CHECK(name(2, "←↓↑→←↓↑→")["ok"] == true); // 8 code points, 24 bytes
+	CHECK(name(2, "123456789")["error"] == "the name is longer than 8 characters");
+	CHECK(name(0, "x")["error"] == "unknown button");
+	CHECK(name(9, "x")["error"] == "unknown button"); // the fixture pad has 8
+	CHECK(Server::Send({{"pad", "p1"}, {"name", "x"}, {"buttonName", {{"button", 1}, {"name", "x"}}}})["ok"] == false);
+
+	CHECK(name(2, "  ")["ok"] == true); // blank clears
+	CHECK_FALSE(Server::PadState("p1")["buttonNames"].contains("2"));
+
+	raw->QueueGet(makeName("New"));
+	REQUIRE(Server::Send({{"pad", "p1"}, {"name", "New"}})["ok"] == true);
+	CHECK(Server::PadState("p1")["buttonNames"]["1"] == "Left");
+}

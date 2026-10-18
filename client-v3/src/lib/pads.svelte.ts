@@ -83,6 +83,8 @@ export interface PadState {
 	recent?: string[];
 	/** The pad was unplugged before its last edits were saved: it came back with older settings. */
 	editsLost?: boolean;
+	/** Display names of the pad's buttons, keyed by 1-based button number. */
+	buttonNames?: Record<string, string>;
 }
 
 /** A stored profile (msgType 6). Captures thresholds+release, gain and lights. */
@@ -106,6 +108,7 @@ export type Op =
 	| 'updateProfile'
 	| 'deleteProfile'
 	| 'rename'
+	| 'renameButton'
 	| 'setReleaseMode'
 	| 'configure';
 
@@ -115,7 +118,7 @@ export interface OpResult {
 	pad: string;
 	ok: boolean;
 	error: string; // '' when ok
-	name: string; // the profile's (or, for rename, the pad's) name, when there is one
+	name: string; // the profile's (or, for rename/renameButton, the pad's/button's) name, when there is one
 }
 
 /** A short-lived message for the user, e.g. an op result. */
@@ -531,6 +534,16 @@ class PadsStore {
 		return this.pad ? this.padStateOf(this.pad) : undefined;
 	}
 
+	/** The selected pad's name for `button`, if it has one. */
+	buttonName(button: number): string | undefined {
+		return this.padState?.buttonNames?.[button];
+	}
+
+	/** `button`'s name, else "Button N". */
+	buttonLabel(button: number): string {
+		return this.buttonName(button) ?? `Button ${button}`;
+	}
+
 	/** Why the selected server can't be used by this page, if it can't. */
 	get protocolError(): string | null {
 		return this.conn?.protocolError ?? null;
@@ -792,6 +805,11 @@ class PadsStore {
 		this.#sendPad({ name });
 	}
 
+	/** Names a button for display; '' clears it (back to its number). */
+	setButtonName(button: number, name: string) {
+		this.#sendPad({ buttonName: { button, name } });
+	}
+
 	/** Release mode: 0 none, 2 per-sensor. */
 	setReleaseMode(mode: number) {
 		this.#sendPad({ releaseMode: mode });
@@ -895,6 +913,7 @@ const OP_VERBS: Record<Op, string> = {
 	updateProfile: 'rename the profile',
 	deleteProfile: 'delete the profile',
 	rename: 'rename the pad',
+	renameButton: 'name the button',
 	setReleaseMode: 'change the release mode',
 	configure: 'apply the change'
 };
@@ -906,6 +925,7 @@ const OP_DONE: Record<Op, (name: string) => string> = {
 	updateProfile: (n) => `Renamed to ${n}`,
 	deleteProfile: () => 'Profile deleted',
 	rename: (n) => `Pad renamed to ${n}`,
+	renameButton: (n) => (n ? `Button named ${n}` : 'Button name cleared'),
 	setReleaseMode: () => 'Release mode changed',
 	configure: () => 'Applied'
 };

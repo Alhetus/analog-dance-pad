@@ -52,6 +52,18 @@
 		nameDraft = null;
 	}
 
+	// Button names: the server takes at most 8 code points (a narrow box on a phone).
+	const MAX_BUTTON_NAME = 8;
+	let buttonDrafts = $state<Record<number, string>>({});
+
+	function commitButtonName(b: number) {
+		const draft = buttonDrafts[b];
+		if (draft === undefined) return;
+		const name = Array.from(draft.trim()).slice(0, MAX_BUTTON_NAME).join('');
+		if (name !== (pads.buttonName(b) ?? '')) pads.setButtonName(b, name);
+		delete buttonDrafts[b];
+	}
+
 	const releaseModes = [
 		{ v: '0', label: 'None' },
 		{ v: '2', label: 'Per-sensor' }
@@ -81,12 +93,14 @@
 			onValueChange={(v) => v && pads.setButton(m.index, Number(v))}
 		>
 			<Select.Trigger class="w-28 shrink-0"
-				>{m.sensor.button > 0 ? `Button ${m.sensor.button}` : 'Off'}</Select.Trigger
+				>{m.sensor.button > 0 ? pads.buttonLabel(m.sensor.button) : 'Off'}</Select.Trigger
 			>
 			<Select.Content>
 				<Select.Item value="0" label="Off">Off</Select.Item>
 				{#each buttonOptions as b (b)}
-					<Select.Item value={String(b)} label="Button {b}">Button {b}</Select.Item>
+					<Select.Item value={String(b)} label={pads.buttonLabel(b)}
+						>{pads.buttonLabel(b)}</Select.Item
+					>
 				{/each}
 			</Select.Content>
 		</Select.Root>
@@ -151,7 +165,9 @@
 		<div class="flex flex-col gap-2">
 			<h2 class="text-lg font-semibold">Button mapping</h2>
 			<p class="text-muted-foreground text-sm">
-				Assign each sensor to a button. Sensors set to <em>Off</em> are unassigned and don't trigger anything.
+				Assign each sensor to a button. Sensors set to <em>Off</em> are unassigned and don't trigger
+				anything. Name a button (up to {MAX_BUTTON_NAME} characters, e.g. ←) to show that instead of its
+				number; clear the name to go back to the number.
 			</p>
 		</div>
 
@@ -165,7 +181,17 @@
 				{#each buttonOptions as b (b)}
 					<Card.Root>
 						<Card.Header>
-							<Card.Title class="text-base">Button {b}</Card.Title>
+							<Card.Title class="text-base">
+								<Input
+									value={buttonDrafts[b] ?? pads.buttonName(b) ?? ''}
+									placeholder="Button {b}"
+									aria-label="Name of button {b}"
+									oninput={(e) => (buttonDrafts[b] = str(e))}
+									onblur={() => commitButtonName(b)}
+									onkeydown={(e) => e.key === 'Enter' && e.currentTarget.blur()}
+									class="h-8 w-40"
+								/>
+							</Card.Title>
 						</Card.Header>
 						<Card.Content class="flex flex-col gap-2">
 							{#each groups.byButton[b] as m (m.index)}

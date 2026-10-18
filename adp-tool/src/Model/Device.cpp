@@ -977,6 +977,9 @@ static std::string BadText(const json& op)
 	return "";
 }
 
+// Longest button name, in code points: it has to fit a narrow box on a phone.
+static constexpr int MAX_BUTTON_NAME = 8;
+
 static constexpr const char* PROFILE_OPS[] = {"loadProfile", "saveProfile", "importProfile", "updateProfile",
                                               "deleteProfile"};
 
@@ -990,6 +993,7 @@ static int OpCount(const json& j)
 		n += j.contains(key);
 	n += j.contains("releaseMode");
 	n += j.contains("name");
+	n += j.contains("buttonName");
 	n += j.contains("sensors") || j.contains("lightRules") || j.contains("ledMappings");
 	return n;
 }
@@ -1005,6 +1009,8 @@ static std::string OpNameOf(const json& j)
 		return "setReleaseMode";
 	if (j.contains("name"))
 		return "rename";
+	if (j.contains("buttonName"))
+		return "renameButton";
 	if (j.contains("sensors") || j.contains("lightRules") || j.contains("ledMappings"))
 		return "configure";
 	return "";
@@ -1380,6 +1386,34 @@ static std::vector<ClientReply> HandleClientMessageImpl(const json& j, OpContext
 		if (mode != RELEASE_NONE && mode != RELEASE_INDIVIDUAL)
 			return done(false, "unknown release mode");
 		return device->SetReleaseMode((ReleaseMode)mode) ? done(true, "") : done(false, "the pad didn't accept it");
+	}
+
+	// Names a button for display: {pad, buttonName:{button, name}}, a blank name
+	// clears it. Kept in the pad's state, so it follows pad renames.
+	if (opName == "renameButton")
+	{
+		const json& b = j["buttonName"];
+		if (!b.is_object() || !b.contains("button") || !b["button"].is_number_integer() || !HasString(b, "name"))
+			return done(false, "needs a button and a name");
+		const int64_t button = b["button"].get<int64_t>();
+		if (button < 1 || button > device->State().numButtons)
+			return done(false, "unknown button");
+		if (OtherPadNamed(device, padName))
+			return done(false, fmt::format("another pad here is also named '{}', rename one first", padName));
+		std::string name = Profiles::ValidUtf8(b["name"].get<std::string>());
+		name.erase(0, name.find_first_not_of(" \t"));
+		name.erase(name.find_last_not_of(" \t") + 1);
+		if (std::count_if(name.begin(), name.end(), [](char c) { return (c & 0xC0) != 0x80; }) > MAX_BUTTON_NAME)
+			return done(false, fmt::format("the name is longer than {} characters", MAX_BUTTON_NAME));
+		json& st = PadStateFor(padName);
+		if (!st.contains("buttonNames") || !st["buttonNames"].is_object())
+			st["buttonNames"] = json::object();
+		if (name.empty())
+			st["buttonNames"].erase(std::to_string(button));
+		else
+			st["buttonNames"][std::to_string(button)] = name;
+		SavePadState(padName);
+		return done(true, "", name);
 	}
 
 	// A rename. Profiles and pad state are keyed by pad name and move along.

@@ -177,6 +177,7 @@
 	<SensorEditor
 		sensor={editing.sensor}
 		index={editing.index}
+		label={pads.buttonLabel(editing.sensor.button)}
 		releaseEnabled={pads.releaseEnabled}
 		gainEnabled={pads.device?.featureDigipot ?? false}
 		onthreshold={(v) => pads.setThreshold(editing.index, v)}

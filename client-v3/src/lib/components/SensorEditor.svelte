@@ -6,6 +6,7 @@
 	interface Props {
 		sensor: Sensor; // optimistic-overlaid values
 		index: number; // snapshot sensor index
+		label: string; // the button's name, or "Button N"
 		releaseEnabled: boolean; // false in "None" mode: hide the release slider
 		gainEnabled: boolean; // false unless the pad has a digipot (featureDigipot)
 		onthreshold: (value: number) => void; // 0..1
@@ -17,6 +18,7 @@
 	let {
 		sensor,
 		index,
+		label,
 		releaseEnabled,
 		gainEnabled,
 		onthreshold,
@@ -49,7 +51,7 @@
 	<div class="flex flex-col gap-5">
 		<header class="flex items-center justify-between">
 			<h2 class="text-lg font-semibold">
-				Sensor {index} · Button {sensor.button}
+				Sensor {index} · {label}
 			</h2>
 			<Button variant="ghost" size="sm" onclick={() => dialogEl?.close()}>Done</Button>
 		</header>
